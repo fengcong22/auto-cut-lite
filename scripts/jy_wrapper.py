@@ -11,6 +11,7 @@ import os
 import shutil
 import stat
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -2371,9 +2372,15 @@ def cmd_revision_run(
     *,
     doc_items_json: str = None,
     strict: bool = False,
+    workflow_mode: str = None,
 ) -> Dict[str, Any]:
     try:
         request = load_revision_request(request_json)
+        if workflow_mode is not None:
+            normalized_workflow_mode = str(workflow_mode).strip().lower()
+            if normalized_workflow_mode not in {"full", "lite"}:
+                raise ValueError("workflow_mode must be either 'full' or 'lite'.")
+            request = replace(request, workflow_mode=normalized_workflow_mode)
         doc_items = load_review_items_json(doc_items_json) if doc_items_json else None
         result = execute_revision_request(
             request,
@@ -2438,6 +2445,7 @@ def _build_command_handlers():
             args.mock_media,
             doc_items_json=args.doc_items_json,
             strict=args.strict,
+            workflow_mode=args.workflow_mode,
         ),
         "review-job-compile": lambda args: cmd_review_job_compile(
             args.snapshot_json,

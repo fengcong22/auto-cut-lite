@@ -2,6 +2,10 @@
 
 Use this catalog to choose the focused repository skill for a user request. Prefer the smallest skill set that covers the task.
 
+`auto-cut-high-school-history-lite` is the explicit compact subject entrypoint. It sets
+`workflow_mode=lite` and reuses the canonical router with a non-destructive fixed-track draft
+contract. Unspecified mode remains the full workflow.
+
 ## Installation and Invocation
 
 Install or refresh the bundled skills from the repository root:
@@ -22,6 +26,7 @@ The three supported invocation modes are:
 | Skill | 中文说明 | Use when |
 | --- | --- | --- |
 | `auto-cut` | 总入口和路由器。用户不知道该用哪个 skill、请求混合多个剪映能力，或要求完整工程/可迁移工程时使用。 | Natural-language routing, skill selection, full repository workflow, complete project delivery |
+| `auto-cut-high-school-history-lite` | 高中历史精简版。保持原视频时长，以固定 V1-V4/A1-A2 轨道记录切点、素材和时序复用；删除意见只切不删，标签原文置顶 2 秒，指向物不加动画或自动缩放。 | “高中历史 Auto-Cut 精简版”、“精简版 Auto-Cut”、“只切不删” |
 | `auto-cut-basic-oral-video` | 基础口播视频风格。规定节奏、BGM 气质、花字、字幕、音效、调色和默认人声音量目标。 | “基础口播视频”, standard oral-video style, similar pacing/style |
 | `auto-cut-editable-ad-revision` | 可编辑广告/口播草稿修订。用于换 BGM、移动花字/字幕、去黄提亮、避免重叠，同时保持可编辑。 | BGM/text/color revisions on editable ad drafts |
 | `auto-cut-revision-draft` | 审片意见驱动的可追踪修订。强调保留素材、切口、分离音频和独立修改标记；当用户要求从新素材/干净基线重做时，禁止继承旧标注。 | Review comments, second-stage manual editing, edit traceability, clean source baseline |

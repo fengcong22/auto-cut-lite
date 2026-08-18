@@ -1142,6 +1142,18 @@ def execute_revision_request(
         Callable[[Any, RevisionRequest, Dict[str, Any]], RevisionRequest]
     ] = None,
 ) -> Dict[str, Any]:
+    if request.workflow_mode == "lite":
+        from utils.lite_revision import execute_lite_revision_request
+
+        return execute_lite_revision_request(
+            request,
+            drafts_root=drafts_root,
+            mock_media=mock_media,
+            strict=strict,
+            doc_items=doc_items,
+            acceptance_repair_callback=acceptance_repair_callback,
+        )
+
     request = normalize_pause_adjustments(request)
     ui_policy = _derive_revision_ui_policy(request, doc_items=doc_items)
     _validate_revision_execution_preflight(request, doc_items)

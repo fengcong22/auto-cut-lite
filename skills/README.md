@@ -26,6 +26,8 @@
 ## Current Bundle
 
 - `auto-cut`: repository-level router for natural-language selection and mixed requests
+- `auto-cut-high-school-history-lite`: 高中历史 non-destructive compact workflow with fixed
+  trace tracks, two-second verbatim labels, simple visual placement, and unchanged duration
 - `auto-cut-basic-oral-video`: 基础口播视频 style rules
 - `auto-cut-editable-ad-revision`: editable ad/oral-video revision rules
 - `auto-cut-revision-draft`: review-driven revision with traceability, visible cut preservation, and clean source-baseline handling

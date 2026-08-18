@@ -11,9 +11,11 @@
       "required_paths": [
         "scripts/core/review_marker_ops.py",
         "scripts/utils/revision_evidence.py",
+        "scripts/utils/lite_revision.py",
         "scripts/utils/revision_markers.py",
         "scripts/utils/revision_runner.py",
         "scripts/utils/revision_validation.py",
+        "tests/test_lite_revision.py",
         "tests/test_revision_markers.py",
         "tests/test_segmented_audio_delivery.py"
       ],
@@ -24,7 +26,7 @@
         {"name": "JianYingPro.exe", "disposition": "required_local"},
         {"name": "powershell", "disposition": "platform_provided"}
       ],
-      "verification_command": "python -m pytest tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q"
+      "verification_command": "python -m pytest tests/test_lite_revision.py tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q"
     },
     {
       "id": "auto_cut_skills",
@@ -41,6 +43,7 @@
         "skills/auto-cut-editable-ad-revision/SKILL.md",
         "skills/auto-cut-favorite-text-assets/SKILL.md",
         "skills/auto-cut-final-acceptance/SKILL.md",
+        "skills/auto-cut-high-school-history-lite/SKILL.md",
         "skills/auto-cut-local-image-overlay-revision/SKILL.md",
         "skills/auto-cut-music-library-bgm/SKILL.md",
         "skills/auto-cut-pointer-targeting/SKILL.md",

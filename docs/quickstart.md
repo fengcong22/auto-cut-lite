@@ -35,7 +35,7 @@ flag to force the verified local wheelhouses. No AppContainer or physical
 network disconnect is required for either choice.
 
 The command creates `.venv`, installs `requirements.txt`, copies and verifies
-all 16 Auto-Cut skill trees, installs and launch-tests Playwright Chromium,
+all 17 Auto-Cut skill trees, installs and launch-tests Playwright Chromium,
 verifies a recorded artifact, creates the isolated Python 3.11 `.venv-audio`,
 checks FFmpeg/FFprobe, runs the real audio doctor, and runs the JianYing
 self-check. The structured local report is `tmp/install/install-report.json`.

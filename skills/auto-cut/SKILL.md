@@ -7,6 +7,10 @@ description: Use when the user asks in natural language to make, revise, validat
 
 Use this as the stable repository-level entrypoint for Auto-Cut. It routes natural-language JianYing editing requests to the smallest useful set of `auto-cut-*` subskills, then executes through the repository tools and validation rules.
 
+`auto-cut-high-school-history-lite` is the explicit compact subject entrypoint. It sets
+`workflow_mode=lite`, declares `stage=高中` and `subject=历史`, and returns to this router. The
+existing high-school-history entrypoint and unspecified mode continue to use the full workflow.
+
 ## Three Supported Invocation Modes
 
 1. Natural language mode:
@@ -51,6 +55,8 @@ Read [references/skill-catalog.md](references/skill-catalog.md) when selecting a
 
 Default routing:
 
+- Explicit “高中历史 Auto-Cut 精简版”, “精简版 Auto-Cut”, or `workflow_mode=lite`:
+  `auto-cut-high-school-history-lite`
 - New short oral-video draft or “基础口播视频”: `auto-cut-basic-oral-video`
 - Editable ad/oral-video revision with BGM, subtitles, flower text, overlap, color, or retention: `auto-cut-editable-ad-revision`
 - Review-driven draft revision where edit traceability matters: `auto-cut-revision-draft`
@@ -88,6 +94,8 @@ For mixed tasks, route ordinary pointer work to `auto-cut-pointer-targeting` fir
 ## Repository Contract
 
 - Treat `skills/` as the source of truth for repository skills.
+- Keep `workflow_mode=full` as the default. Lite mode must be explicit and must never silently
+  alter or weaken the full workflow.
 - Keep the total router small; put detailed domain rules in focused `auto-cut-*` subskills.
 - Do not duplicate conflicting rules across skills. Update the smallest responsible skill.
 - Prefer repository tools such as `scripts/jy_wrapper.py`, `scripts/draft_inspector.py`, and maintained project scripts over ad hoc JSON edits.

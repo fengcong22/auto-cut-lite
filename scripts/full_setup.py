@@ -48,7 +48,7 @@ except ModuleNotFoundError:
         sha256_file as offline_sha256_file,
     )
 
-EXPECTED_SKILL_COUNT = 16
+EXPECTED_SKILL_COUNT = 17
 INSTALLER_VERSION = "1.7.0"
 INSTALL_REPORT_RELATIVE_PATH = Path("tmp") / "install" / "install-report.json"
 OFFLINE_RUNTIME_RELATIVE_PATH = Path("tmp") / "offline-runtime"

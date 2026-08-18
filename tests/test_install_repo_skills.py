@@ -31,7 +31,7 @@ def stage_repo_skills(base: Path, names: list[str]) -> tuple[Path, Path]:
 
 
 class InstallRepoSkillsTests(unittest.TestCase):
-    def test_repository_skill_set_stays_exactly_at_sixteen(self) -> None:
+    def test_repository_skill_set_stays_exactly_at_seventeen(self) -> None:
         expected = {
             "auto-cut",
             "auto-cut-animation-timing-revision",
@@ -42,6 +42,7 @@ class InstallRepoSkillsTests(unittest.TestCase):
             "auto-cut-editable-ad-revision",
             "auto-cut-favorite-text-assets",
             "auto-cut-final-acceptance",
+            "auto-cut-high-school-history-lite",
             "auto-cut-local-image-overlay-revision",
             "auto-cut-music-library-bgm",
             "auto-cut-pointer-targeting",
@@ -54,7 +55,7 @@ class InstallRepoSkillsTests(unittest.TestCase):
         names = {path.name for path in installer.discover_repo_skills(installer.REPO_SKILLS_ROOT)}
 
         self.assertEqual(names, expected)
-        self.assertEqual(len(names), 16)
+        self.assertEqual(len(names), 17)
 
     def test_discover_repo_skills_finds_skill_dirs(self) -> None:
         skills = installer.discover_repo_skills(installer.REPO_SKILLS_ROOT)

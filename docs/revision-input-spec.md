@@ -71,6 +71,7 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 
 ```json
 {
+  "workflow_mode": "full",
   "project": {
     "draft_name": "ReviewDraft",
     "source_video": "<media-root>/source.mp4",
@@ -149,6 +150,19 @@ After the exact profile is ready and the user has confirmed the applicable bind 
   }
 }
 ```
+
+## Workflow Mode
+
+- `workflow_mode=full` is the default and preserves the existing full-capability behavior.
+- `workflow_mode=lite` selects the High School History compact workflow. It keeps the source
+  duration unchanged, preserves a complete `Original Video` plus `Separated Source Audio`, writes
+  delete ranges to `Lite Cut Segments`, simple downloaded assets to `Lite Visual Assets`, timing
+  copies to `Lite Timing Adjusted`, and only requested reused source audio to `Lite Reused Audio`.
+- In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
+  Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
+  visual assets.
+- Lite review labels use source text verbatim, start at the edit time, remain in the top safe band,
+  and last `2s` unless clamped by the unchanged project end.
 
 ## Required Fields
 

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 高中历史精简版"
+  short_description: "非破坏性精简剪辑：固定轨道、只切不删、原文标签、按需复用音频"
+  default_prompt: "Use $auto-cut-high-school-history-lite to create this non-destructive editable JianYing revision draft with workflow_mode=lite."
+
+policy:
+  allow_implicit_invocation: true

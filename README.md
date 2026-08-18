@@ -36,7 +36,7 @@ two modes are selected explicitly and do not require AppContainer or a
 physically disconnected machine.
 
 The installer creates `.venv`, installs `requirements.txt`, installs and
-hash-verifies all 16 repository-local Auto-Cut skills, installs and launches
+hash-verifies all 17 repository-local Auto-Cut skills, installs and launches
 Playwright Chromium, verifies recording output, creates the isolated Python
 3.11 `.venv-audio`, runs the real audio doctor, checks FFmpeg/FFprobe, and runs
 the JianYing editable-draft self-check. Results are written to

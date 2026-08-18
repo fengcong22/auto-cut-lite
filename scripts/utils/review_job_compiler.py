@@ -425,6 +425,10 @@ def _normalize_project(project: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("source_audio", "")
     normalized.setdefault("replacement_audio", "")
     normalized.setdefault("project_key", "")
+    workflow_mode = str(normalized.get("workflow_mode") or "full").strip().lower()
+    if workflow_mode not in {"full", "lite"}:
+        raise ValueError("project.workflow_mode must be either 'full' or 'lite'")
+    normalized["workflow_mode"] = workflow_mode
     return normalized
 
 
@@ -477,6 +481,7 @@ def _request_model(
         preserve=PreservationRules(),
         review_items=model_items,
         acceptance=rules,
+        workflow_mode=str(project.get("workflow_mode") or "full"),
     )
     return request, model_items
 
@@ -506,17 +511,25 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     document = _document_identity(snapshot_copy)
     review_items, warnings = _canonical_review_items(source_rows)
     normalized_project = _normalize_project(project_copy)
+    workflow_mode = str(normalized_project.get("workflow_mode") or "full")
 
     acceptance = _acceptance_payload(review_items)
     provisional_request, model_items = _request_model(normalized_project, review_items, acceptance)
     provisional_profile = derive_acceptance_profile(provisional_request, doc_items=model_items)
     enabled_gates = set(provisional_profile["enabled_gates"])
-    requires_segmented_audio = bool({"audio_precision", "audio_join"}.intersection(enabled_gates))
-    acceptance["require_audio_validation"] = bool({"audio_precision", "audio_join"} & enabled_gates)
+    lite_mode = workflow_mode == "lite"
+    requires_segmented_audio = (
+        False if lite_mode else bool({"audio_precision", "audio_join"}.intersection(enabled_gates))
+    )
+    acceptance["require_audio_validation"] = (
+        False if lite_mode else bool({"audio_precision", "audio_join"} & enabled_gates)
+    )
     acceptance["require_visual_evidence"] = "visual" in enabled_gates
-    acceptance["require_pause_validation"] = "pause_fit" in enabled_gates
-    acceptance["require_subject_pointer_binding"] = "pointer" in enabled_gates
-    acceptance["require_pointer_lifecycle_evidence"] = "pointer" in enabled_gates
+    acceptance["require_pause_validation"] = False if lite_mode else "pause_fit" in enabled_gates
+    acceptance["require_subject_pointer_binding"] = False if lite_mode else "pointer" in enabled_gates
+    acceptance["require_pointer_lifecycle_evidence"] = (
+        False if lite_mode else "pointer" in enabled_gates
+    )
     request_model, model_items = _request_model(normalized_project, review_items, acceptance)
     acceptance_profile = derive_acceptance_profile(request_model, doc_items=model_items)
 
@@ -534,6 +547,7 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     }
     revision_request_payload = {
         "schema_version": _SCHEMA_VERSION,
+        "workflow_mode": workflow_mode,
         "document": document,
         "project": normalized_project,
         "edits": [],

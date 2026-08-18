@@ -52,7 +52,7 @@ from scripts.utils.jianying_smoke import (
     smoke_editability_receipt_valid,
 )
 
-EXPECTED_SKILL_COUNT = 16
+EXPECTED_SKILL_COUNT = 17
 MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 OFFLINE_PLAYWRIGHT_FFMPEG_REVISION = "1011"
 OFFLINE_PLAYWRIGHT_WINLDD_REVISION = "1007"

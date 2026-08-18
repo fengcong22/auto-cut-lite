@@ -13,7 +13,7 @@
       "requires_user_authorization": false,
       "requires_user_assets": false,
       "unavailable": false,
-      "verification_command": "python -m pytest tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q",
+      "verification_command": "python -m pytest tests/test_lite_revision.py tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q",
       "actual_result": {
         "status": "ready",
         "code": "bundled_contract_verified",
@@ -22,7 +22,7 @@
     },
     {
       "id": "auto_cut_skills",
-      "label": "16 repository-local Auto-Cut skills",
+      "label": "17 repository-local Auto-Cut skills",
       "description": "Installs repository skills locally and verifies every installed file against the bundled source tree.",
       "bundled": true,
       "installed_on_first_run": true,
@@ -34,7 +34,7 @@
       "actual_result": {
         "status": "ready",
         "code": "bundled_source_verified",
-        "summary": "Sixteen source skill trees are bundled for target-local installation."
+        "summary": "Seventeen source skill trees are bundled for target-local installation."
       }
     },
     {

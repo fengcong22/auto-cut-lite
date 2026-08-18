@@ -133,6 +133,7 @@ class RevisionRequest:
     pause_adjustments: List[PauseAdjustment] = field(default_factory=list)
     pause_alignment: Dict[str, Any] = field(default_factory=dict)
     audio_delivery_plan: AudioDeliveryPlan = field(default_factory=AudioDeliveryPlan)
+    workflow_mode: str = "full"
 
 
 def _as_float(value: Any, field_name: str) -> float:
@@ -862,6 +863,10 @@ def load_revision_request(path: str) -> RevisionRequest:
     if not isinstance(pause_alignment_payload, dict):
         raise ValueError("pause_alignment must be an object.")
 
+    workflow_mode = str(payload.get("workflow_mode") or "full").strip().lower()
+    if workflow_mode not in {"full", "lite"}:
+        raise ValueError("workflow_mode must be either 'full' or 'lite'.")
+
     return RevisionRequest(
         project=project,
         edits=edits,
@@ -877,6 +882,7 @@ def load_revision_request(path: str) -> RevisionRequest:
         pause_adjustments=pause_adjustments,
         pause_alignment=dict(pause_alignment_payload),
         audio_delivery_plan=audio_delivery_plan,
+        workflow_mode=workflow_mode,
     )
 
 
@@ -920,6 +926,7 @@ def build_revision_summary(
     return {
         "draft_name": request.project.draft_name,
         "project_key": request.project.project_key,
+        "workflow_mode": request.workflow_mode,
         "edit_count": len(request.edits),
         "review_item_count": len(doc_items if doc_items is not None else request.review_items),
         "review_marker_count": len(marker_plan),

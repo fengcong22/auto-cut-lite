@@ -33,6 +33,7 @@ tmp/
 .worktrees/
 data/*.local.csv
 data/subject-pointer-profiles.local/
+data/private-assets-high-school-history.restored/
 data/auto-cut-notifications.local.json
 data/.auto-cut-notifications.local.json.*.tmp
 data/auto-cut-notification-receipts.local/

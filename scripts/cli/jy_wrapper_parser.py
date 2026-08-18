@@ -225,6 +225,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use mock media material objects for dry-run or tests",
     )
     p_revision_run.add_argument(
+        "--workflow-mode",
+        choices=("full", "lite"),
+        default=None,
+        help="Override the request workflow mode for this run",
+    )
+    p_revision_run.add_argument(
         "--json", action="store_true", help="Print machine-readable JSON response"
     )
 
