@@ -1,0 +1,4 @@
+# JianYing favorite or cached text templates
+# Baseline examples tracked in git. Machine-local sync output goes to favorite_text_templates.local.csv.
+identifier,name,title,description,resource_id,effect_id,source,source_detail,favorite_flag,favorite_time,categories
+7425607373227658559,收藏夹模板白名单草稿,收藏夹模板白名单草稿,Text template observed in local draft,7425607373227658559,7425607373227658559,draft_scan,收藏夹模板白名单草稿,1,,draft|收藏夹模板白名单草稿

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 剪映曲库 BGM"
+  short_description: "按视频画面、节奏和风格从剪映音乐库匹配 BGM，禁止本地音频兜底"
+  default_prompt: "Use $auto-cut-music-library-bgm to choose or validate a JianYing music-library BGM for this editable draft."
+
+policy:
+  allow_implicit_invocation: true

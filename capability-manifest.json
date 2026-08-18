@@ -1,0 +1,347 @@
+{
+  "$schema": "schemas/capability-manifest.schema.json",
+  "schema_version": 1,
+  "release_version": "1.7.0",
+  "capabilities": [
+    {
+      "id": "editable_draft_contract",
+      "label": "Editable JianYing revision contract",
+      "description": "Preserves source media, separated audio, visible cuts, exact review markers, and final acceptance gates.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": true,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python -m pytest tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q",
+      "actual_result": {
+        "status": "ready",
+        "code": "bundled_contract_verified",
+        "summary": "The editable-draft source and acceptance contracts are bundled."
+      }
+    },
+    {
+      "id": "auto_cut_skills",
+      "label": "16 repository-local Auto-Cut skills",
+      "description": "Installs repository skills locally and verifies every installed file against the bundled source tree.",
+      "bundled": true,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python scripts/install_repo_skills.py --list",
+      "actual_result": {
+        "status": "ready",
+        "code": "bundled_source_verified",
+        "summary": "Sixteen source skill trees are bundled for target-local installation."
+      }
+    },
+    {
+      "id": "main_python_dependencies",
+      "label": "Main Python dependencies",
+      "description": "Creates the main .venv and installs requirements.txt either online or from the verified Windows x64 CPython 3.11 offline companion.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts\\full_setup.py --probe-main-imports --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "Packages and their import probe run on the target computer; offline mode is fail-closed and uses only the verified wheelhouse."
+      }
+    },
+    {
+      "id": "playwright_chromium",
+      "label": "Playwright Chromium",
+      "description": "Installs pinned Playwright 1.52.0 Chromium revision 1169, recording FFmpeg revision 1011, and WinLDD revision 1007 under MIT and Apache-2.0 terms; persists the browser store at tmp/offline-runtime/browsers; and performs a real headless launch plus record_video_dir artifact probe.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python scripts/full_setup.py --skip-dependencies --skip-audio --skip-jianying-check --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "Chromium launch and record_video_dir output are verified on the target computer through the persisted browser store; offline mode performs no browser download."
+      }
+    },
+    {
+      "id": "jianying_smoke_draft",
+      "label": "JianYing editable-draft smoke test",
+      "description": "Detects the local JianYing installation, writes an editable smoke draft, and requests cleanup.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": true,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python scripts/jy_wrapper.py self-check --cleanup --refresh --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_local_jianying",
+        "summary": "Readiness depends on a compatible JianYing installation on the target computer."
+      }
+    },
+    {
+      "id": "favorite_text_assets",
+      "label": "Favorite flower-text and text-template assets",
+      "description": "Rebuilds indexes from the target user's own JianYing favorites and local caches.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": true,
+      "requires_user_authorization": false,
+      "requires_user_assets": true,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py favorites-sync --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_user_resync",
+        "summary": "Target-local favorite assets are never copied from the build computer."
+      }
+    },
+    {
+      "id": "subject_pointer_profiles",
+      "label": "Subject pointer profiles",
+      "description": "Uses explicit stage and subject identity, pointer PNGs, scale screenshots, approved previews, optional private-profile migration into a new empty isolated registry, and separate binding confirmation.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": true,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py pointer-guide --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_user_assets",
+        "summary": "Each target user must create a profile or restore the private profile into a new empty isolated registry, check and validate it, and explicitly bind the exact target project."
+      }
+    },
+    {
+      "id": "feishu_notifications",
+      "label": "Optional Feishu user-action notifications",
+      "description": "Sends notification-only alerts after local setup; all decisions remain in the originating Codex task.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": true,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py feishu-status --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_user_authorization",
+        "summary": "Configuration, authorization, recipient approval, and setup preview are target-local."
+      }
+    },
+    {
+      "id": "ffmpeg",
+      "label": "FFmpeg",
+      "description": "Uses the committed, reproducibly built minimal FFmpeg 8.1.2 (source tag n8.1.2; static Windows x64 binaries with no external codec libraries) from the verified offline companion, persisted at tmp/offline-runtime/tools/ffmpeg, or a separately verified target-local executable.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "ffmpeg -version",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "Formal offline setup installs and auto-discovers the fixed licensed companion copy; online setup otherwise requires a target-local executable."
+      }
+    },
+    {
+      "id": "ffprobe",
+      "label": "FFprobe",
+      "description": "Uses the committed, reproducibly built minimal FFprobe 8.1.2 (source tag n8.1.2; static Windows x64 binaries with no external codec libraries) from the verified offline companion, persisted at tmp/offline-runtime/tools/ffmpeg, or a separately verified target-local executable.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "ffprobe -version",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "Formal offline setup installs and auto-discovers the fixed licensed companion copy; online setup otherwise requires a target-local executable."
+      }
+    },
+    {
+      "id": "audio_runtime",
+      "label": "Isolated audio runtime",
+      "description": "Creates .venv-audio with Python 3.11 and the dedicated locked audio dependency set, using only the verified audio wheelhouse in offline mode.",
+      "bundled": true,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "The isolated runtime and doctor execute on the target computer."
+      }
+    },
+    {
+      "id": "spectramini_cleanup",
+      "label": "SpectraMini-style local cleanup",
+      "description": "Uses the maintained local breath and mouth-click stages after the isolated audio environment is installed.",
+      "bundled": true,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "Availability is reported only after the real target-machine audio doctor runs."
+      }
+    },
+    {
+      "id": "deepfilternet",
+      "label": "DeepFilterNet model-backed cleanup",
+      "description": "May cache and install the declared wheel, but remains disabled until a licensed, fixed, hash-verified model and trusted adapter are available.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": true,
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe",
+      "actual_result": {
+        "status": "unavailable",
+        "code": "unverified_external_model",
+        "summary": "Package presence alone is insufficient; no verified model and adapter identity is bundled."
+      }
+    },
+    {
+      "id": "respiro",
+      "label": "Respiro model-backed cleanup",
+      "description": "Remains disabled until licensed, fixed, hash-verified assets and a trusted runtime adapter are available.",
+      "bundled": false,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": true,
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe",
+      "actual_result": {
+        "status": "unavailable",
+        "code": "unverified_external_model",
+        "summary": "No verified model manifest or trusted runtime adapter is bundled."
+      }
+    },
+    {
+      "id": "volc_asr_alignment",
+      "label": "Volcengine word-level ASR alignment",
+      "description": "Bundles the maintained alignment adapter while requiring each target user to provide and verify their own Volcengine authorization.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": true,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py volc-status --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_user_authorization",
+        "summary": "The adapter is bundled; authorization and the real service probe are target-local."
+      }
+    },
+    {
+      "id": "sami_tts",
+      "label": "Target-local JianYing SAMI voice generation",
+      "description": "Uses only the target computer's own JianYing identity with verified TLS and never bundles or reports device identifiers.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": true,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py tts-status --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_local_jianying",
+        "summary": "Availability depends on target-local JianYing identity and a successful network request."
+      }
+    },
+    {
+      "id": "edge_tts",
+      "label": "Edge TTS network fallback",
+      "description": "Installs the pinned Edge TTS client with main dependencies and reports network execution separately from import readiness.",
+      "bundled": false,
+      "installed_on_first_run": true,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py tts-status --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "install_on_first_run",
+        "summary": "The client is installed on first use; a network voice request remains target-dependent."
+      }
+    },
+    {
+      "id": "cloud_materials",
+      "label": "Validated cloud material acquisition",
+      "description": "Bundles static material indexes and downloads validated remote assets only into the target package's temporary cache.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json",
+      "actual_result": {
+        "status": "degraded",
+        "code": "static_index_ready_remote_unverified",
+        "summary": "The static index is bundled; individual remote URLs are validated only when requested."
+      }
+    },
+    {
+      "id": "subtitle_material_matching",
+      "label": "Subtitle-to-material matching",
+      "description": "Provides deterministic matching and reports that no attributable external AI matching provider is currently bundled.",
+      "bundled": true,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json",
+      "actual_result": {
+        "status": "degraded",
+        "code": "deterministic_fallback",
+        "summary": "Deterministic round-robin matching is bundled; external AI matching is not claimed."
+      }
+    },
+    {
+      "id": "carnac_overlay",
+      "label": "Optional Carnac key overlay",
+      "description": "Detects a target-installed or explicitly configured Carnac executable without downloading an unverified binary.",
+      "bundled": false,
+      "installed_on_first_run": false,
+      "requires_local_jianying": false,
+      "requires_user_authorization": false,
+      "requires_user_assets": false,
+      "unavailable": false,
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json",
+      "actual_result": {
+        "status": "pending",
+        "code": "requires_local_software",
+        "summary": "Carnac is optional target software; recording remains available without it."
+      }
+    }
+  ]
+}

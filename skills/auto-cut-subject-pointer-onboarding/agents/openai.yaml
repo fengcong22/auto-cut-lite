@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 新学科指向物建档"
+  short_description: "按明确命令或同任务交接，增量建立、更新并确认绑定学科指向物档案"
+  default_prompt: "Use $auto-cut-subject-pointer-onboarding only when the user explicitly requests create, update, supplement, view, bind, or rebind for a subject pointer library, or when $auto-cut-pointer-targeting opens a same-task onboarding handoff. Never infer identity from content; ask only for the missing stage or subject, then only missing evidence, require explicit binding or rebind confirmation, and return through a fresh pointer gate."
+
+policy:
+  allow_implicit_invocation: true

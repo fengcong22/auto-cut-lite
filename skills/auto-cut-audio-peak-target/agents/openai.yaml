@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 音频峰值"
+  short_description: "按最终 dBFS 峰值调人声、BGM 或音效，而不是误设增益旋钮"
+  default_prompt: "Use $auto-cut-audio-peak-target to distinguish clip gain from resulting waveform peak dBFS in this JianYing audio adjustment."
+
+policy:
+  allow_implicit_invocation: true

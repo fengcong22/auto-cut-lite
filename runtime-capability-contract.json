@@ -1,0 +1,454 @@
+{
+  "$schema": "schemas/runtime-capability-contract.schema.json",
+  "schema_version": 1,
+  "release_version": "1.7.0",
+  "capabilities": [
+    {
+      "id": "editable_draft_contract",
+      "entrypoints": [
+        "scripts/jy_wrapper.py"
+      ],
+      "required_paths": [
+        "scripts/core/review_marker_ops.py",
+        "scripts/utils/revision_evidence.py",
+        "scripts/utils/revision_markers.py",
+        "scripts/utils/revision_runner.py",
+        "scripts/utils/revision_validation.py",
+        "tests/test_revision_markers.py",
+        "tests/test_segmented_audio_delivery.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "JianYingPro.exe", "disposition": "required_local"},
+        {"name": "powershell", "disposition": "platform_provided"}
+      ],
+      "verification_command": "python -m pytest tests/test_revision_markers.py tests/test_segmented_audio_delivery.py -q"
+    },
+    {
+      "id": "auto_cut_skills",
+      "entrypoints": [
+        "scripts/install_repo_skills.py"
+      ],
+      "required_paths": [
+        "skills/auto-cut/SKILL.md",
+        "skills/auto-cut-animation-timing-revision/SKILL.md",
+        "skills/auto-cut-audio-peak-target/SKILL.md",
+        "skills/auto-cut-audio-restoration/SKILL.md",
+        "skills/auto-cut-basic-oral-video/SKILL.md",
+        "skills/auto-cut-draft-retention/SKILL.md",
+        "skills/auto-cut-editable-ad-revision/SKILL.md",
+        "skills/auto-cut-favorite-text-assets/SKILL.md",
+        "skills/auto-cut-final-acceptance/SKILL.md",
+        "skills/auto-cut-local-image-overlay-revision/SKILL.md",
+        "skills/auto-cut-music-library-bgm/SKILL.md",
+        "skills/auto-cut-pointer-targeting/SKILL.md",
+        "skills/auto-cut-review-audio-precision/SKILL.md",
+        "skills/auto-cut-revision-draft/SKILL.md",
+        "skills/auto-cut-subject-pointer-onboarding/SKILL.md",
+        "skills/auto-cut-text-safezone-animation-revision/SKILL.md"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [],
+      "verification_command": "python scripts/install_repo_skills.py --list"
+    },
+    {
+      "id": "main_python_dependencies",
+      "entrypoints": [
+        "scripts/full_setup.py"
+      ],
+      "required_paths": [
+        "audio_sound/config.py",
+        "pyproject.toml",
+        "requirements-offline-acceptance.lock",
+        "requirements-offline-bootstrap.lock",
+        "requirements.txt",
+        "schemas/offline-deps-manifest.schema.json",
+        "scripts/release/offline_bundle.py",
+        "TARGET_INSTALL.md",
+        "setup.ps1"
+      ],
+      "dependency_imports": [
+        {"module": "uiautomation", "distribution": "uiautomation", "environment": "main", "disposition": "direct"},
+        {"module": "playwright", "distribution": "playwright", "environment": "main", "disposition": "direct"},
+        {"module": "pynput", "distribution": "pynput", "environment": "main", "disposition": "direct"},
+        {"module": "edge_tts", "distribution": "edge-tts", "environment": "main", "disposition": "direct"},
+        {"module": "pymediainfo", "distribution": "pymediainfo", "environment": "main", "disposition": "direct"},
+        {"module": "cv2", "distribution": "opencv-python", "environment": "main", "disposition": "direct"},
+        {"module": "av", "distribution": "av", "environment": "main", "disposition": "direct"},
+        {"module": "numpy", "distribution": "numpy", "environment": "main", "disposition": "direct"},
+        {"module": "imageio", "distribution": "imageio", "environment": "main", "disposition": "direct"},
+        {"module": "psutil", "distribution": "psutil", "environment": "main", "disposition": "direct"},
+        {"module": "requests", "distribution": "requests", "environment": "main", "disposition": "direct"},
+        {"module": "websockets", "distribution": "websockets", "environment": "main", "disposition": "direct"},
+        {"module": "comtypes", "distribution": "uiautomation", "environment": "main", "disposition": "transitive_optional"}
+      ],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts\\full_setup.py --probe-main-imports --json"
+    },
+    {
+      "id": "playwright_chromium",
+      "entrypoints": [
+        "scripts/full_setup.py",
+        "scripts/web_recorder.py",
+        "skills/auto-cut-subject-pointer-onboarding/scripts/render_reference_assets.py"
+      ],
+      "required_paths": [
+        "audio_sound/config.py",
+        "requirements.txt",
+        "scripts/release/offline_sources.json"
+      ],
+      "dependency_imports": [
+        {"module": "playwright", "distribution": "playwright", "environment": "main", "disposition": "direct"}
+      ],
+      "external_service_hosts": [
+        {"host": "cdn.playwright.dev", "schemes": ["https"], "disposition": "dependency_managed"},
+        {"host": "playwright.download.prss.microsoft.com", "schemes": ["https"], "disposition": "dependency_managed"}
+      ],
+      "dynamic_service_policy": "provider_managed",
+      "external_tools": [
+        {"name": "Chromium", "disposition": "installed_on_first_run"}
+      ],
+      "verification_command": "python scripts/full_setup.py --skip-dependencies --skip-audio --skip-jianying-check --json"
+    },
+    {
+      "id": "jianying_smoke_draft",
+      "entrypoints": [
+        "scripts/jy_wrapper.py"
+      ],
+      "required_paths": [
+        "scripts/utils/jianying_env.py",
+        "scripts/utils/jianying_smoke.py",
+        "scripts/vendor/pyJianYingDraft/__init__.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "JianYingPro.exe", "disposition": "required_local"}
+      ],
+      "verification_command": "python scripts/jy_wrapper.py self-check --cleanup --refresh --json"
+    },
+    {
+      "id": "favorite_text_assets",
+      "entrypoints": [
+        "scripts/auto_cut_first_run.py",
+        "scripts/sync_jy_favorite_text_assets.py"
+      ],
+      "required_paths": [
+        "data/favorite_flower_texts.csv",
+        "data/favorite_text_templates.csv"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "JianYingPro.exe", "disposition": "required_local"}
+      ],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py favorites-sync --json"
+    },
+    {
+      "id": "subject_pointer_profiles",
+      "entrypoints": [
+        "scripts/auto_cut_first_run.py",
+        "skills/auto-cut-subject-pointer-onboarding/scripts/profile_registry.py",
+        "skills/auto-cut-subject-pointer-onboarding/scripts/project_bindings.py",
+        "skills/auto-cut-subject-pointer-onboarding/scripts/render_reference_assets.py"
+      ],
+      "required_paths": [
+        "audio_sound/config.py",
+        "scripts/utils/pointer_validation.py",
+        "schemas/private-subject-assets-manifest.schema.json",
+        "scripts/release/build_private_subject_assets.py",
+        "skills/auto-cut-subject-pointer-onboarding/assets/pointer-material-reference.png",
+        "skills/auto-cut-subject-pointer-onboarding/assets/scale-reference-screenshot.png",
+        "skills/auto-cut-subject-pointer-onboarding/scripts/render_reference_assets.py"
+      ],
+      "dependency_imports": [
+        {"module": "cv2", "distribution": "opencv-python", "environment": "main", "disposition": "direct"},
+        {"module": "numpy", "distribution": "numpy", "environment": "main", "disposition": "direct"},
+        {"module": "playwright", "distribution": "playwright", "environment": "main", "disposition": "direct"}
+      ],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py pointer-guide --json"
+    },
+    {
+      "id": "feishu_notifications",
+      "entrypoints": [
+        "scripts/auto_cut_first_run.py",
+        "scripts/auto_cut_notifications.py"
+      ],
+      "required_paths": [
+        "data/auto-cut-notifications.example.json",
+        "scripts/utils/user_action_notifications.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "provider_managed",
+      "external_tools": [
+        {"name": "lark-cli", "disposition": "optional_local"},
+        {"name": "node", "disposition": "optional_local"}
+      ],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py feishu-status --json"
+    },
+    {
+      "id": "ffmpeg",
+      "entrypoints": [
+        "scripts/full_setup.py"
+      ],
+      "required_paths": [
+        "audio_sound/config.py",
+        "scripts/release/offline_sources.json"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "ffmpeg", "disposition": "installed_on_first_run"}
+      ],
+      "verification_command": "ffmpeg -version"
+    },
+    {
+      "id": "ffprobe",
+      "entrypoints": [
+        "scripts/full_setup.py"
+      ],
+      "required_paths": [
+        "audio_sound/config.py",
+        "scripts/release/offline_sources.json"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "ffprobe", "disposition": "installed_on_first_run"}
+      ],
+      "verification_command": "ffprobe -version"
+    },
+    {
+      "id": "audio_runtime",
+      "entrypoints": [
+        "scripts/audio/audio_cleanup.py",
+        "scripts/audio/audio_skill_workflow.py"
+      ],
+      "required_paths": [
+        "audio_sound/bootstrap.py",
+        "audio_sound/cli.py",
+        "audio_sound/config.py",
+        "audio_sound/skill_workflow.py",
+        "requirements-audio-build.lock",
+        "requirements-audio.lock",
+        "scripts/release/offline_bundle.py"
+      ],
+      "dependency_imports": [
+        {"module": "numpy", "distribution": "numpy", "environment": "audio", "disposition": "direct"},
+        {"module": "librosa", "distribution": "librosa", "environment": "audio", "disposition": "direct"},
+        {"module": "soundfile", "distribution": "soundfile", "environment": "audio", "disposition": "direct"},
+        {"module": "scipy", "distribution": "scipy", "environment": "audio", "disposition": "direct"},
+        {"module": "intervaltree", "distribution": "intervaltree", "environment": "audio", "disposition": "direct"}
+      ],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "py", "disposition": "platform_provided"},
+        {"name": "python3.11", "disposition": "optional_local"},
+        {"name": "ffmpeg", "disposition": "required_local"},
+        {"name": "ffprobe", "disposition": "required_local"}
+      ],
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe"
+    },
+    {
+      "id": "spectramini_cleanup",
+      "entrypoints": [
+        "scripts/audio/audio_cleanup.py"
+      ],
+      "required_paths": [
+        "audio_sound/narrow_cleanup.py",
+        "audio_sound/pipeline.py",
+        "presets/audio_sound/final.json"
+      ],
+      "dependency_imports": [
+        {"module": "numpy", "distribution": "numpy", "environment": "audio", "disposition": "direct"},
+        {"module": "librosa", "distribution": "librosa", "environment": "audio", "disposition": "direct"},
+        {"module": "soundfile", "distribution": "soundfile", "environment": "audio", "disposition": "direct"},
+        {"module": "scipy", "distribution": "scipy", "environment": "audio", "disposition": "direct"}
+      ],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "ffmpeg", "disposition": "required_local"},
+        {"name": "ffprobe", "disposition": "required_local"}
+      ],
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe"
+    },
+    {
+      "id": "deepfilternet",
+      "entrypoints": [
+        "scripts/audio/audio_cleanup.py"
+      ],
+      "required_paths": [
+        "audio_sound/bootstrap.py",
+        "audio_sound/pipeline.py",
+        "requirements-audio.lock"
+      ],
+      "dependency_imports": [
+        {"module": "df", "distribution": "deepfilternet", "environment": "audio", "disposition": "direct"},
+        {"module": "torch", "distribution": "torch", "environment": "audio", "disposition": "direct"},
+        {"module": "torchaudio", "distribution": "torchaudio", "environment": "audio", "disposition": "direct"}
+      ],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "git", "disposition": "unavailable_verification_only"}
+      ],
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe"
+    },
+    {
+      "id": "respiro",
+      "entrypoints": [
+        "scripts/audio/audio_cleanup.py"
+      ],
+      "required_paths": [
+        "audio_sound/bootstrap.py",
+        "audio_sound/pipeline.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "git", "disposition": "unavailable_verification_only"}
+      ],
+      "verification_command": "python scripts/audio/audio_cleanup.py doctor --python-executable .\\.venv-audio\\Scripts\\python.exe"
+    },
+    {
+      "id": "volc_asr_alignment",
+      "entrypoints": [
+        "scripts/audio/volc_word_align.py"
+      ],
+      "required_paths": [
+        "audio_sound/volc_asr.py",
+        "docs/audio-sound/volc-asr-source-receipt.json",
+        "scripts/utils/volc_asr_onboarding.py",
+        "tests/audio_sound/test_volc_asr.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [
+        {"host": "console.volcengine.com", "schemes": ["https"], "disposition": "static_runtime"},
+        {"host": "openspeech.bytedance.com", "schemes": ["https"], "disposition": "static_runtime"},
+        {"host": "www.volcengine.com", "schemes": ["https"], "disposition": "static_runtime"}
+      ],
+      "dynamic_service_policy": "user_configured_https",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py volc-status --json"
+    },
+    {
+      "id": "sami_tts",
+      "entrypoints": [
+        "scripts/universal_tts.py"
+      ],
+      "required_paths": [
+        "data/tts_speakers.csv"
+      ],
+      "dependency_imports": [
+        {"module": "requests", "distribution": "requests", "environment": "main", "disposition": "direct"}
+      ],
+      "external_service_hosts": [
+        {"host": "sami.bytedance.com", "schemes": ["https", "wss"], "disposition": "static_runtime"}
+      ],
+      "dynamic_service_policy": "provider_managed",
+      "external_tools": [
+        {"name": "JianYingPro.exe", "disposition": "required_local"}
+      ],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py tts-status --json"
+    },
+    {
+      "id": "edge_tts",
+      "entrypoints": [
+        "scripts/universal_tts.py"
+      ],
+      "required_paths": [
+        "requirements.txt"
+      ],
+      "dependency_imports": [
+        {"module": "edge_tts", "distribution": "edge-tts", "environment": "main", "disposition": "direct"}
+      ],
+      "external_service_hosts": [
+        {"host": "api.msedgeservices.com", "schemes": ["https", "wss"], "disposition": "dependency_managed"}
+      ],
+      "dynamic_service_policy": "provider_managed",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py tts-status --json"
+    },
+    {
+      "id": "cloud_materials",
+      "entrypoints": [
+        "scripts/cloud_manager.py"
+      ],
+      "required_paths": [
+        "data/cloud_music_library.csv",
+        "data/cloud_sound_effects.csv",
+        "data/cloud_text_styles.csv",
+        "data/cloud_video_assets.csv",
+        "scripts/core/media_ops.py"
+      ],
+      "dependency_imports": [
+        {"module": "requests", "distribution": "requests", "environment": "main", "disposition": "direct"}
+      ],
+      "external_service_hosts": [
+        {"host": "p3-heycan-jy-sign.byteimg.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v26-artist.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v3-jianying.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v5-jianying.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v6-artist.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v9-artist.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"},
+        {"host": "v9-jianying.vlabvod.com", "schemes": ["https"], "disposition": "bundled_index"}
+      ],
+      "dynamic_service_policy": "validated_public_http_https",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json"
+    },
+    {
+      "id": "subtitle_material_matching",
+      "entrypoints": [
+        "scripts/jy_wrapper.py"
+      ],
+      "required_paths": [
+        "scripts/core/media_ops.py"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json"
+    },
+    {
+      "id": "carnac_overlay",
+      "entrypoints": [
+        "tools/recording/install_carnac.py"
+      ],
+      "required_paths": [
+        "tools/recording/recorder.py",
+        "tools/recording/recorder_config.json"
+      ],
+      "dependency_imports": [],
+      "external_service_hosts": [],
+      "dynamic_service_policy": "none",
+      "external_tools": [
+        {"name": "Carnac.exe", "disposition": "optional_local"},
+        {"name": "open", "disposition": "platform_provided"},
+        {"name": "tasklist", "disposition": "platform_provided"},
+        {"name": "taskkill", "disposition": "platform_provided"},
+        {"name": "xdg-open", "disposition": "platform_provided"},
+        {"name": "where", "disposition": "platform_provided"}
+      ],
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py status --json"
+    }
+  ]
+}

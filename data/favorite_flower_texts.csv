@@ -1,0 +1,4 @@
+# JianYing favorite or cached flower text effects
+# Baseline examples tracked in git. Machine-local sync output goes to favorite_flower_texts.local.csv.
+identifier,name,title,description,resource_id,effect_id,source,source_detail,favorite_flag,favorite_time,categories
+7351316503771368713,红色花字1,红色花字1,Local artistEffect cache entry,7351316503771368713,7351316503771368713,artist_effect_cache,local_cache,,,artistEffect

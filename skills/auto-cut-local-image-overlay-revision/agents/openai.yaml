@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 局部图片覆盖修订"
+  short_description: "从修改意见文档提取 PNG/JPG，精准覆盖局部错误内容并校验比例边界"
+  default_prompt: "Use $auto-cut-local-image-overlay-revision to replace document-provided local PNG/JPG content in an editable JianYing draft while preserving scale and neighboring content."
+
+policy:
+  allow_implicit_invocation: true

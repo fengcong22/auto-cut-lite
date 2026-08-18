@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "source_label": "Audio-sound-release-local-volc-candidate",
+  "origin": "local_first_party_worktree",
+  "license": "MIT",
+  "license_destination": "LICENSE",
+  "adapter_version": "auto-cut-volc-asr-v3",
+  "verification_test": "tests/audio_sound/test_volc_asr.py",
+  "items": [
+    {
+      "source_path": "audio_sound/volc_asr.py",
+      "source_size": 13699,
+      "source_sha256": "3293d86dab356acb1cc2969826a0a262132aa58a4b8ccded1e51fa637770eba4",
+      "treatment": "adapted",
+      "destination": "audio_sound/volc_asr.py"
+    },
+    {
+      "source_path": "scripts/volc_word_align.py",
+      "source_size": 265,
+      "source_sha256": "b8fe486c3d8d7c53d8bd6204cc6a592ae17b3d83004f2c21d1b8c5ec7f6073fd",
+      "treatment": "adapted",
+      "destination": "scripts/audio/volc_word_align.py"
+    },
+    {
+      "source_path": "tests/test_volc_asr.py",
+      "source_size": 4985,
+      "source_sha256": "1a48bb5b0e1f5fc039b246f095b6fd02ab03b4b41c576ea1052c2b37a316537a",
+      "treatment": "adapted",
+      "destination": "tests/audio_sound/test_volc_asr.py"
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "project": {
+    "draft_name": "ReviewDraft",
+    "source_video": "C:/media/source.mp4",
+    "source_audio": "C:/media/source.wav",
+    "replacement_audio": "C:/media/replacement.mp3"
+  },
+  "edits": [
+    {
+      "type": "delete",
+      "start": 0.0,
+      "end": 3.0,
+      "label": "Remove opener",
+      "detail": "Delete the title opener"
+    },
+    {
+      "type": "replace_audio",
+      "start": 197.0,
+      "end": 205.0,
+      "audio_path": "C:/media/replacement.mp3",
+      "label": "Replace narration",
+      "detail": "Use the provided MP3 for this narration window"
+    }
+  ],
+  "markers": [
+    {
+      "label": "Animation check",
+      "start": 220.0,
+      "end": 221.0,
+      "detail": "Verify the animation timing"
+    }
+  ],
+  "preserve": {
+    "source_video_material": true,
+    "separated_audio_material": true,
+    "replacement_audio_material": true,
+    "keep_cut_points": true,
+    "keep_review_markers_separate": true
+  }
+}

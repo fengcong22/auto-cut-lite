@@ -1,0 +1,4 @@
+# Target: CPython 3.11, Windows x64 (win_amd64).
+# Every line is pinned to the SHA-256 of the single bundled wheel.
+packaging==23.2 --hash=sha256:8c491190033a9af7e1d931d0b5dacc2ef47509b34dd0de67ed209b5203fc88c7
+wheel==0.45.1 --hash=sha256:708e7481cc80179af0e556bbf0cc00b8444c7321e2700b8d8580231d13017248

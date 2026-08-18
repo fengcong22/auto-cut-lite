@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "provider": "lark_cli",
+  "identity": "bot",
+  "destination": {"type": "chat_id", "id": "oc_replace_me"},
+  "approved_template_version": "auto_cut_user_action_required_v1"
+}

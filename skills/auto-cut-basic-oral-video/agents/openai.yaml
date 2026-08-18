@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 基础口播视频"
+  short_description: "口播视频基准风格：节奏、BGM、花字、安全区、动画、音效、调色"
+  default_prompt: "Use $auto-cut-basic-oral-video to make or revise this editable JianYing oral-video draft in the 基础口播视频 style."
+
+policy:
+  allow_implicit_invocation: true

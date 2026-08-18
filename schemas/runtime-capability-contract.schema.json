@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-cut.local/schemas/runtime-capability-contract.schema.json",
+  "title": "Auto-Cut runtime capability contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "release_version", "capabilities"],
+  "properties": {
+    "$schema": {
+      "const": "schemas/runtime-capability-contract.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "release_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    }
+  },
+  "$defs": {
+    "dependencyImport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["module", "distribution", "environment", "disposition"],
+      "properties": {
+        "module": {"type": "string", "minLength": 1},
+        "distribution": {"type": "string", "minLength": 1},
+        "environment": {"enum": ["main", "audio"]},
+        "disposition": {"enum": ["direct", "transitive_optional"]}
+      }
+    },
+    "externalServiceHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["host", "schemes", "disposition"],
+      "properties": {
+        "host": {"type": "string", "minLength": 1},
+        "schemes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"enum": ["http", "https", "ws", "wss"]}
+        },
+        "disposition": {
+          "enum": [
+            "static_runtime",
+            "bundled_index",
+            "dependency_managed",
+            "user_configured"
+          ]
+        }
+      }
+    },
+    "externalTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "disposition"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "disposition": {
+          "enum": [
+            "required_local",
+            "optional_local",
+            "installed_on_first_run",
+            "platform_provided",
+            "unavailable_verification_only"
+          ]
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "entrypoints",
+        "required_paths",
+        "dependency_imports",
+        "external_service_hosts",
+        "dynamic_service_policy",
+        "external_tools",
+        "verification_command"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$"
+        },
+        "entrypoints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "required_paths": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "dependency_imports": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/dependencyImport"}
+        },
+        "external_service_hosts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/externalServiceHost"}
+        },
+        "dynamic_service_policy": {
+          "enum": [
+            "none",
+            "validated_public_http_https",
+            "user_configured_https",
+            "provider_managed"
+          ]
+        },
+        "external_tools": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/externalTool"}
+        },
+        "verification_command": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-cut.local/schemas/private-subject-assets-manifest.schema.json",
+  "title": "Auto-Cut Private Subject Assets Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "release_version",
+    "source_commit",
+    "profile_key",
+    "stage_id",
+    "subject_id",
+    "target_requires_explicit_binding",
+    "files",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "profile_key": {"const": "senior-high-history"},
+    "stage_id": {"const": "senior-high"},
+    "subject_id": {"const": "history"},
+    "target_requires_explicit_binding": {"const": true},
+    "files": {
+      "type": "array",
+      "minItems": 6,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "size",
+          "sha256",
+          "source_sha256",
+          "normalization",
+          "role",
+          "rights"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?![A-Za-z]:)(?!.*:)[^/]+(?:/[^/]+)*$"
+          },
+          "size": {"type": "integer", "minimum": 1},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "normalization": {"enum": ["decoded_png_v1", "generated_v1"]},
+          "role": {
+            "enum": [
+              "hand",
+              "scale-references",
+              "approved-previews",
+              "registration",
+              "restore_guide"
+            ]
+          },
+          "rights": {"const": "user_owned_migration_approved"}
+        },
+        "oneOf": [
+          {
+            "properties": {
+              "path": {"const": "intake.json"},
+              "role": {"const": "registration"},
+              "normalization": {"const": "generated_v1"}
+            }
+          },
+          {
+            "properties": {
+              "path": {"const": "RESTORE.md"},
+              "role": {"const": "restore_guide"},
+              "normalization": {"const": "generated_v1"}
+            }
+          },
+          {
+            "properties": {
+              "path": {"pattern": "^evidence/assets/hand-[0-9]{3}\\.png$"},
+              "role": {"const": "hand"},
+              "normalization": {"const": "decoded_png_v1"}
+            }
+          },
+          {
+            "properties": {
+              "path": {"pattern": "^evidence/scale-references/scale-reference-[0-9]{3}\\.png$"},
+              "role": {"const": "scale-references"},
+              "normalization": {"const": "decoded_png_v1"}
+            }
+          },
+          {
+            "properties": {
+              "path": {"pattern": "^evidence/approved-previews/preview-[0-9]{3}\\.png$"},
+              "role": {"const": "approved-previews"},
+              "normalization": {"const": "decoded_png_v1"}
+            }
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "contains": {
+            "properties": {"role": {"const": "registration"}},
+            "required": ["role"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {"role": {"const": "restore_guide"}},
+            "required": ["role"]
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "properties": {"role": {"const": "hand"}},
+            "required": ["role"]
+          },
+          "minContains": 1
+        },
+        {
+          "contains": {
+            "properties": {"role": {"const": "scale-references"}},
+            "required": ["role"]
+          },
+          "minContains": 2
+        },
+        {
+          "contains": {
+            "properties": {"role": {"const": "approved-previews"}},
+            "required": ["role"]
+          },
+          "minContains": 1
+        }
+      ]
+    },
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

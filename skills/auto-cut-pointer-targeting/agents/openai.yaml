@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 指向物定位"
+  short_description: "校验项目绑定；缺失时同任务建档，再按登记比例定位并确定时序"
+  default_prompt: "Use $auto-cut-pointer-targeting to read the manual project binding and project_key, fresh-check its exact stage+subject status=ready receipt, and apply the registered current-layout ratio to the target and timing. If the gate fails, stop before draft writes, preserve the original item IDs, and open a same-task onboarding handoff to $auto-cut-subject-pointer-onboarding; resume only after binding reload and another fresh-check."
+
+policy:
+  allow_implicit_invocation: true

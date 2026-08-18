@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.bak
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Build / temp
+*.egg-info/
+dist/
+build/
+*.log
+test_run_artifacts/
+cloud_cache/
+scripts/cloud_cache/
+*.webm
+.pytest_cache/
+.ruff_cache/
+.codex/
+.omx/
+.specstory/
+tmp/install/
+tmp/
+.worktrees/
+data/*.local.csv
+data/subject-pointer-profiles.local/
+data/auto-cut-notifications.local.json
+data/.auto-cut-notifications.local.json.*.tmp
+data/auto-cut-notification-receipts.local/
+.cursorindexingignore
+tools/recording/carnac_bundle/
+
+# Isolated audio runtime and generated state
+.env
+.venv-audio/
+.venv-portable-importer/
+.venv-audio.codex-staging-*/
+.venv-audio.codex-backup-*/
+tools/audio_sound_runtime/
+output/
+scratch/audio-sound/
+.cargo-home/audio-sound/
+edit_hk_macau_trycut.py
+edit_shiyijie_sanzhong_round2.py
+edit_shiyijie_sanzhong_round3.py
+edit_shiyijie_sanzhong_round4.py
+edit_shiyijie_sanzhong_round5.py
+edit_shiyijie_sanzhong_trycut.py
+
+# Assets (large synced files - keep tracked manually)
+# assets/jy_sync/

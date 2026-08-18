@@ -1,0 +1,680 @@
+{
+  "schema_version": 2,
+  "source_root_label": "Audio-sound-release-clean-v0.1.0",
+  "source_directory_version_hint": "0.1.0",
+  "source_declared_package_version": "0.2.0",
+  "source_version_status": "directory_hint_differs_from_declared_package_version",
+  "source_file_count": 50,
+  "source_total_bytes": 1255475,
+  "source_tree_sha256": "493d4f7cfedf1206179c87c8e8bc2007032e2c5f7ef1799e2984790961758cc5",
+  "source_tree_fingerprint_format": "sorted by POSIX source_path using Unicode code point order; path<TAB>size<TAB>lowercase-sha256 records joined with LF as UTF-8 without BOM",
+  "items": [
+    {
+      "source_path": ".codex/skills/audio-sound/SKILL.md",
+      "source_size": 6360,
+      "source_sha256": "9a65330b8fc8b369cf59476b42e6eb75834a5962ce7894543f627aa8c27d08be",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "d8f0969ab15023b2a4d3bfb593e312d6570dbf8df94eb6985477ddb9bb497214",
+      "source_git_blob_sha1": "a1055faa0c6b09ab37600098750a5954ab272e2a",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/SKILL.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".codex/skills/audio-sound/agents/openai.yaml",
+      "source_size": 391,
+      "source_sha256": "cffd4600706ddc63bcc2474e0ade2404af7756c43a5ae11fd3d88edb46f629d3",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "90e226cf00ad57bf56db9af9f99c0bf5f5e7ac9c884e12b970c539d0a90bd053",
+      "source_git_blob_sha1": "48d6aca8a2eaf82c8650f73b5188bbdc04e25628",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/agents/openai.yaml"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".codex/skills/audio-sound/references/acceptance.md",
+      "source_size": 4839,
+      "source_sha256": "7d3d0d35fba87428eb63312f2648538d30734532059b6af2631f6f86dde4ebfa",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "dcc4e6215ee1fb24fc78543456c6d36a0b18688ccf7e5a7c3bff873ecd3e0ae3",
+      "source_git_blob_sha1": "cc1d5e8766f60202dd92666675acfa565cd7cca4",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/references/acceptance.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".codex/skills/audio-sound/references/commands.md",
+      "source_size": 7261,
+      "source_sha256": "fd02d12c3de01efd60c1ba27f1643e8d72a668bd1aff6267a19ef3d4346cb42d",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "d47d50fc4ffb9c4a7712e6b13bee0a64fd7d5307b8da01c1a9c1ae0f7b0ca100",
+      "source_git_blob_sha1": "fd60293669cb17c29c0b1fd3dd90257d8364ef33",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/references/commands.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".codex/skills/audio-sound/references/spoken-segment-boundaries.md",
+      "source_size": 5257,
+      "source_sha256": "2ff91526774077e99342eec438216a8ba6f5b39de63649b415c7d0998fcd364c",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "de6e591909afa68a03bf4e958921fca9656653de48e89f56f01566f6fcd43778",
+      "source_git_blob_sha1": "0118970ad9a05b6faa836e29173f4192a693e43b",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/references/spoken-segment-boundaries.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".codex/skills/audio-sound/references/workflow.md",
+      "source_size": 5344,
+      "source_sha256": "e3c9b99dc55bcbffbc42e0062fd6edcfb7863af0df91b6475ca151f894f41782",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "eef29895d21cdf0a2efaea4a61101d7c3407ec6dda03e0e0ffce5cedaaa56731",
+      "source_git_blob_sha1": "7a26b8fb49a26f0251d2bacab21784efb83a66ea",
+      "treatment": "adapted",
+      "destinations": [
+        "skills/auto-cut-audio-restoration/references/workflow.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": ".env.example",
+      "source_size": 140,
+      "source_sha256": "dc3798a50f39531740776479f2eaa0a4fa347d61cc96f45a274a2fa624845d30",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "ac8e0c8efbff4b5c00408faef90016387ab1ebc8b74a28f79d5aa95e8ad5d13d",
+      "source_git_blob_sha1": "20f7aea1e19401216027bf4d9a2e08cc22272bc1",
+      "treatment": "merged",
+      "destinations": [
+        ".env.example",
+        "docs/audio-sound/upstream-control/.env.example"
+      ],
+      "normalized_content_destination": "docs/audio-sound/upstream-control/.env.example"
+    },
+    {
+      "source_path": ".gitignore",
+      "source_size": 233,
+      "source_sha256": "cf6c1b4db67fa6ac5c42cdb15a57d6521a40a32bbff6131257405bdf2a3b7cc2",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "2581610f40a5c3c179f754bdfa3941254db3d02a39c35598255b1467568fa7c5",
+      "source_git_blob_sha1": "18f95c655d39c95ceb6356860e127e7af3f623e0",
+      "treatment": "merged",
+      "destinations": [
+        ".gitignore",
+        "docs/audio-sound/upstream-control/.gitignore"
+      ],
+      "normalized_content_destination": "docs/audio-sound/upstream-control/.gitignore"
+    },
+    {
+      "source_path": "AGENTS.md",
+      "source_size": 10623,
+      "source_sha256": "5b268af42d9255fc72d393da159e8f08dcfee77731ba18c1b521303b87c53795",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "df719ada6cd5ccc974032e76fd39558f28e5570e7c56025cabcc38a90e0eb63b",
+      "source_git_blob_sha1": "d9369afedbb6549ca76e656033e36bcdaec21701",
+      "treatment": "merged",
+      "destinations": [
+        "AGENTS.md",
+        "docs/audio-sound/upstream-control/AGENTS.md"
+      ],
+      "normalized_content_destination": "docs/audio-sound/upstream-control/AGENTS.md"
+    },
+    {
+      "source_path": "README.md",
+      "source_size": 7399,
+      "source_sha256": "d4f40857f50b8c3a5b1a2eab01c190dd6e1b2bb6526d30805fe6adee2ef40048",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "2877eb2870f490710384f4204dba558a7aa833302c6a747dbb179b94b3674a06",
+      "source_git_blob_sha1": "2993945d7e26358f48314db19e312e3c4a6d4b3d",
+      "treatment": "merged",
+      "destinations": [
+        "README.md",
+        "docs/audio-sound/README.upstream.md"
+      ],
+      "normalized_content_destination": "docs/audio-sound/README.upstream.md"
+    },
+    {
+      "source_path": "RELEASE_QUICK_START.md",
+      "source_size": 1516,
+      "source_sha256": "70889041e6cad11a6dcce6b06a36bb7ea678316ca3f9a13b60833fca72402ae1",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "dd32800324ec0b738e05b7f8465d31b5e6c45c2984e909c687cf2a51fb3f9abb",
+      "source_git_blob_sha1": "6266289894170fa4b096b897620fca9ae22bf419",
+      "treatment": "adapted",
+      "destinations": [
+        "docs/audio-sound/RELEASE_QUICK_START.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/__init__.py",
+      "source_size": 108,
+      "source_sha256": "93b5d34ab2bf4bf6864f6d6bcf6c8e0ccb9617dfe0324c54215c1d858f52e684",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "75eee9528411755c6f8cebeada978567a092a5d0bfa6eda5d15c6f21a78b3ff4",
+      "source_git_blob_sha1": "a455b4d57972aad82ebb97efc18df7c400241d4f",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/__init__.py"
+      ],
+      "normalized_content_destination": "audio_sound/__init__.py"
+    },
+    {
+      "source_path": "audio_sound/bootstrap.py",
+      "source_size": 9812,
+      "source_sha256": "bdf25897264afedd093ca8959bea8f28c3c669b49afd4599a2f2e3c77d94e74e",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "d84b7ffcf97a2c92f7b0e6cc00123c918a63d4a4b327c3af536899ef5667498a",
+      "source_git_blob_sha1": "d25793327408f0cd5c81d9d41158ac4163094f14",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/bootstrap.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/cli.py",
+      "source_size": 10148,
+      "source_sha256": "09613a70a1359903a7d9195538d24e3cafabc1780ce209ccdb33cccf7d1d6de1",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "d55c6a4e54742744efeebe9ed6781b62d66759ef4e8142ee1b53dd08a0eda793",
+      "source_git_blob_sha1": "347aa2e9f26c739ef75a00d89babdc2b75fbff0c",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/cli.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/config.py",
+      "source_size": 3365,
+      "source_sha256": "7a803cebf4a89f689897489599f7eccd2ffce7c9db54875b87692fd3323da5a3",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "44f04e59eb8b8ce14dd254eefa0d29cadca4dab812988ebdca99bfca2e8aafa0",
+      "source_git_blob_sha1": "70808e54a1ad15abf232e7cc793681dd22f503ae",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/config.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/pipeline.py",
+      "source_size": 79095,
+      "source_sha256": "72b6b0781d9be1828babb5141850cdf92910fd02453579b5d78f0166322d6511",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "10ce40027fb46c2423bd13a648e7f25336919531a677bc1a681b18c6bc67a003",
+      "source_git_blob_sha1": "056133dcff8b681f2511f11f40aa5cc1443c36d2",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/pipeline.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/segment_removal.py",
+      "source_size": 37579,
+      "source_sha256": "899ae88bb596d36aa00a1c2ae3fc00054341fef8e5dbf09d5255c997c64011a2",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "10e0dec329c37e46794012d78a8b23b1a2a627087a5380e05e6da799d19e3f53",
+      "source_git_blob_sha1": "a788ceb1705b80407bc28b7eb8c6ff45b7f51e79",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/segment_removal.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "audio_sound/skill_workflow.py",
+      "source_size": 74775,
+      "source_sha256": "27493234cc589792832d9d99a0d77d56726dec3b246a605a583847b3c3844f3a",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "09023d81c4ec1d62f52d31fdd8c926d225a839542a526a3185096524b233f770",
+      "source_git_blob_sha1": "2b74b3c0abd5ebd8d0a2e52ae13440abd347e4f4",
+      "treatment": "adapted",
+      "destinations": [
+        "audio_sound/skill_workflow.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "check_runtime.cmd",
+      "source_size": 575,
+      "source_sha256": "1563c333a7f157cb4babe52d1521944fd6447c36ea312bedc539817d038a546a",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "9f509193723c59202933b300d66858eaeefeaf718804e3f4fab9fd1bd9c4d58a",
+      "source_git_blob_sha1": "da315cbce58c2863c5e819eadb578983835aedbb",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/check_runtime.cmd"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "docs/architecture.md",
+      "source_size": 3280,
+      "source_sha256": "c567b771c7c44410c2e7b3be324e31c8f9c65460b1a6308979bd476c5b4dfd0f",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "7e1da2fda5655c26551188fd71fdd1c12deb533e2e7556c736a98f78216e574b",
+      "source_git_blob_sha1": "83ec665700aa593b26f8440608516bb879d629af",
+      "treatment": "adapted",
+      "destinations": [
+        "docs/audio-sound/architecture.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "docs/assets/before-after-waveform.svg",
+      "source_size": 24397,
+      "source_sha256": "94747550e457acae4b961c9308cc1bc33d5c3ed5e21c3a2de31d0b4e4fbddf12",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "e6ce0eda90fdb018df2335a5cdfe74dba4706d457dd84c301e6ab68273e0b18d",
+      "source_git_blob_sha1": "709554f80bc956cf8ad5bc511e2c3fb0d36303c4",
+      "treatment": "copied",
+      "destinations": [
+        "docs/assets/audio-sound/before-after-waveform.svg"
+      ],
+      "normalized_content_destination": "docs/assets/audio-sound/before-after-waveform.svg"
+    },
+    {
+      "source_path": "docs/assets/spectrum-before-after.jpg",
+      "source_size": 642990,
+      "source_sha256": "bc579a8563aa8eb75a2c0ada7ab109168432580b71b30235a7dd713292a3ed18",
+      "normalization": "none",
+      "normalized_sha256": "bc579a8563aa8eb75a2c0ada7ab109168432580b71b30235a7dd713292a3ed18",
+      "source_git_blob_sha1": "09cc98567a70ac052292d8cbfea72e856b4f263d",
+      "treatment": "copied",
+      "destinations": [
+        "docs/assets/audio-sound/spectrum-before-after.jpg"
+      ],
+      "normalized_content_destination": "docs/assets/audio-sound/spectrum-before-after.jpg"
+    },
+    {
+      "source_path": "docs/reference-sop.md",
+      "source_size": 1107,
+      "source_sha256": "f7f710e6db6fe504930a72a1759e38598d6940f4288644c4c727ba660356a763",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "e21597f6602f633575fc8e37121c7e5739575649004c2f81716979941605d7ec",
+      "source_git_blob_sha1": "db4b7fce2da79eb0e0d00af5bcbe659f0136de2b",
+      "treatment": "adapted",
+      "destinations": [
+        "docs/audio-sound/reference-sop.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "docs/superpowers/plans/2026-05-27-audio-sound-standalone.md",
+      "source_size": 4001,
+      "source_sha256": "a5d10f11bc93f0b2879ce2677ae071538c5ae2f1a7d69c9f95053980dbb13e45",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "c4c95c2a0a7a13e40d7b5caa20ef69cd61b11e591e5a059c8ad0358cda40e4d5",
+      "source_git_blob_sha1": "2d2ba5bea5d0079f7396f0274cecdfca00b36e67",
+      "treatment": "copied",
+      "destinations": [
+        "docs/audio-sound/history/2026-05-27-audio-sound-standalone.md"
+      ],
+      "normalized_content_destination": "docs/audio-sound/history/2026-05-27-audio-sound-standalone.md"
+    },
+    {
+      "source_path": "docs/tuning-guide.md",
+      "source_size": 1258,
+      "source_sha256": "6c2fe212bbdd77d7f219c0817f028edd6f5cef830ae46a5b386de6fe15d22a61",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "0c8a674a31c479663aada1e1302ec4228972f904234ce7d72b0b5421c5c6c609",
+      "source_git_blob_sha1": "7f92737c70640f0ca9b26c36ceb61b6679e4d654",
+      "treatment": "adapted",
+      "destinations": [
+        "docs/audio-sound/tuning-guide.md"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "doctor.cmd",
+      "source_size": 575,
+      "source_sha256": "1563c333a7f157cb4babe52d1521944fd6447c36ea312bedc539817d038a546a",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "9f509193723c59202933b300d66858eaeefeaf718804e3f4fab9fd1bd9c4d58a",
+      "source_git_blob_sha1": "da315cbce58c2863c5e819eadb578983835aedbb",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/doctor.cmd"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "presets/fast.json",
+      "source_size": 1795,
+      "source_sha256": "7620c02e5c48c1f3c2d66470a5a246fd1c0e869beec2399c261e3c79d778529a",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "0cec0ec9b94d9c998b58349848927911f0d527ce6be4fe41e79666f036d1885d",
+      "source_git_blob_sha1": "e67c4aff0abc43d77ae25bb5c809c1f3add5edf7",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/fast.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/fast.json"
+    },
+    {
+      "source_path": "presets/final.json",
+      "source_size": 2406,
+      "source_sha256": "81532dea978aafa70f5d063ae3b795eea4147072af4ae64c2144b04d713e534c",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "8852cb0400bd4f8c632090ea97cd72a97f668ff9a88407bad449bf510f113820",
+      "source_git_blob_sha1": "a426bc692503a30f52dab99faf8f266400bb6ced",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/final.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/final.json"
+    },
+    {
+      "source_path": "presets/repair-soft.json",
+      "source_size": 2424,
+      "source_sha256": "c12670bf69e599fb830a1a3ccad318667ecfb3df0c0b1b88992ce4bed47b3043",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "c58b93788e88eedb4ae0e395107e1561bab0229cb67009eb82003c3949d73a6d",
+      "source_git_blob_sha1": "6abc432df22f48b9d423ff5b069299869e374fe6",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/repair-soft.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/repair-soft.json"
+    },
+    {
+      "source_path": "presets/repair.json",
+      "source_size": 2411,
+      "source_sha256": "5b1aa3a384edd39abc0451ddfc98479c2b12fabbcb102b1fca2e727acb83f550",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "57042990c966abcff314b347068437191d894dc5585d62e873826ba925743a6c",
+      "source_git_blob_sha1": "234b050c2f2d817f54ca981717b605217a944af1",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/repair.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/repair.json"
+    },
+    {
+      "source_path": "presets/review.json",
+      "source_size": 1816,
+      "source_sha256": "7eda6e8d2313e503eb8079940d03d98a579f387a3ad0aab71951934eec9f4b4f",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "f4e6475476d34182855ce8d67e3573e17f65a556ec5f6a0ddbd94a4c6ed73796",
+      "source_git_blob_sha1": "3a554f556e3824a5e88cee27d09d16b629c85135",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/review.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/review.json"
+    },
+    {
+      "source_path": "presets/safe.json",
+      "source_size": 2144,
+      "source_sha256": "45b04ed25dfaa2a855e45c61006155b2b42f5a6d0824fbd723b16c99f097e258",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "b91445193ced82fec77bf463ebeff2ba23193237d2989887f38eabf6ad8c3d62",
+      "source_git_blob_sha1": "9ad8061dfed572f16e89792c4dbf3d026e53b222",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/safe.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/safe.json"
+    },
+    {
+      "source_path": "presets/voice-isolate.json",
+      "source_size": 3681,
+      "source_sha256": "e23757721cc7754c61bb202700821f94d5b5b862f1679009e0d79345a6ae806d",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "4e767518aa535c3b01ae5cb5a177c0445ab85d548a8f70a44c5af4aea20e3636",
+      "source_git_blob_sha1": "bbeee934c610f0f72ea7e65ac08c5386f98030c0",
+      "treatment": "copied",
+      "destinations": [
+        "presets/audio_sound/voice-isolate.json"
+      ],
+      "normalized_content_destination": "presets/audio_sound/voice-isolate.json"
+    },
+    {
+      "source_path": "pyproject.toml",
+      "source_size": 516,
+      "source_sha256": "f6eb9a9f5b986814fd8699799bda2d960e3bdb86626d77240f6f6709083b39c9",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "8da97b1038bd470a2691693aedab66baf5d29fc16dbe80505a127e9bce89d106",
+      "source_git_blob_sha1": "2feeab8f91d1bc499277867e16da3263ee18c0e6",
+      "treatment": "merged",
+      "destinations": [
+        "pyproject.toml",
+        "docs/audio-sound/upstream-control/pyproject.toml"
+      ],
+      "normalized_content_destination": "docs/audio-sound/upstream-control/pyproject.toml"
+    },
+    {
+      "source_path": "requirements.txt",
+      "source_size": 61,
+      "source_sha256": "fc13ce2670c6dcbc63b5166317b9641066e33cf04680b85d5c7692f1dbfedcf2",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "46897e73b50e781c3913c7fbec96fe600604d62d23be15e6f849e5665c8d39ec",
+      "source_git_blob_sha1": "77d2a9f5324c1e42d942eb7ce50646449a5f889f",
+      "treatment": "merged",
+      "destinations": [
+        "requirements.txt",
+        "docs/audio-sound/upstream-control/requirements.txt"
+      ],
+      "normalized_content_destination": "docs/audio-sound/upstream-control/requirements.txt"
+    },
+    {
+      "source_path": "run_audio_workflow.cmd",
+      "source_size": 583,
+      "source_sha256": "1b0e4cfbb86528c24bee0de2874cd24dc39887e57118d4209ac8f62285e24a66",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "29fd6b608e4640d445d5af0bf9b9b2f64410d2fd9c783aad95fe3db3a958e385",
+      "source_git_blob_sha1": "389e0e0821d714628235dc88a5e07e9ee93e9886",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/run_audio_workflow.cmd"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "scripts/audio_cleanup.py",
+      "source_size": 272,
+      "source_sha256": "478dfaab38ca573c0849d11a70f6a79c21a817e7d898e53f7f1233e7f5ac2430",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "dec393dcf4f2dc0efcdcc3f5541a2055b02ec7ec4ba7e15c814c08e852a66e28",
+      "source_git_blob_sha1": "3f395bc365b618e883701a9a31738dce2694c172",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/audio_cleanup.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "scripts/audio_skill_workflow.py",
+      "source_size": 283,
+      "source_sha256": "7faa6f793bfbf386a49723cf48e41e7c99f9607014cd0c7f87a73209dbf85e0b",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "2542212ca10252c24b79559e4f646b7abbf1ad23070d324077ef10e6f85a3b91",
+      "source_git_blob_sha1": "659e0a80409ba2384a21e4d259707a92bc2d858c",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/audio_skill_workflow.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "scripts/exact_window_cleanup.py",
+      "source_size": 4795,
+      "source_sha256": "676e0907419b657dc6b3f59a1863c119151a8882b773453c993cb3a4ed90c70c",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "404d078cedc5991a16e6877c14ee259fc47d0a6347ab5b0b052f4631d56487b2",
+      "source_git_blob_sha1": "967464c00fca073b1f51d7b02d0b89dceee1b296",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/exact_window_cleanup.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "scripts/narrow_onset_cleanup.py",
+      "source_size": 19593,
+      "source_sha256": "9290c6e5394341ead2dbbc08ccdaae9d1157394cdeb1f190b229c7e1b2534c1c",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "6be0a27b4f23156b5277b05737ecbcf1bcd0c1b04f12dcc0723c3c7c9abe19a7",
+      "source_git_blob_sha1": "65e1e6b51f443b8a0e8c6f8d3d875855102b6cf4",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/narrow_onset_cleanup.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "scripts/remove_spoken_segments.py",
+      "source_size": 284,
+      "source_sha256": "619c0cc6577d5bba9a9e27d409ab8904aca628a1289d32ad21b7ed5a7c576d2e",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "acfb4f9220a8d175631c8a7325dea7e0efb89bed50ec7f437c118c93679c9cf5",
+      "source_git_blob_sha1": "96b7635fa5afc235b0bdb1a7c143028f00c5bed1",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/remove_spoken_segments.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "setup.cmd",
+      "source_size": 292,
+      "source_sha256": "79d005d49062385e04d19a962a6eee25ea50c8462a51a8da1926487fda0a34d6",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "67b387e79c090a7ff99951a8bb24172e12f7f9886c85929a86f80d1ad11fdb44",
+      "source_git_blob_sha1": "7945741f23d324cfed5a170236fa7b315203a0ed",
+      "treatment": "adapted",
+      "destinations": [
+        "scripts/audio/setup.cmd"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "tests/__init__.py",
+      "source_size": 24,
+      "source_sha256": "a6a4f920dc7350e1781c4e6479f1bd23cb2313d99ff9403382e440a421ec9f6b",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "5d6f1e0d97050cb650cc0c72272c1e8559e6c95089d92a861352c8a3e24c6ccb",
+      "source_git_blob_sha1": "322ca9c0f162b2fb3cadc29bafc6d177fba8a768",
+      "treatment": "copied",
+      "destinations": [
+        "tests/audio_sound/upstream_tests_init.py"
+      ],
+      "normalized_content_destination": "tests/audio_sound/upstream_tests_init.py"
+    },
+    {
+      "source_path": "tests/fixture_respiro.wav",
+      "source_size": 192044,
+      "source_sha256": "77dfcb6ed774b81696811451c32873c1eb53f73db47823891dfe23459642fc9f",
+      "normalization": "none",
+      "normalized_sha256": "77dfcb6ed774b81696811451c32873c1eb53f73db47823891dfe23459642fc9f",
+      "source_git_blob_sha1": "e7a188cd101483991c0c30db9d500ddbcaf72fd9",
+      "treatment": "copied",
+      "destinations": [
+        "tests/fixtures/audio_sound/fixture_respiro.wav"
+      ],
+      "normalized_content_destination": "tests/fixtures/audio_sound/fixture_respiro.wav"
+    },
+    {
+      "source_path": "tests/test_bootstrap.py",
+      "source_size": 3532,
+      "source_sha256": "dab9d787f67896fe91fb213ac3aa223e5d3879cf9455574eee702f031e237668",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "8ac05b0d1c80fdbc2d1ec844e2eb4fde63b3247480738ef90f90967bc6090197",
+      "source_git_blob_sha1": "f827a21d17d70722f64dc2d5605754197900854a",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_bootstrap.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "tests/test_cli.py",
+      "source_size": 5409,
+      "source_sha256": "dc173d96a6ae493f7a70316765da151b1c9c4ca98ca57728649f8d2923a96046",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "cd56530e4f22cd38bd67521e2133c52971319ee95ecf5a5ec82de109aa2981cf",
+      "source_git_blob_sha1": "cb2284e7355c006b2aecad318aae9a0b84f58f0b",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_cli.py"
+      ],
+      "normalized_content_destination": "tests/audio_sound/test_cli.py"
+    },
+    {
+      "source_path": "tests/test_config.py",
+      "source_size": 4811,
+      "source_sha256": "0ae23579979c0017319deb7c3b8afc87addd30f627f31b30b43f00059081b93d",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "4e0bf4df5192d561e6a506e9db126c4d3630901e7f0d6f53e7227d2511965661",
+      "source_git_blob_sha1": "dfc51ff5713109baa40abf2ee11f56dc9bab5759",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_config.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "tests/test_pipeline.py",
+      "source_size": 36901,
+      "source_sha256": "67435f07673ef343832bb7e403af412f2a4ce8ff92a8ae16f71a76bba56f2979",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "e32087d138106cea5f53b0585903eaa164808e1fb133cc3415d58a3e12bbacf0",
+      "source_git_blob_sha1": "0c70db23f215137373a6f240ce716ce98877fd26",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_pipeline.py"
+      ],
+      "normalized_content_destination": null
+    },
+    {
+      "source_path": "tests/test_segment_removal.py",
+      "source_size": 7957,
+      "source_sha256": "7660f35cb24cbf1127b1c06304cd840839a70e4adba6f1e2ec6356b82094eb0a",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "7592ea36d0956c13fe1bacfbc6c693b9c139aab8d08a7e5e85ff987129a620a5",
+      "source_git_blob_sha1": "996d32bd50ecd4925c3ac28ee0fcc55c778eb3a4",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_segment_removal.py"
+      ],
+      "normalized_content_destination": "tests/audio_sound/test_segment_removal.py"
+    },
+    {
+      "source_path": "tests/test_skill_workflow.py",
+      "source_size": 19013,
+      "source_sha256": "3f0b69ade6c8f97ba1a8cbf315707fb11ce8b4ed75c71530386367984213a81d",
+      "normalization": "crlf_to_lf",
+      "normalized_sha256": "b7e9b33304a6d2728cff5d8cb542d3f727ae1309ad1bdc8297ca9465c925961c",
+      "source_git_blob_sha1": "f722ff99d228f261e966efe03b3f602857323199",
+      "treatment": "adapted",
+      "destinations": [
+        "tests/audio_sound/test_skill_workflow.py"
+      ],
+      "normalized_content_destination": null
+    }
+  ],
+  "retained_legacy_artifacts": [
+    {
+      "source_root_label": "Audio-sound-release-main",
+      "source_path": "LICENSE",
+      "source_size": 1064,
+      "source_sha256": "6cd18efdd78725b67e1623278d111f69a11e01aee50d5957785bf2695e940d89",
+      "source_git_blob_sha1": "0caf2237e493041ac89ed22b3a2ec4a75668f79e",
+      "destination": "docs/audio-sound/LICENSE.audio-sound",
+      "reason": "MIT license retained from prior source package for legal provenance"
+    }
+  ]
+}

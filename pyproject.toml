@@ -1,0 +1,60 @@
+[project]
+name = "auto-cut"
+version = "1.7.0"
+description = "JianYing/CapCut desktop automation and editable draft tooling"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "uiautomation==2.0.20",
+    "playwright==1.52.0",
+    "pynput==1.7.7",
+    "edge-tts==7.2.3",
+    "pymediainfo==7.0.1",
+    "opencv-python==4.11.0.86",
+    "av>=14,<18",
+    "numpy==2.2.4",
+    "imageio==2.37.0",
+    "psutil==7.0.0",
+    "requests==2.32.5",
+    "websockets==16.0",
+]
+
+[project.scripts]
+audio-cleanup = "audio_sound.cli:main"
+audio-skill-workflow = "audio_sound.skill_workflow:main"
+audio-remove-segments = "audio_sound.segment_removal:main"
+audio-volc-word-align = "audio_sound.volc_asr:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8,<9",
+    "ruff>=0.6,<1",
+    "black>=24,<26",
+    "imageio-ffmpeg>=0.5,<1",
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+extend-exclude = '(scripts/vendor/|^/make_tmall_[^/]*\.py$|^/edit_[^/]*\.py$)'
+force-exclude = "tests/audio_sound/test_cli.py"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["./make_tmall_*.py", "./edit_*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/vendor/**" = ["ALL"]
+"assets/**" = ["ALL"]
+"tests/**" = ["E402"]
+"examples/**" = ["E402"]
+"references/**" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

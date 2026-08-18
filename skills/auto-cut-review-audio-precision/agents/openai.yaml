@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 审核文档精准修音"
+  short_description: "从审核文档精准删词，修复衔接太快和停顿节奏"
+  default_prompt: "Use $auto-cut-review-audio-precision to process Feishu review-document audio edits with precise ASR alignment, semantic pause repair, visual-aware pause timing, validation, and serial upload."
+
+policy:
+  allow_implicit_invocation: true

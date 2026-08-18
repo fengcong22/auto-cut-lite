@@ -1,0 +1,10 @@
+# Isolated Python 3.11 audio runtime. Do not merge into the main environment.
+numpy==1.23.5
+librosa==0.10.0
+soundfile==0.12.1
+scipy==1.10.1
+intervaltree==3.1.0
+torch==2.3.1
+torchaudio==2.3.1
+deepfilternet==0.5.6
+pytest==8.4.2

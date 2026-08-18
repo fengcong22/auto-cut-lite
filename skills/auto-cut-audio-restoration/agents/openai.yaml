@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto-Cut 音频修复"
+  short_description: "评估并修复口播中的呼吸、口水音、停顿残留、噪声和响度问题"
+  default_prompt: "使用 $auto-cut-audio-restoration 按仓库认可流程评估并修复这段中文口播音频，交付保留中文原名并带运行编号的 WAV/MP3，同时给出频谱图和响度复核。"

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://auto-cut.local/schemas/capability-manifest.schema.json",
+  "title": "Auto-Cut capability manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "schema_version",
+    "release_version",
+    "capabilities"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "schemas/capability-manifest.schema.json"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "release_version": {
+      "const": "1.7.0"
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/capability"
+      }
+    }
+  },
+  "$defs": {
+    "actualResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "code",
+        "summary"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "ready",
+            "degraded",
+            "pending",
+            "unavailable",
+            "failed",
+            "skipped"
+          ]
+        },
+        "code": {
+          "enum": [
+            "bundled_contract_verified",
+            "bundled_source_verified",
+            "install_on_first_run",
+            "requires_local_jianying",
+            "requires_local_software",
+            "requires_user_assets",
+            "requires_user_authorization",
+            "requires_user_resync",
+            "unverified_external_model",
+            "verification_failed",
+            "verification_skipped",
+            "verified_degraded",
+            "verified_ready",
+            "verified_unavailable",
+            "configuration_present_unverified",
+            "external_service_unverified",
+            "static_index_ready_remote_unverified",
+            "cloud_index_empty",
+            "deterministic_fallback",
+            "optional_local_tool_required",
+            "target_local_carnac_found",
+            "windows_only_optional_tool"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "label",
+        "description",
+        "bundled",
+        "installed_on_first_run",
+        "requires_local_jianying",
+        "requires_user_authorization",
+        "requires_user_assets",
+        "unavailable",
+        "verification_command",
+        "actual_result"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bundled": {
+          "type": "boolean"
+        },
+        "installed_on_first_run": {
+          "type": "boolean"
+        },
+        "requires_local_jianying": {
+          "type": "boolean"
+        },
+        "requires_user_authorization": {
+          "type": "boolean"
+        },
+        "requires_user_assets": {
+          "type": "boolean"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "verification_command": {
+          "type": "string",
+          "minLength": 1
+        },
+        "actual_result": {
+          "$ref": "#/$defs/actualResult"
+        }
+      }
+    }
+  }
+}
