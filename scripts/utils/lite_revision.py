@@ -52,6 +52,27 @@ _FALSE_VALUES = {"0", "false", "no", "n", "off"}
 _ALIGNMENT_PASS_STATUSES = {"pass", "passed", "ok", "validated", "complete", "completed"}
 _ASR_GRANULARITIES = {"word", "character", "word_character", "word+character"}
 _SHA256_HEX_LENGTH = 64
+_SPOKEN_CUT_KINDS = {
+    "spoken_delete",
+    "speech_delete",
+    "audio_delete",
+    "phrase_delete",
+    "range_delete",
+    "ellipsis_range_delete",
+    "colored_span_delete",
+    "gap_delete",
+    "tail_cleanup",
+    "tail_particle_delete",
+    "pause_delete",
+}
+_PRECISE_BOUNDARY_KINDS = {
+    "phrase_delete",
+    "range_delete",
+    "ellipsis_range_delete",
+    "colored_span_delete",
+    "gap_delete",
+    "tail_particle_delete",
+}
 
 
 def _runtime_components():
@@ -284,12 +305,47 @@ def _spoken_cut_alignment_problems(
                 problems.append("edit start/end do not match the ASR-resolved cut window")
 
     if not str(evidence.get("delete") or "").strip():
-        problems.append("delete phrase is missing")
+        if str(edit.source_kind or "").strip().casefold() != "gap_delete":
+            problems.append("delete phrase is missing")
     if "must_keep" not in evidence:
         problems.append("must_keep field is missing")
     strategy = str(evidence.get("strategy") or "").strip().casefold()
     if strategy not in {"precision_first", "hybrid", "listening_first"}:
         problems.append("strategy is missing or invalid")
+    if str(edit.source_kind or "").strip().casefold() == "colored_span_delete":
+        colored_spans = evidence.get("colored_spans")
+        colored_status = str(evidence.get("colored_span_status") or "").strip().casefold()
+        if colored_status != "resolved" or not isinstance(colored_spans, list) or not colored_spans:
+            problems.append("colored_span_delete requires resolved blue rich-text spans")
+
+    source_kind = str(edit.source_kind or "").strip().casefold()
+    if source_kind in _PRECISE_BOUNDARY_KINDS:
+        refinement = evidence.get("boundary_refinement")
+        if not isinstance(refinement, dict):
+            problems.append("boundary_refinement evidence is missing")
+        else:
+            refinement_status = str(refinement.get("status") or "").strip().casefold()
+            if refinement_status not in {"asr_character_edge", "anchor_gap", "acoustic_gap_refined"}:
+                problems.append("boundary_refinement.status is invalid")
+            if _as_bool(refinement.get("crossed_must_keep")) is not False:
+                problems.append("boundary_refinement must prove no must_keep word was crossed")
+            refinement_window = refinement.get("resolved_cut_window")
+            if not isinstance(refinement_window, (list, tuple)) or len(refinement_window) != 2:
+                problems.append("boundary_refinement.resolved_cut_window is missing")
+            else:
+                try:
+                    refinement_start = float(refinement_window[0])
+                    refinement_end = float(refinement_window[1])
+                except (TypeError, ValueError):
+                    problems.append("boundary_refinement.resolved_cut_window must be numeric")
+                else:
+                    if (
+                        abs(refinement_start - edit.start) > 0.01
+                        or abs(refinement_end - edit.end) > 0.01
+                    ):
+                        problems.append(
+                            "boundary_refinement window does not match the edit start/end"
+                        )
 
     return [f"Lite spoken cut {item_id}: {problem}." for problem in problems]
 
@@ -307,7 +363,7 @@ def _validate_spoken_cut_alignment(
         source_kind = str(edit.source_kind or "").strip().casefold()
         review_item = by_id.get(edit.doc_item_id.casefold()) if edit.doc_item_id else None
         review_kind = str(review_item.kind if review_item is not None else "").strip().casefold()
-        if source_kind == "spoken_delete" or review_kind == "spoken_delete":
+        if source_kind in _SPOKEN_CUT_KINDS or review_kind in _SPOKEN_CUT_KINDS:
             problems.extend(_spoken_cut_alignment_problems(edit, review_item))
     if problems:
         raise ValueError(
@@ -458,6 +514,104 @@ def _asset_specs(edit: RevisionEdit) -> List[Dict[str, Any]]:
         }
         for path in edit.asset_paths
     ]
+
+
+def _lite_visual_results(
+    request: RevisionRequest,
+    segment_receipts: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Translate saved lite overlays into the canonical acceptance evidence shape.
+
+    Lite keeps every overlay on one fixed editable lane, but pointer and visual
+    acceptance must still use the same saved-segment/material attribution as the
+    full workflow.  Preserve the planner's binding/lifecycle/landing evidence;
+    this helper only adds identities that can be known after the draft is saved.
+    """
+
+    visual_by_item: Dict[str, List[Dict[str, Any]]] = {}
+    for receipt in segment_receipts:
+        if receipt.get("kind") != "visual":
+            continue
+        item_id = str(receipt.get("item_id") or "").strip()
+        if item_id:
+            visual_by_item.setdefault(item_id.casefold(), []).append(receipt)
+
+    results: List[Dict[str, Any]] = []
+    for index, edit in enumerate(request.edits):
+        item_id = str(edit.doc_item_id or f"edit_{index + 1:03d}")
+        receipts = visual_by_item.get(item_id.casefold(), [])
+        if not receipts:
+            continue
+        segments = [
+            {
+                "role": str(receipt.get("role") or "visual_overlay"),
+                "asset_path": str(receipt.get("asset_path") or ""),
+                "asset_type": str(receipt.get("asset_type") or "image"),
+                "track_name": str(receipt.get("track_name") or ""),
+                "segment_id": str(receipt.get("segment_id") or ""),
+                "material_id": str(receipt.get("material_id") or ""),
+                "source_start": float(receipt.get("source_start") or 0.0),
+                "timeline_start": float(receipt.get("timeline_start") or 0.0),
+                "duration": float(receipt.get("duration") or 0.0),
+                "scale_x": float(receipt.get("scale_x") or 1.0),
+                "scale_y": float(receipt.get("scale_y") or 1.0),
+                "transform_x": float(receipt.get("transform_x") or 0.0),
+                "transform_y": float(receipt.get("transform_y") or 0.0),
+                "keyframes": [],
+            }
+            for receipt in receipts
+        ]
+        first = segments[0]
+        operation = str(edit.source_kind or edit.op_type or "visual_overlay")
+        results.append(
+            {
+                "item_id": item_id,
+                "kind": operation,
+                "segments": segments,
+                "evidence": {
+                    "status": "pass",
+                    "executed": True,
+                    "operation": operation,
+                    "edit_type": edit.op_type,
+                    "asset_path": first["asset_path"],
+                    "asset_paths": [segment["asset_path"] for segment in segments],
+                    "track_name": first["track_name"],
+                    "track_names": [segment["track_name"] for segment in segments],
+                    "segment_id": first["segment_id"],
+                    "segment_ids": [segment["segment_id"] for segment in segments],
+                    "material_id": first["material_id"],
+                    "material_ids": [segment["material_id"] for segment in segments],
+                    "overlay_track": first["track_name"],
+                    "overlay_segment": first["segment_id"],
+                    "overlay_segments": segments,
+                    "validation": {
+                        "status": "pass",
+                        "method": "editable_lite_overlay_segment_written",
+                    },
+                },
+                "validation": {
+                    "status": "pass",
+                    "method": "editable_lite_overlay_segment_written",
+                },
+            }
+        )
+    return results
+
+
+def _requires_full_lite_acceptance(request: RevisionRequest, strict: bool) -> bool:
+    acceptance = request.acceptance
+    return bool(
+        strict
+        or acceptance.require_final_acceptance
+        or acceptance.require_audio_validation
+        or acceptance.require_pause_validation
+        or acceptance.require_subject_pointer_binding
+        or acceptance.require_pointer_lifecycle_evidence
+        or acceptance.require_review_items
+        or acceptance.expected_review_item_count is not None
+        or acceptance.expected_review_item_ids
+        or acceptance._explicit_require_visual_evidence
+    )
 
 
 def _add_asset_segment(
@@ -774,6 +928,21 @@ def execute_lite_revision_request(
     if acceptance_repair_callback is not None:
         raise ValueError("Lite mode does not support destructive acceptance repair callbacks.")
 
+    # Keep the lite timeline contract, but do not silently bypass the full
+    # workflow's evidence/preflight gates when a compiled job asks for them.
+    # This is deliberately before opening JianYing so stale ASR/audio plans or
+    # invalid visual volume requests cannot produce a plausible-looking draft.
+    if _requires_full_lite_acceptance(request, strict):
+        from utils.revision_runner import (
+            _validate_revision_execution_preflight,
+            _validate_visual_overlay_volumes,
+        )
+        from utils.revision_evidence import normalize_pause_adjustments
+
+        request = normalize_pause_adjustments(request)
+        _validate_revision_execution_preflight(request, doc_items)
+        _validate_visual_overlay_volumes(request)
+
     draft, marker_type, mock_audio, mock_video, _jy_project = _runtime_components()
     project, write_info = _open_project(request, drafts_root)
     _disable_maintrack_adsorb(project)
@@ -1083,6 +1252,12 @@ def execute_lite_revision_request(
                     {
                         "item_id": edit.doc_item_id or f"edit_{idx + 1:03d}",
                         "kind": "visual",
+                        "role": str(spec.get("role") or "visual_overlay"),
+                        "asset_type": (
+                            "video"
+                            if os.path.splitext(asset_path)[1].lower() in _VIDEO_EXTENSIONS
+                            else "image"
+                        ),
                         "track_name": LITE_TRACKS["visual_assets"],
                         "segment_id": str(getattr(asset_segment, "segment_id", "")),
                         "material_id": str(getattr(asset_segment, "material_id", "")),
@@ -1146,8 +1321,9 @@ def execute_lite_revision_request(
 
         save_result = project.save(auto_retain=False)
         variants = _load_content_variants(save_result)
-        validations = [
-            _validate_lite_content(
+        validations = []
+        for variant_name, content in variants:
+            variant_validation = _validate_lite_content(
                 content,
                 total_duration=total_duration,
                 marker_plan=marker_plan,
@@ -1157,14 +1333,101 @@ def execute_lite_revision_request(
                 delete_windows=delete_windows,
                 audio_duration=source_audio_duration,
             )
-            for _name, content in variants
-        ]
-        validation = validations[0]
+            validations.append((variant_name, variant_validation))
+        primary_name, primary_validation = validations[0]
+        validation = {
+            **primary_validation,
+            "errors": list(primary_validation["errors"]),
+            "warnings": list(primary_validation["warnings"]),
+            "metrics": dict(primary_validation["metrics"]),
+        }
+        variant_metrics = {primary_name: dict(primary_validation["metrics"])}
+        for variant_name, variant_validation in validations[1:]:
+            variant_metrics[variant_name] = dict(variant_validation["metrics"])
+            validation["errors"].extend(
+                f"[{variant_name}] {message}" for message in variant_validation["errors"]
+            )
+            validation["warnings"].extend(
+                f"[{variant_name}] {message}" for message in variant_validation["warnings"]
+            )
+        validation["ok"] = not validation["errors"]
         validation["metrics"]["validated_variants"] = [name for name, _content in variants]
+        validation["metrics"]["lite_validation_variants"] = variant_metrics
         validation["warnings"].extend(marker_warnings)
         if not validation["ok"]:
             raise RuntimeError("Lite editable draft validation failed: " + "; ".join(validation["errors"]))
         validated = True
+
+        visual_results = _lite_visual_results(request, segment_receipts)
+        from utils.revision_runner import (
+            RevisionAcceptanceError,
+            _merge_visual_results_into_items,
+            _request_with_visual_results,
+        )
+        from utils.revision_validation import validate_revision_acceptance_variants
+
+        validation_request = _request_with_visual_results(request, visual_results)
+        validation_doc_items = (
+            _merge_visual_results_into_items(doc_items, visual_results)
+            if doc_items is not None
+            else None
+        )
+        if _requires_full_lite_acceptance(validation_request, strict):
+            acceptance_validation = validate_revision_acceptance_variants(
+                validation_request,
+                variants,
+                draft_name=write_info["draft_name"],
+                doc_items=validation_doc_items,
+                strict=strict,
+            )
+        else:
+            acceptance_validation = {
+                "ok": True,
+                "strict": False,
+                "skipped": True,
+                "reason": "No explicit full-capability acceptance gate was requested.",
+                "errors": [],
+                "warnings": [],
+                "failures": [],
+                "metrics": {"acceptance_validation_variants": {}},
+            }
+        if not acceptance_validation["ok"]:
+            failure_reasons = [
+                str(reason)
+                for reason in acceptance_validation.get("errors") or []
+                if str(reason).strip()
+            ]
+            message = "; ".join(dict.fromkeys(failure_reasons)) or "Acceptance failed."
+            unresolved_item_ids = sorted(
+                {
+                    str(item_id).strip()
+                    for item_id in acceptance_validation.get("unresolved_item_ids") or []
+                    if str(item_id).strip()
+                }
+                | {
+                    str(failure.get("item_id") or "").strip()
+                    for failure in acceptance_validation.get("failures") or []
+                    if isinstance(failure, dict) and str(failure.get("item_id") or "").strip()
+                }
+            )
+            draft_path = str(save_result.get("draft_path") or "")
+            raise RevisionAcceptanceError(
+                f"Lite revision acceptance validation failed: {message}",
+                {
+                    "draft_name": write_info["draft_name"],
+                    "requested_draft_name": write_info["requested_draft_name"],
+                    "write_mode": write_info.get("write_mode", "requested_draft"),
+                    "workflow_mode": "lite",
+                    "lite_cut_layout": layout,
+                    "draft_path": draft_path,
+                    "draft_dir": os.path.dirname(draft_path),
+                    "review_marker_count": len(marker_receipt_dicts),
+                    "review_marker_receipts": marker_receipt_dicts,
+                    "validation": validation,
+                    "acceptance_validation": acceptance_validation,
+                    "unresolved_item_ids": unresolved_item_ids,
+                },
+            )
 
         from utils.revision_runner import _run_project_retention
 
@@ -1180,10 +1443,11 @@ def execute_lite_revision_request(
             "source_duration_seconds": total_duration,
             "tracks": list(LITE_TRACKS.values()),
             "segment_receipts": segment_receipts,
+            "visual_overlay_results": visual_results,
             "review_marker_count": len(marker_receipt_dicts),
             "review_marker_receipts": marker_receipt_dicts,
             "validation": validation,
-            "acceptance_validation": validation,
+            "acceptance_validation": acceptance_validation,
             "retention": retention,
             "non_destructive": True,
             "delete_operations": (

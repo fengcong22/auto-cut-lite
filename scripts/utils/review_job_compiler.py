@@ -56,6 +56,118 @@ _REVIEW_ONLY_HINTS = ("校对", "核对", "检查", "确认", "review", "check",
 _RANGE_SEPARATOR = re.compile(r"\s*(?:-|–|—|~|至|\bto\b)\s*", re.IGNORECASE)
 
 
+_BLUE_NOTE_HINTS = ("蓝色字", "蓝字", "标色字", "颜色字", "着色字")
+_RICH_TEXT_KEYS = ("colored_spans", "text_runs", "rich_text_spans", "spans", "runs", "elements")
+_TEXT_KEYS = ("text", "content", "value", "plain_text", "plainText")
+_COLOR_KEYS = ("color", "text_color", "textColor", "foreground_color", "foregroundColor")
+
+
+def _color_triplet(value: Any) -> tuple[float, float, float] | None:
+    """Normalize Feishu color representations to 0..255 RGB."""
+    if isinstance(value, Mapping):
+        for key in _COLOR_KEYS:
+            if key in value:
+                return _color_triplet(value.get(key))
+        if all(key in value for key in ("r", "g", "b")):
+            return _color_triplet([value.get("r"), value.get("g"), value.get("b")])
+        return None
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        try:
+            numbers = [float(value[index]) for index in range(3)]
+        except (TypeError, ValueError):
+            return None
+        if max(numbers) <= 1.0:
+            numbers = [number * 255.0 for number in numbers]
+        return tuple(numbers)  # type: ignore[return-value]
+    text = str(value or "").strip().casefold()
+    if not text:
+        return None
+    rgb_match = re.search(r"rgba?\(\s*([0-9.]+)\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)", text)
+    if rgb_match:
+        return tuple(float(rgb_match.group(index)) for index in range(1, 4))  # type: ignore[return-value]
+    hex_match = re.fullmatch(r"#?([0-9a-f]{6})(?:[0-9a-f]{2})?", text)
+    if hex_match:
+        raw = hex_match.group(1)
+        return (int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16))
+    return None
+
+
+def _is_blue_color(value: Any) -> bool:
+    rgb = _color_triplet(value)
+    if rgb is None:
+        return False
+    # Feishu's blue review color is rgb(36,91,219). Allow small theme rounding.
+    return max(abs(rgb[index] - (36.0, 91.0, 219.0)[index]) for index in range(3)) <= 12.0
+
+
+def _run_text(run: Mapping[str, Any]) -> str:
+    for key in _TEXT_KEYS:
+        value = run.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _run_color(run: Mapping[str, Any]) -> Any:
+    for key in _COLOR_KEYS:
+        if key in run:
+            return run.get(key)
+    for container_key in ("style", "attrs"):
+        container = run.get(container_key)
+        if isinstance(container, Mapping):
+            for key in _COLOR_KEYS:
+                if key in container:
+                    return container.get(key)
+    return None
+
+
+def _iter_rich_runs(value: Any) -> Iterable[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        if _run_text(value):
+            yield value
+        for key in _RICH_TEXT_KEYS:
+            child = value.get(key)
+            if isinstance(child, (Mapping, list, tuple)):
+                yield from _iter_rich_runs(child)
+        return
+    if isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _iter_rich_runs(child)
+
+
+def _extract_blue_spans(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Extract blue rich-text runs without collapsing uncolored text between them."""
+    candidates: list[Any] = []
+    for key in _RICH_TEXT_KEYS:
+        if key in row:
+            candidates.append(row.get(key))
+    for key in ("markup", "html", "rich_text", "richText"):
+        value = row.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        for match in re.finditer(
+            r"(?is)<(?:span|text|a)[^>]*(?:style|color)=[\"'][^\"']*(?:rgb\([^)]*\)|#[0-9a-f]{6,8})[^\"']*[\"'][^>]*>(.*?)</(?:span|text|a)>",
+            value,
+        ):
+            attrs = value[match.start() : match.end()]
+            color_match = re.search(r"(?:rgb\([^)]*\)|#[0-9a-f]{6,8})", attrs, re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
+            if text and color_match and _is_blue_color(color_match.group(0)):
+                candidates.append({"text": text, "color": color_match.group(0)})
+    spans: list[dict[str, Any]] = []
+    for run in _iter_rich_runs(candidates):
+        text = _run_text(run)
+        color = _run_color(run)
+        if not text or not (_is_blue_color(color) or run.get("blue") is True or run.get("is_blue") is True):
+            continue
+        entry: dict[str, Any] = {"text": text, "color": color or "rgb(36,91,219)"}
+        for key in ("start", "end", "start_index", "end_index"):
+            if key in run and run.get(key) not in (None, ""):
+                entry[key] = run.get(key)
+        spans.append(entry)
+    return spans
+
+
 def _canonical_json_bytes(value: Any) -> bytes:
     try:
         return json.dumps(
@@ -285,6 +397,15 @@ def _execution_required_for_kind(kind: str, requested: bool) -> bool:
     normalized = str(kind or "").strip().casefold()
     if normalized in {
         "spoken_delete",
+        "speech_delete",
+        "audio_delete",
+        "phrase_delete",
+        "range_delete",
+        "ellipsis_range_delete",
+        "colored_span_delete",
+        "gap_delete",
+        "tail_cleanup",
+        "tail_particle_delete",
         "pause_delete",
         "audio_repair",
         "replace_audio",
@@ -381,7 +502,45 @@ def _canonical_review_items(
         inference_text = " ".join(
             value for value in (str(source_row.get("label") or ""), source_text) if value
         )
-        kind = kind_text or _classify_review_text(inference_text)
+        inferred_kind = _classify_review_text(inference_text)
+        kind = kind_text or inferred_kind
+        # Clipboard/legacy extractors often pre-label every quoted deletion as
+        # spoken_delete (or leave it as review_only/visual_delete).  Promote a
+        # clearly more specific source-text semantic so stale extractor labels
+        # cannot suppress ellipsis, gap, or colored-span execution.
+        if inferred_kind in {
+            "phrase_delete",
+            "ellipsis_range_delete",
+            "colored_span_delete",
+            "gap_delete",
+        } and kind_text.casefold() in {
+            "",
+            "spoken_delete",
+            "speech_delete",
+            "audio_delete",
+            "review_only",
+            "visual_delete",
+        }:
+            kind = inferred_kind
+
+        # Blue text in a Feishu review note means delete the marked spoken
+        # fragments. Keep the rich-text spans in the source ledger so ASR can
+        # resolve one physical window per fragment; never guess that the whole
+        # quoted sentence is blue when markup was not captured.
+        if any(hint.casefold() in inference_text.casefold() for hint in _BLUE_NOTE_HINTS):
+            kind = "colored_span_delete"
+            blue_spans = _extract_blue_spans(source_row)
+            row["colored_spans"] = copy.deepcopy(blue_spans)
+            row_evidence = source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
+            row_evidence = copy.deepcopy(row_evidence)
+            row_evidence["colored_spans"] = copy.deepcopy(blue_spans)
+            row_evidence["colored_span_status"] = "resolved" if blue_spans else "missing_markup"
+            row["evidence"] = row_evidence
+            if not blue_spans:
+                warnings.append(
+                    f"Review item {explicit_id or f'index_{index + 1:03d}'} requests blue-span deletion "
+                    "but rich-text markup was not captured."
+                )
 
         if explicit_id:
             item_id = explicit_id
@@ -420,7 +579,20 @@ def _canonical_review_items(
             row["block_id"] = block_id
         row["kind"] = kind
         row["execution_required"] = execution_required
-        if kind in {"spoken_delete", "pause_delete", "pointer_overlay"}:
+        if kind in {
+            "spoken_delete",
+            "speech_delete",
+            "audio_delete",
+            "phrase_delete",
+            "range_delete",
+            "ellipsis_range_delete",
+            "colored_span_delete",
+            "gap_delete",
+            "tail_cleanup",
+            "tail_particle_delete",
+            "pause_delete",
+            "pointer_overlay",
+        }:
             row["review_timestamp_role"] = "search_hint"
         row["verbatim_status"] = verbatim_status
         row.pop("start", None)

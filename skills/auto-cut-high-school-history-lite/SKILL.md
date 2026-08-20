@@ -9,6 +9,22 @@ Use this as the named compact entrypoint for `stage=高中`, `subject=历史`. S
 `workflow_mode=lite` in every revision request and hand off to the canonical `auto-cut` router.
 Do not fork or copy the full Auto-Cut implementation.
 
+## Full-Capability Quality Engine
+
+- `lite` changes the editable timeline/output policy only. It must not weaken
+  source ASR, word/character boundary resolution, reverse-ASR, subject-pointer
+  binding, pointer placement/lifecycle evidence, visual attribution, or final
+  acceptance gates owned by the canonical full workflow.
+- Run the canonical full-workflow preflight before opening JianYing whenever a
+  compiled request enables audio, visual, pointer, pause, source-coverage, or
+  final-acceptance gates. A missing or stale receipt fails before draft writes.
+- After saving, run canonical acceptance independently against the root draft
+  and every active timeline variant. Lite track validation is necessary but is
+  never a substitute for item-level full-capability acceptance.
+- Preserve the lite prohibitions on destructive deletion, generated animation,
+  keyframes, and automatic scaling. Full capability means full precision and
+  evidence, not silently changing the lite editing contract.
+
 ## Lite Draft Contract
 
 - The default `lite_cut_layout` is `split_gap`. In this layout, delete windows are real

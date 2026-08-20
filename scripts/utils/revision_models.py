@@ -197,6 +197,8 @@ _ANIMATION_KEYWORDS = (
 )
 _ANIMATION_ACTION_KEYWORDS = ("提前", "推迟", "延后", "加快", "变速", "挪", "移到", "改到", "调到")
 _DELETE_KEYWORDS = ("删除", "删掉", "剪掉", "去掉", "移除")
+_COLORED_DELETE_KEYWORDS = ("蓝色字", "蓝字", "标色字", "颜色字", "着色字")
+_ELLIPSIS_MARKERS = ("…", "...")
 _EXECUTION_KEYWORDS = (
     "修改",
     "删除",
@@ -218,7 +220,21 @@ _EXECUTION_KEYWORDS = (
     "延长",
     "调",
 )
-_AUDIO_KINDS = {"spoken_delete", "pause_delete", "audio_repair", "replace_audio"}
+_AUDIO_KINDS = {
+    "spoken_delete",
+    "speech_delete",
+    "audio_delete",
+    "phrase_delete",
+    "range_delete",
+    "ellipsis_range_delete",
+    "colored_span_delete",
+    "gap_delete",
+    "tail_cleanup",
+    "tail_particle_delete",
+    "pause_delete",
+    "audio_repair",
+    "replace_audio",
+}
 _VISUAL_KINDS = {
     "pointer_overlay",
     "animation_timing",
@@ -356,15 +372,39 @@ def _classify_review_text(text: str) -> str:
         normalized, _ANIMATION_ACTION_KEYWORDS
     ):
         return "animation_timing"
+    if (
+        "中间" in normalized
+        and _contains_any(normalized, ("停顿", "空白", "间隔"))
+        and len(re.findall(r"[“「『\"].+?[”」』\"]", normalized)) >= 2
+    ):
+        return "gap_delete"
     if _contains_any(normalized, _DELETE_KEYWORDS) and _contains_any(
         normalized, ("停顿", "空白", "间隔")
     ):
         return "pause_delete"
+    # A reviewer may paste the spoken sentence itself and omit the word
+    # “删除”.  A timestamp plus quoted speech is an executable spoken edit,
+    # not a marker-only note.  Ellipses mean the full spoken range between the
+    # two anchors, while a quoted phrase without ellipsis is a phrase delete.
+    if _contains_any(normalized, _COLORED_DELETE_KEYWORDS):
+        return "colored_span_delete"
+    if _contains_any(normalized, _ELLIPSIS_MARKERS) and _has_quoted_review_text(normalized):
+        return "ellipsis_range_delete"
+    if _has_quoted_review_text(normalized) and _has_review_time_hint(normalized):
+        return "phrase_delete"
     if _contains_any(normalized, _DELETE_KEYWORDS):
         return "spoken_delete"
     if _contains_any(normalized, _EXECUTION_KEYWORDS):
         return "visual_overlay"
     return "review_only"
+
+
+def _has_review_time_hint(text: str) -> bool:
+    return bool(re.search(r"\d{1,2}\s*[:：]\s*\d{1,2}", str(text or "")))
+
+
+def _has_quoted_review_text(text: str) -> bool:
+    return bool(re.search(r"[“「『\"].+?[”」』\"]", str(text or "")))
 
 
 def _looks_execution_required(text: str, kind: str) -> bool:

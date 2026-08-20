@@ -94,6 +94,16 @@ class ReviewMarkerOpsMixin:
     REVIEW_MARKER_LINE_HEIGHT_FACTOR = 0.025
     REVIEW_MARKER_BACKGROUND_COLORS = {
         "spoken_delete": "#B42318",
+        # Keep each spoken-delete interpretation visually distinct in the
+        # timeline.  These are intentionally separate from the generic
+        # spoken-delete red so a reviewer can tell whether a row came from an
+        # explicit delete note, an ellipsis range, a blue rich-text span, or
+        # a pause/gap instruction without opening the source ledger.
+        "phrase_delete": "#B42318",
+        "range_delete": "#991B1B",
+        "ellipsis_range_delete": "#7F1D1D",
+        "colored_span_delete": "#6D28D9",
+        "gap_delete": "#A16207",
         "pause_delete": "#C2410C",
         "visual_delete": "#9F1239",
         "pointer_overlay": "#1D4ED8",

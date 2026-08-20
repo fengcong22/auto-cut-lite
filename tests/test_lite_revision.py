@@ -14,7 +14,13 @@ if SCRIPTS_PATH not in sys.path:
 
 from utils.lite_revision import LITE_TRACKS, _add_asset_segment, _spoken_cut_alignment_problems
 from utils.review_job_compiler import compile_review_job
-from utils.revision_runner import execute_revision_request, load_revision_request
+from utils.revision_models import _classify_review_text
+from utils.revision_runner import (
+    RevisionAcceptanceError,
+    execute_revision_request,
+    load_revision_request,
+)
+from core.review_marker_ops import ReviewMarkerOpsMixin
 
 
 def _load_request(payload):
@@ -132,6 +138,102 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertTrue(request_payload["acceptance"]["require_visual_evidence"])
         self.assertTrue(request_payload["acceptance"]["require_subject_pointer_binding"])
         self.assertTrue(request_payload["acceptance"]["require_pointer_lifecycle_evidence"])
+
+    def test_lite_explicit_visual_gate_uses_full_acceptance_with_saved_overlay(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteVisualAcceptance",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "visual_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "visual-1",
+                        "asset_paths": ["C:/media/overlay.png"],
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "visual-1",
+                        "kind": "visual_overlay",
+                        "source_text": "02:00 add the supplied overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "execution_required": True,
+                    }
+                ],
+                "acceptance": {"require_visual_evidence": True},
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+                strict=True,
+            )
+
+        self.assertTrue(result["acceptance_validation"]["ok"])
+        self.assertFalse(result["acceptance_validation"].get("skipped", False))
+        self.assertEqual(len(result["visual_overlay_results"]), 1)
+        self.assertEqual(
+            result["visual_overlay_results"][0]["evidence"]["track_name"],
+            LITE_TRACKS["visual_assets"],
+        )
+
+    def test_lite_pointer_gate_rejects_missing_full_binding_evidence(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePointerAcceptance",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                    "project_key": "lite-pointer-test",
+                },
+                "edits": [
+                    {
+                        "type": "pointer_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-1",
+                        "asset_paths": ["C:/media/pointer.png"],
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "pointer-1",
+                        "kind": "pointer_overlay",
+                        "source_text": "02:00 point to the target",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "execution_required": True,
+                    }
+                ],
+                "acceptance": {
+                    "require_visual_evidence": True,
+                    "require_subject_pointer_binding": True,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaises(RevisionAcceptanceError) as raised:
+                execute_revision_request(
+                    request,
+                    drafts_root=drafts_root,
+                    mock_media=True,
+                    strict=True,
+                )
+
+        errors = raised.exception.result_data["acceptance_validation"]["errors"]
+        self.assertTrue(any("subject pointer binding receipt" in row for row in errors))
 
     def test_load_revision_request_defaults_to_full_and_accepts_lite(self):
         base = {
@@ -604,6 +706,157 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertTrue(any("source audio SHA-256" in problem for problem in problems))
         self.assertTrue(any("authoritative_cut_boundary" in problem for problem in problems))
         self.assertTrue(any("matches are missing" in problem for problem in problems))
+
+    def test_implicit_quoted_source_and_ellipsis_are_audio_deletions(self):
+        implicit = (
+            "00\uff1a13-00\uff1a26\uff0c\u201c\u8fd9\u4e24\u4e2a\u56fd\u5bb6\u548c\u5730\u533a\u5462"
+            "\u2026\u2026\u6240\u4ee5\u6211\u4eec\u628a\u5b83\u653e\u5230\u4e00\u8d77\u6765\u8bf4\u554a\u3002\u201d"
+        )
+        self.assertEqual(_classify_review_text(implicit), "ellipsis_range_delete")
+        gap = (
+            "09\uff1a20\uff0c\u5220\u9664\u201c\u5bb0\u76f8\u201d\u548c"
+            "\u201c\u4e3a\u6838\u5fc3\u201d\u4e2d\u95f4\u7684\u505c\u987f"
+        )
+        self.assertEqual(_classify_review_text(gap), "gap_delete")
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "implicit-1",
+                            "kind": "review_only",
+                            "source_text": implicit,
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "ImplicitDeleteDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "ellipsis_range_delete")
+        self.assertTrue(item["execution_required"])
+        self.assertEqual(item["review_timestamp_role"], "search_hint")
+
+    def test_blue_rich_text_fragments_stay_independent(self):
+        source_text = (
+            "06\uff1a14\uff0c\u201c\u5728\u8fd9\u5f20\u5443\u753b\u4e0a\u201d"
+            "\u5220\u9664\u84dd\u8272\u5b57"
+        )
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "blue-1",
+                            "kind": "visual_delete",
+                            "source_text": source_text,
+                            "text_runs": [
+                                {"text": "\u5728\u8fd9\u5f20", "color": "#111111"},
+                                {"text": "\u5443", "color": "rgb(36,91,219)"},
+                                {"text": "\u753b\u4e0a", "color": "#111111"},
+                                {"text": "\u753b", "color": [36, 91, 219]},
+                            ],
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "BlueSpanDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "colored_span_delete")
+        self.assertTrue(item["execution_required"])
+        self.assertEqual(item["evidence"]["colored_span_status"], "resolved")
+        self.assertEqual(
+            [span["text"] for span in item["evidence"]["colored_spans"]],
+            ["\u5443", "\u753b"],
+        )
+
+    def test_blue_delete_without_markup_is_not_guessed_as_whole_sentence(self):
+        source_text = (
+            "08\uff1a51-08\uff1a56\uff0c\u201c\u4f60\u770b\u3002\u90a3\u4e2a\u8bae\u4f1a\u201d"
+            "\u5220\u9664\u84dd\u8272\u5b57"
+        )
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {"review_items": [{"id": "blue-missing", "source_text": source_text}]},
+                {
+                    "draft_name": "BlueMissingDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "colored_span_delete")
+        self.assertEqual(item["evidence"]["colored_spans"], [])
+        self.assertEqual(item["evidence"]["colored_span_status"], "missing_markup")
+
+    def test_precise_semantic_requires_must_keep_safe_boundary_evidence(self):
+        request = _load_request(
+            {
+                "project": {
+                    "draft_name": "BoundaryEvidenceDraft",
+                    "source_video": "C:/media/source.mp4",
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "ellipsis_range_delete",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "range-1",
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "delete": "start...end",
+                            "must_keep": ["before", "after"],
+                            "strategy": "precision_first",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "character",
+                                "input_sha256": "d" * 64,
+                                "authoritative_cut_boundary": True,
+                                "matches": [{"text": "range", "start": 2.0, "end": 3.0}],
+                                "resolved_cut_window": [2.0, 3.0],
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+        problems = _spoken_cut_alignment_problems(request.edits[0], None)
+        self.assertTrue(any("boundary_refinement evidence is missing" in row for row in problems))
+
+        evidence = request.edits[0].evidence
+        evidence["boundary_refinement"] = {
+            "status": "asr_character_edge",
+            "resolved_cut_window": [2.0, 3.0],
+            "crossed_must_keep": False,
+        }
+        problems = _spoken_cut_alignment_problems(request.edits[0], None)
+        self.assertFalse(any("boundary_refinement" in row for row in problems))
+
+    def test_review_marker_semantic_backgrounds_are_distinct(self):
+        colors = ReviewMarkerOpsMixin.REVIEW_MARKER_BACKGROUND_COLORS
+        self.assertNotEqual(colors["ellipsis_range_delete"], colors["colored_span_delete"])
+        self.assertNotEqual(colors["colored_span_delete"], colors["gap_delete"])
 
 
 if __name__ == "__main__":
