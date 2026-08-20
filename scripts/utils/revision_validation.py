@@ -266,6 +266,25 @@ _AUDIO_DELIVERY_TOLERANCE_US = 50_000
 _AUDIO_DELIVERY_FADE_TOLERANCE_US = 1_000
 _AUDIO_DELIVERY_VOLUME_TOLERANCE = 1e-6
 _AUDIO_DELIVERY_NARRATION_ROLES = {"source", "replacement_video", "repair"}
+_LITE_REUSED_AUDIO_TRACK_NAME = "Lite Reused Audio"
+
+
+def _saved_audio_delivery_volume(request: RevisionRequest, segment: Any) -> float:
+    """Return the volume that the editable saved draft must expose.
+
+    The normalized segmented plan keeps reference rows at volume 0 so full-workflow
+    reverse-ASR and candidate-duration semantics remain unchanged.  Lite split-gap
+    drafts intentionally expose the deleted-source A2 lane at normal volume for
+    secondary manual review.
+    """
+
+    if (
+        request.workflow_mode == "lite"
+        and request.lite_cut_layout == "split_gap"
+        and segment.track_name == _LITE_REUSED_AUDIO_TRACK_NAME
+    ):
+        return 1.0
+    return float(segment.volume)
 _WAV_VALIDATION_CHUNK_FRAMES = 65_536
 
 
@@ -507,7 +526,7 @@ def _audio_delivery_validation(
             "source_duration": _seconds_to_us(planned_segment.duration),
             "target_start": _seconds_to_us(planned_segment.timeline_start),
             "target_duration": _seconds_to_us(planned_segment.duration),
-            "volume": planned_segment.volume,
+            "volume": _saved_audio_delivery_volume(request, planned_segment),
             "fade_in": _seconds_to_us(planned_segment.fade_in),
             "fade_out": _seconds_to_us(planned_segment.fade_out),
         }

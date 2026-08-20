@@ -15,8 +15,12 @@ Do not fork or copy the full Auto-Cut implementation.
   editable cut boundaries while the project duration stays unchanged: V1 (`Original Video`)
   and A1 (`Separated Source Audio`) contain only the non-delete intervals; V2 (`Lite Cut
   Segments`) and A2 (`Lite Reused Audio`) contain the source-aligned delete intervals. This is
-  written directly to the JianYing timeline and does not require opening the editor or relying
-  on magnetic-main-track or linked-edit UI switches.
+  written directly to the JianYing timeline and does not require opening the editor. Save
+  `config.maintrack_adsorb=false` in root and active-timeline content so JianYing does not
+  reinterpret V1 gaps through its default magnetic-main-track state. Linked-edit is a local
+  JianYing toolbar preference (`ToolbarCfg.linkageEnable`), not a portable per-draft field;
+  verify or disable it in the local application configuration when an opened-draft check is
+  required, and never claim that a draft JSON alone controls it on another computer.
 - Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
   review timestamp directly into a spoken-word cut. Resolve every final boundary from Chinese
   word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
@@ -50,7 +54,8 @@ Do not fork or copy the full Auto-Cut implementation.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
 - Keep A1 and A2 source-aligned in split-gap layout. The delete lane's audio is placed on A2
   even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`
-  layout's optional audio copies.
+  layout's optional audio copies. A2 deleted-source clips keep normal volume (`1.0`) for manual
+  review; do not silently mute them because their segmented-audio role is `reference`.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim, the start must equal the edit start, and the duration is `2s` except
   when clamped at the unchanged source-video end.
@@ -66,6 +71,8 @@ Before delivery, validate the saved root and active timeline variants:
 - the fixed lite video and A1 tracks exist and remain editable;
 - In split-gap layout, A2 exists when at least one delete window intersects the source audio;
   in copy layout, A2 follows the legacy `reuse_audio` rule;
+- root and active-timeline content both save `config.maintrack_adsorb=false`, and every A2
+  deleted-source segment has normal volume;
 - copied source and target ranges stay inside the unchanged project duration;
 - review labels are verbatim, start-aligned, top-safe, and no longer than `2s`;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.

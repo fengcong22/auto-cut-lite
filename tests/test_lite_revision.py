@@ -350,7 +350,7 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(content["duration"], 10_000_000)
         self.assertTrue(result["validation"]["ok"])
 
-    def test_lite_split_gap_consumes_segmented_audio_plan_with_muted_a2(self):
+    def test_lite_split_gap_disables_maintrack_adsorb_and_restores_a2_volume(self):
         source_audio = "C:/media/source.wav"
         request = _load_request(
             {
@@ -449,8 +449,9 @@ class LiteRevisionTests(unittest.TestCase):
 
         a1 = _track(content, LITE_TRACKS["source_audio"])
         a2 = _track(content, LITE_TRACKS["reused_audio"])
+        self.assertIs(content["config"]["maintrack_adsorb"], False)
         self.assertEqual([segment["volume"] for segment in a1["segments"]], [1.0, 1.0])
-        self.assertEqual([segment["volume"] for segment in a2["segments"]], [0.0])
+        self.assertEqual([segment["volume"] for segment in a2["segments"]], [1.0])
         self.assertEqual(
             {segment["material_id"] for segment in a1["segments"] + a2["segments"]},
             {a1["segments"][0]["material_id"]},

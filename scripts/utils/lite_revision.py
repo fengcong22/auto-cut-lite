@@ -68,6 +68,49 @@ def _open_project(request: RevisionRequest, drafts_root: Optional[str]):
     return _open_revision_project(jy_project, request.project.draft_name, drafts_root=drafts_root)
 
 
+def _disable_maintrack_adsorb(project: Any) -> None:
+    """Make split-gap placement independent of JianYing's magnetic main track.
+
+    JianYing treats this as a saved draft setting.  The lite layout deliberately
+    keeps source-time gaps on V1/A1 and places the removed windows on V2/A2, so
+    allowing the editor to apply its default magnetic-main-track behavior can
+    make an opened draft appear different from the saved structure.
+    """
+
+    script = getattr(project, "script", None)
+    if script is None:
+        return
+    if hasattr(script, "maintrack_adsorb"):
+        script.maintrack_adsorb = False
+    content = getattr(script, "content", None)
+    if isinstance(content, dict):
+        content.setdefault("config", {})["maintrack_adsorb"] = False
+
+
+def _restore_lite_reused_audio_volume(
+    project: Any, receipts: List[Dict[str, Any]]
+) -> None:
+    """Keep deleted-source audio audible on A2 for manual review.
+
+    A2 is a reference lane in the full segmented-audio contract and is often
+    declared with volume 0.  In the lite split-gap contract the user explicitly
+    needs to hear the isolated deleted audio, so only this fixed lane is
+    restored to its normal volume.  A1 remains the audible kept-source lane.
+    """
+
+    script = getattr(project, "script", None)
+    tracks = getattr(script, "tracks", {}) if script is not None else {}
+    for track in tracks.values() if isinstance(tracks, dict) else []:
+        if str(getattr(track, "name", "")) != LITE_TRACKS["reused_audio"]:
+            continue
+        for segment in getattr(track, "segments", []) or []:
+            if hasattr(segment, "volume"):
+                segment.volume = 1.0
+    for receipt in receipts:
+        if receipt.get("track_name") == LITE_TRACKS["reused_audio"]:
+            receipt["volume"] = 1.0
+
+
 def _as_bool(value: Any) -> Optional[bool]:
     if isinstance(value, bool):
         return value
@@ -576,6 +619,8 @@ def _validate_lite_content(
         errors.append(
             f"Lite draft duration changed: expected {total_duration:.3f}s, found {saved_duration:.3f}s."
         )
+    if (content.get("config") or {}).get("maintrack_adsorb") is not False:
+        errors.append("Lite split-gap draft must save maintrack_adsorb=false.")
 
     def _track_windows(track_name: str) -> List[Tuple[float, float]]:
         track = by_name.get(track_name)
@@ -630,6 +675,18 @@ def _validate_lite_content(
         _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
         if audio_deletes:
             _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+            a2 = by_name.get(LITE_TRACKS["reused_audio"])
+            if a2 is not None:
+                muted = [
+                    str(segment.get("id") or index + 1)
+                    for index, segment in enumerate(a2.get("segments") or [])
+                    if abs(float(segment.get("volume", 1.0) or 0.0) - 1.0) > 1e-6
+                ]
+                if muted:
+                    errors.append(
+                        "A2 deleted-source audio must keep normal volume: "
+                        + ", ".join(muted)
+                    )
     elif original is not None:
         segments = original.get("segments") or []
         if len(segments) != 1:
@@ -719,6 +776,7 @@ def execute_lite_revision_request(
 
     draft, marker_type, mock_audio, mock_video, _jy_project = _runtime_components()
     project, write_info = _open_project(request, drafts_root)
+    _disable_maintrack_adsorb(project)
     validated = False
     try:
         layout = _lite_layout(request)
@@ -824,6 +882,7 @@ def execute_lite_revision_request(
                 {**receipt, "kind": "audio_delivery"}
                 for receipt in audio_delivery_receipts
             )
+            _restore_lite_reused_audio_volume(project, segment_receipts)
             reused_audio_expected = any(
                 segment.track_name == LITE_TRACKS["reused_audio"]
                 for segment in request.audio_delivery_plan.segments
