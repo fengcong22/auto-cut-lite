@@ -41,6 +41,12 @@ Target-local Volcengine word alignment uses the bundled maintained adapter:
 .\.venv\Scripts\python.exe scripts/audio/volc_word_align.py ".\media\voice.wav" --output "tmp\volc\voice.words.json"
 ```
 
+The same adapter also accepts a local video file. It extracts the first available
+audio stream with the repository FFmpeg runtime into a temporary M4A, submits that
+local audio to the same `volc.bigasr.auc` resource, and removes the temporary file
+after the result is received. No TOS bucket, object-storage endpoint, signed URL,
+or additional storage secret is required.
+
 `volc-config` stores the target user's values only in the ignored `.env`.
 `volc-status --json` proves configuration presence, not a real service call; it
 does not return the APP ID or access token. Without target-local authorization,

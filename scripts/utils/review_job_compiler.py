@@ -279,6 +279,25 @@ def _infer_execution_required(text: str, kind: str, *, explicit_kind: bool) -> b
     return True
 
 
+def _execution_required_for_kind(kind: str, requested: bool) -> bool:
+    """Never downgrade a real audio or visual edit into a marker-only row."""
+
+    normalized = str(kind or "").strip().casefold()
+    if normalized in {
+        "spoken_delete",
+        "pause_delete",
+        "audio_repair",
+        "replace_audio",
+        "pointer_overlay",
+        "visual_delete",
+        "visual_insert",
+        "visual_overlay",
+        "visual_replace",
+    }:
+        return True
+    return requested
+
+
 def _content_id(row: Mapping[str, Any], source_text: str, kind: str) -> str:
     identity = {
         "source": row.get("source"),
@@ -377,6 +396,7 @@ def _canonical_review_items(
             execution_required = _infer_execution_required(
                 inference_text, kind, explicit_kind=explicit_kind
             )
+        execution_required = _execution_required_for_kind(kind, execution_required)
 
         explicit_status = str(source_row.get("verbatim_status") or "").strip()
         verbatim_status = (
@@ -400,6 +420,8 @@ def _canonical_review_items(
             row["block_id"] = block_id
         row["kind"] = kind
         row["execution_required"] = execution_required
+        if kind in {"spoken_delete", "pause_delete", "pointer_overlay"}:
+            row["review_timestamp_role"] = "search_hint"
         row["verbatim_status"] = verbatim_status
         row.pop("start", None)
         row.pop("end", None)
@@ -429,6 +451,10 @@ def _normalize_project(project: dict[str, Any]) -> dict[str, Any]:
     if workflow_mode not in {"full", "lite"}:
         raise ValueError("project.workflow_mode must be either 'full' or 'lite'")
     normalized["workflow_mode"] = workflow_mode
+    lite_cut_layout = str(normalized.get("lite_cut_layout") or "split_gap").strip().lower()
+    if lite_cut_layout not in {"split_gap", "copy"}:
+        raise ValueError("project.lite_cut_layout must be either 'split_gap' or 'copy'")
+    normalized["lite_cut_layout"] = lite_cut_layout
     return normalized
 
 
@@ -482,6 +508,7 @@ def _request_model(
         review_items=model_items,
         acceptance=rules,
         workflow_mode=str(project.get("workflow_mode") or "full"),
+        lite_cut_layout=str(project.get("lite_cut_layout") or "split_gap"),
     )
     return request, model_items
 
@@ -517,19 +544,16 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     provisional_request, model_items = _request_model(normalized_project, review_items, acceptance)
     provisional_profile = derive_acceptance_profile(provisional_request, doc_items=model_items)
     enabled_gates = set(provisional_profile["enabled_gates"])
-    lite_mode = workflow_mode == "lite"
-    requires_segmented_audio = (
-        False if lite_mode else bool({"audio_precision", "audio_join"}.intersection(enabled_gates))
+    requires_segmented_audio = bool(
+        {"audio_precision", "audio_join"}.intersection(enabled_gates)
     )
-    acceptance["require_audio_validation"] = (
-        False if lite_mode else bool({"audio_precision", "audio_join"} & enabled_gates)
+    acceptance["require_audio_validation"] = bool(
+        {"audio_precision", "audio_join"} & enabled_gates
     )
     acceptance["require_visual_evidence"] = "visual" in enabled_gates
-    acceptance["require_pause_validation"] = False if lite_mode else "pause_fit" in enabled_gates
-    acceptance["require_subject_pointer_binding"] = False if lite_mode else "pointer" in enabled_gates
-    acceptance["require_pointer_lifecycle_evidence"] = (
-        False if lite_mode else "pointer" in enabled_gates
-    )
+    acceptance["require_pause_validation"] = "pause_fit" in enabled_gates
+    acceptance["require_subject_pointer_binding"] = "pointer" in enabled_gates
+    acceptance["require_pointer_lifecycle_evidence"] = "pointer" in enabled_gates
     request_model, model_items = _request_model(normalized_project, review_items, acceptance)
     acceptance_profile = derive_acceptance_profile(request_model, doc_items=model_items)
 
@@ -548,6 +572,7 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     revision_request_payload = {
         "schema_version": _SCHEMA_VERSION,
         "workflow_mode": workflow_mode,
+        "lite_cut_layout": str(normalized_project.get("lite_cut_layout") or "split_gap"),
         "document": document,
         "project": normalized_project,
         "edits": [],

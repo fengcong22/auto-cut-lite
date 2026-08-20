@@ -1,8 +1,8 @@
 """Non-destructive revision writer for the compact Auto-Cut workflow.
 
-The lite workflow keeps the source timeline intact and writes reviewable copies
-of requested segments on dedicated tracks. It intentionally does not reuse the
-full workflow's destructive delete/splice mapping.
+The lite workflow preserves source time while isolating ASR-resolved delete
+segments on dedicated tracks. Review-document timestamps are search hints only;
+they are never accepted as final spoken-word cut boundaries by themselves.
 """
 
 from __future__ import annotations
@@ -49,6 +49,9 @@ _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
+_ALIGNMENT_PASS_STATUSES = {"pass", "passed", "ok", "validated", "complete", "completed"}
+_ASR_GRANULARITIES = {"word", "character", "word_character", "word+character"}
+_SHA256_HEX_LENGTH = 64
 
 
 def _runtime_components():
@@ -78,6 +81,11 @@ def _as_bool(value: Any) -> Optional[bool]:
     return None
 
 
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return len(text) == _SHA256_HEX_LENGTH and all(char in "0123456789abcdef" for char in text)
+
+
 def _edit_text(edit: RevisionEdit) -> str:
     return " ".join(
         str(value or "")
@@ -86,6 +94,9 @@ def _edit_text(edit: RevisionEdit) -> str:
 
 
 def _edit_kind(edit: RevisionEdit) -> str:
+    explicit_kind = str(edit.source_kind or "").strip().lower()
+    if explicit_kind in {"animation_timing", "timing", "pointer_overlay", "visual_overlay", "visual_delete", "review_only"}:
+        return "timing" if explicit_kind in {"animation_timing", "timing"} else explicit_kind
     text = _edit_text(edit)
     if any(token in text for token in _DELETE_TOKENS):
         return "cut"
@@ -105,6 +116,161 @@ def _bounded_window(start: Any, end: Any, total_duration: float) -> Tuple[float,
     source_start = max(0.0, min(source_start, total_duration))
     source_end = max(source_start, min(source_end, total_duration))
     return source_start, source_end
+
+
+def _merge_windows(windows: Iterable[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """Return sorted, non-overlapping source windows for the cut lane."""
+    merged: List[Tuple[float, float]] = []
+    for start, end in sorted((float(start), float(end)) for start, end in windows if end > start):
+        if not merged or start > merged[-1][1] + 1e-6:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _complement_windows(
+    windows: Iterable[Tuple[float, float]], total_duration: float
+) -> List[Tuple[float, float]]:
+    """Return the source intervals that remain on the primary track."""
+    result: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for start, end in _merge_windows(windows):
+        if start > cursor + 1e-6:
+            result.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < total_duration - 1e-6:
+        result.append((cursor, total_duration))
+    return result
+
+
+def _lite_layout(request: RevisionRequest) -> str:
+    layout = str(getattr(request, "lite_cut_layout", "split_gap") or "split_gap").strip().lower()
+    if layout not in {"split_gap", "copy"}:
+        raise ValueError("Lite cut layout must be either 'split_gap' or 'copy'.")
+    return layout
+
+
+def _spoken_cut_alignment_problems(
+    edit: RevisionEdit,
+    review_item: Optional[RevisionReviewItem],
+) -> List[str]:
+    """Reject review timestamps that lack word/character ASR resolution."""
+
+    item_id = edit.doc_item_id or "unattributed_spoken_delete"
+    evidence: Dict[str, Any] = {}
+    if review_item is not None and isinstance(review_item.evidence, dict):
+        evidence.update(review_item.evidence)
+    if isinstance(edit.evidence, dict):
+        evidence.update(edit.evidence)
+
+    problems: List[str] = []
+    timestamp_role = str(
+        evidence.get("review_timestamp_role") or evidence.get("rough_time_role") or ""
+    ).strip().casefold()
+    if timestamp_role != "search_hint":
+        problems.append("review_timestamp_role must be search_hint")
+
+    alignment = evidence.get("asr_alignment")
+    if not isinstance(alignment, dict):
+        problems.append("asr_alignment receipt is missing")
+        alignment = {}
+    status = str(alignment.get("status") or "").strip().casefold()
+    if status not in _ALIGNMENT_PASS_STATUSES:
+        problems.append("asr_alignment.status is not pass")
+    granularity = str(alignment.get("granularity") or "").strip().casefold()
+    if granularity not in _ASR_GRANULARITIES:
+        problems.append("asr_alignment.granularity must be word or character")
+    if not str(alignment.get("provider") or "").strip():
+        problems.append("asr_alignment.provider is missing")
+    if not str(alignment.get("model") or alignment.get("resource_id") or "").strip():
+        problems.append("asr_alignment model/resource_id is missing")
+    if not str(alignment.get("adapter_version") or "").strip():
+        problems.append("asr_alignment.adapter_version is missing")
+    if not _is_sha256(
+        alignment.get("input_sha256") or alignment.get("source_audio_sha256")
+    ):
+        problems.append("asr_alignment source audio SHA-256 is missing or invalid")
+    if _as_bool(alignment.get("authoritative_cut_boundary")) is not True:
+        problems.append("asr_alignment.authoritative_cut_boundary must be true")
+
+    matched_rows = alignment.get("matches") or alignment.get("words")
+    if not isinstance(matched_rows, list) or not matched_rows:
+        problems.append("asr_alignment word/character matches are missing")
+    else:
+        previous_start = -math.inf
+        for index, row in enumerate(matched_rows):
+            if not isinstance(row, dict) or not str(row.get("text") or "").strip():
+                problems.append(f"asr_alignment match {index + 1} has no text")
+                continue
+            try:
+                match_start = float(row.get("start"))
+                match_end = float(row.get("end"))
+            except (TypeError, ValueError):
+                problems.append(f"asr_alignment match {index + 1} has invalid timing")
+                continue
+            if (
+                not math.isfinite(match_start)
+                or not math.isfinite(match_end)
+                or match_end <= match_start
+                or match_start < previous_start
+            ):
+                problems.append(f"asr_alignment match {index + 1} is not a positive ordered interval")
+            previous_start = match_start
+
+    resolved = (
+        alignment.get("resolved_cut_window")
+        or evidence.get("resolved_cut_window")
+        or evidence.get("cut_window")
+    )
+    if not isinstance(resolved, (list, tuple)) or len(resolved) != 2:
+        problems.append("resolved_cut_window is missing")
+    else:
+        try:
+            resolved_start, resolved_end = float(resolved[0]), float(resolved[1])
+        except (TypeError, ValueError):
+            problems.append("resolved_cut_window must be numeric")
+        else:
+            if (
+                not math.isfinite(resolved_start)
+                or not math.isfinite(resolved_end)
+                or resolved_end <= resolved_start
+            ):
+                problems.append("resolved_cut_window is invalid")
+            elif abs(resolved_start - edit.start) > 0.01 or abs(resolved_end - edit.end) > 0.01:
+                problems.append("edit start/end do not match the ASR-resolved cut window")
+
+    if not str(evidence.get("delete") or "").strip():
+        problems.append("delete phrase is missing")
+    if "must_keep" not in evidence:
+        problems.append("must_keep field is missing")
+    strategy = str(evidence.get("strategy") or "").strip().casefold()
+    if strategy not in {"precision_first", "hybrid", "listening_first"}:
+        problems.append("strategy is missing or invalid")
+
+    return [f"Lite spoken cut {item_id}: {problem}." for problem in problems]
+
+
+def _validate_spoken_cut_alignment(
+    request: RevisionRequest,
+    doc_items: Optional[List[RevisionReviewItem]],
+) -> None:
+    authoritative = doc_items if doc_items is not None else request.review_items
+    by_id = {item.item_id.casefold(): item for item in authoritative}
+    problems: List[str] = []
+    for edit in request.edits:
+        if _edit_kind(edit) != "cut":
+            continue
+        source_kind = str(edit.source_kind or "").strip().casefold()
+        review_item = by_id.get(edit.doc_item_id.casefold()) if edit.doc_item_id else None
+        review_kind = str(review_item.kind if review_item is not None else "").strip().casefold()
+        if source_kind == "spoken_delete" or review_kind == "spoken_delete":
+            problems.extend(_spoken_cut_alignment_problems(edit, review_item))
+    if problems:
+        raise ValueError(
+            "Lite spoken-word cuts require ASR-resolved boundaries; review timestamps are "
+            "search hints only. " + " ".join(problems)
+        )
 
 
 def _spec_float(spec: Dict[str, Any], *keys: str, default: float) -> float:
@@ -216,14 +382,23 @@ def _add_audio_segment(
     timeline_start: float,
     source_start: float,
     duration: float,
+    volume: float = 1.0,
+    fade_in: float = 0.0,
+    fade_out: float = 0.0,
 ) -> Any:
     segment = draft.AudioSegment(
         material,
         draft.Timerange(round(timeline_start * 1_000_000), round(duration * 1_000_000)),
         source_timerange=draft.Timerange(round(source_start * 1_000_000), round(duration * 1_000_000)),
-        volume=1.0,
+        volume=volume,
     )
     project.script.add_segment(segment, track_name)
+    if fade_in > 0 or fade_out > 0:
+        project.add_audio_fade_to_segment(
+            segment,
+            fade_in=round(fade_in * 1_000_000),
+            fade_out=round(fade_out * 1_000_000),
+        )
     return segment
 
 
@@ -252,10 +427,18 @@ def _add_asset_segment(
     duration: float,
     mock_media: bool,
     total_duration: float,
+    spec: Optional[Dict[str, Any]] = None,
+    material_cache: Optional[Dict[str, Any]] = None,
 ) -> Any:
+    spec = spec or {}
     extension = os.path.splitext(path)[1].lower()
+    cache_key = os.path.normcase(os.path.abspath(path))
     if mock_media:
-        material = _make_video_material(draft, mock_video, path, max(duration, 0.2), True)
+        material = material_cache.get(cache_key) if material_cache is not None else None
+        if material is None:
+            material = _make_video_material(draft, mock_video, path, max(duration, 0.2), True)
+            if material_cache is not None:
+                material_cache[cache_key] = material
         return _add_video_segment(
             project,
             draft,
@@ -266,12 +449,48 @@ def _add_asset_segment(
             duration=duration,
             volume=0.0,
         )
+    if extension in _IMAGE_EXTENSIONS and material_cache is not None:
+        material = material_cache.get(cache_key)
+        if material is None:
+            try:
+                material = draft.VideoMaterial(path)
+            except Exception:
+                from core.media_ops import _FallbackPhotoMaterial
+
+                material = _FallbackPhotoMaterial(path)
+            material_cache[cache_key] = material
+        script = getattr(project, "script", None)
+        canvas_width = float(getattr(script, "width", 1920) or 1920)
+        canvas_height = float(getattr(script, "height", 1080) or 1080)
+        clip_settings = draft.ClipSettings(
+            alpha=_spec_float(spec, "alpha", default=1.0),
+            rotation=_spec_float(spec, "rotation", default=0.0),
+            scale_x=_spec_float(spec, "scale_x", default=1.0),
+            scale_y=_spec_float(spec, "scale_y", default=1.0),
+            transform_x=_spec_float(spec, "transform_x", default=0.0) / (canvas_width / 2.0),
+            transform_y=_spec_float(spec, "transform_y", default=0.0) / (canvas_height / 2.0),
+        )
+        segment = draft.VideoSegment(
+            material,
+            draft.Timerange(round(timeline_start * 1_000_000), round(duration * 1_000_000)),
+            source_timerange=draft.Timerange(0, round(duration * 1_000_000)),
+            clip_settings=clip_settings,
+            volume=0.0,
+        )
+        project.script.add_segment(segment, LITE_TRACKS["visual_assets"])
+        return segment
     if extension in _IMAGE_EXTENSIONS:
         return project.add_image_simple(
             path,
             start_time=f"{timeline_start:.6f}s",
             duration=f"{duration:.6f}s",
             track_name=LITE_TRACKS["visual_assets"],
+            scale_x=_spec_float(spec, "scale_x", default=1.0),
+            scale_y=_spec_float(spec, "scale_y", default=1.0),
+            transform_x=_spec_float(spec, "transform_x", default=0.0),
+            transform_y=_spec_float(spec, "transform_y", default=0.0),
+            rotation=_spec_float(spec, "rotation", default=0.0),
+            alpha=_spec_float(spec, "alpha", default=1.0),
         )
     if extension in _VIDEO_EXTENSIONS:
         segment = project.add_media_safe(
@@ -310,6 +529,7 @@ def _marker_items(
                 item_id=item.item_id,
                 source_text=item.source_text,
                 verbatim_status=item.verbatim_status,
+                kind=item.kind,
             )
         )
     return markers, plan, warnings
@@ -328,6 +548,9 @@ def _validate_lite_content(
     marker_plan: Iterable[Any],
     marker_receipts: List[Dict[str, Any]],
     reused_audio_expected: bool,
+    layout: str = "split_gap",
+    delete_windows: Optional[List[Tuple[float, float]]] = None,
+    audio_duration: Optional[float] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
@@ -354,11 +577,63 @@ def _validate_lite_content(
             f"Lite draft duration changed: expected {total_duration:.3f}s, found {saved_duration:.3f}s."
         )
 
+    def _track_windows(track_name: str) -> List[Tuple[float, float]]:
+        track = by_name.get(track_name)
+        if track is None:
+            return []
+        windows: List[Tuple[float, float]] = []
+        for segment in track.get("segments") or []:
+            target = segment.get("target_timerange") or {}
+            source = segment.get("source_timerange") or {}
+            target_start = int(target.get("start", 0) or 0) / 1_000_000.0
+            duration = int(target.get("duration", 0) or 0) / 1_000_000.0
+            source_start = int(source.get("start", 0) or 0) / 1_000_000.0
+            windows.append((target_start, target_start + duration, source_start))
+        return windows
+
+    def _expect_windows(track_name: str, expected: List[Tuple[float, float]], label: str) -> None:
+        actual = _track_windows(track_name)
+        if len(actual) != len(expected):
+            errors.append(
+                f"{label} segment count mismatch: expected {len(expected)}, found {len(actual)}."
+            )
+            return
+        for index, (saved_start, saved_end, source_start) in enumerate(actual):
+            expected_start, expected_end = expected[index]
+            if (
+                abs(saved_start - expected_start) > 0.01
+                or abs(saved_end - expected_end) > 0.01
+                or abs(source_start - expected_start) > 0.01
+            ):
+                errors.append(
+                    f"{label} segment {index + 1} is not source-aligned: "
+                    f"expected {expected_start:.3f}-{expected_end:.3f}, "
+                    f"found {saved_start:.3f}-{saved_end:.3f} (source {source_start:.3f})."
+                )
+
     original = by_name.get(LITE_TRACKS["original_video"])
-    if original is not None:
+    if layout == "split_gap":
+        merged_deletes = _merge_windows(delete_windows or [])
+        keep_video = _complement_windows(merged_deletes, total_duration)
+        if original is not None:
+            _expect_windows(LITE_TRACKS["original_video"], keep_video, "V1")
+        cut_track = by_name.get(LITE_TRACKS["cut_segments"])
+        if cut_track is not None:
+            _expect_windows(LITE_TRACKS["cut_segments"], merged_deletes, "V2")
+        audio_total = min(total_duration, float(audio_duration or total_duration))
+        audio_deletes = _merge_windows(
+            (start, min(end, audio_total))
+            for start, end in merged_deletes
+            if start < audio_total
+        )
+        keep_audio = _complement_windows(audio_deletes, audio_total)
+        _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
+        if audio_deletes:
+            _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+    elif original is not None:
         segments = original.get("segments") or []
         if len(segments) != 1:
-            errors.append("Original Video must contain exactly one full source segment in lite mode.")
+            errors.append("Original Video must contain exactly one full source segment in lite copy layout.")
         elif (
             int((segments[0].get("target_timerange") or {}).get("start", -1)) != 0
             or abs(
@@ -424,6 +699,7 @@ def _validate_lite_content(
             "marker_count": len(saved_markers),
             "required_tracks": [name for name, _track_type in required],
             "reused_audio_expected": reused_audio_expected,
+            "lite_cut_layout": layout,
         },
         "marker_receipts": marker_receipts,
     }
@@ -445,6 +721,8 @@ def execute_lite_revision_request(
     project, write_info = _open_project(request, drafts_root)
     validated = False
     try:
+        layout = _lite_layout(request)
+        _validate_spoken_cut_alignment(request, doc_items)
         declared_duration = float(request.project.media_duration_seconds or 0.0)
         total_duration = declared_duration
         if mock_media and total_duration <= 0:
@@ -465,13 +743,24 @@ def execute_lite_revision_request(
         if total_duration <= 0:
             raise ValueError("Lite mode requires a positive source video duration.")
 
-        for track_name, track_type in (
+        delete_windows = _merge_windows(
+            _bounded_window(edit.start, edit.end, total_duration)
+            for edit in request.edits
+            if _edit_kind(edit) == "cut"
+        )
+        segmented_audio_delivery = request.audio_delivery_plan.mode == "segmented"
+        segment_receipts: List[Dict[str, Any]] = []
+        visual_material_cache: Dict[str, Any] = {}
+
+        fixed_tracks = [
             (LITE_TRACKS["original_video"], draft.TrackType.video),
             (LITE_TRACKS["cut_segments"], draft.TrackType.video),
             (LITE_TRACKS["visual_assets"], draft.TrackType.video),
             (LITE_TRACKS["timing_adjusted"], draft.TrackType.video),
-            (LITE_TRACKS["source_audio"], draft.TrackType.audio),
-        ):
+        ]
+        if not segmented_audio_delivery:
+            fixed_tracks.append((LITE_TRACKS["source_audio"], draft.TrackType.audio))
+        for track_name, track_type in fixed_tracks:
             project.script.add_track(track_type, track_name)
 
         video_material = _make_video_material(
@@ -481,42 +770,137 @@ def execute_lite_revision_request(
             total_duration,
             mock_media,
         )
-        original_segment = _add_video_segment(
-            project,
-            draft,
-            video_material,
-            track_name=LITE_TRACKS["original_video"],
-            timeline_start=0.0,
-            source_start=0.0,
-            duration=total_duration,
-            volume=0.0,
-        )
+        if layout == "split_gap":
+            for keep_start, keep_end in _complement_windows(delete_windows, total_duration):
+                _add_video_segment(
+                    project,
+                    draft,
+                    video_material,
+                    track_name=LITE_TRACKS["original_video"],
+                    timeline_start=keep_start,
+                    source_start=keep_start,
+                    duration=keep_end - keep_start,
+                    volume=0.0,
+                )
+            for cut_start, cut_end in delete_windows:
+                _add_video_segment(
+                    project,
+                    draft,
+                    video_material,
+                    track_name=LITE_TRACKS["cut_segments"],
+                    timeline_start=cut_start,
+                    source_start=cut_start,
+                    duration=cut_end - cut_start,
+                    volume=0.0,
+                )
+        else:
+            _add_video_segment(
+                project,
+                draft,
+                video_material,
+                track_name=LITE_TRACKS["original_video"],
+                timeline_start=0.0,
+                source_start=0.0,
+                duration=total_duration,
+                volume=0.0,
+            )
 
         audio_path = request.project.source_audio or request.project.source_video
-        audio_material = _make_audio_material(
-            draft,
-            mock_audio,
-            audio_path,
-            total_duration,
-            mock_media,
-        )
-        audio_duration = _material_duration_seconds(audio_material, total_duration)
-        source_audio_duration = min(total_duration, audio_duration)
-        _add_audio_segment(
-            project,
-            draft,
-            audio_material,
-            track_name=LITE_TRACKS["source_audio"],
-            timeline_start=0.0,
-            source_start=0.0,
-            duration=source_audio_duration,
-        )
+        audio_material = None
+        audio_duration = total_duration
+        source_audio_duration = total_duration
+        if segmented_audio_delivery:
+            from utils.revision_runner import _write_segmented_audio_delivery
 
-        segment_receipts: List[Dict[str, Any]] = []
+            _audio_track_names, audio_delivery_receipts = _write_segmented_audio_delivery(
+                project,
+                request,
+                draft=draft,
+                MockAudioMaterial=mock_audio,
+                mock_media=mock_media,
+                fallback_duration=total_duration,
+            )
+            segment_receipts.extend(
+                {**receipt, "kind": "audio_delivery"}
+                for receipt in audio_delivery_receipts
+            )
+            reused_audio_expected = any(
+                segment.track_name == LITE_TRACKS["reused_audio"]
+                for segment in request.audio_delivery_plan.segments
+            )
+            planned_audio_end = max(
+                (
+                    segment.timeline_start + segment.duration
+                    for segment in request.audio_delivery_plan.segments
+                    if segment.track_name
+                    in {LITE_TRACKS["source_audio"], LITE_TRACKS["reused_audio"]}
+                ),
+                default=total_duration,
+            )
+            audio_duration = min(total_duration, planned_audio_end)
+            source_audio_duration = audio_duration
+        else:
+            audio_material = _make_audio_material(
+                draft,
+                mock_audio,
+                audio_path,
+                total_duration,
+                mock_media,
+            )
+            audio_duration = _material_duration_seconds(audio_material, total_duration)
+            source_audio_duration = min(total_duration, audio_duration)
+            if layout == "split_gap":
+                audio_delete_windows = _merge_windows(
+                    (start, min(end, source_audio_duration))
+                    for start, end in delete_windows
+                    if start < source_audio_duration
+                )
+                for keep_start, keep_end in _complement_windows(
+                    audio_delete_windows, source_audio_duration
+                ):
+                    _add_audio_segment(
+                        project,
+                        draft,
+                        audio_material,
+                        track_name=LITE_TRACKS["source_audio"],
+                        timeline_start=keep_start,
+                        source_start=keep_start,
+                        duration=keep_end - keep_start,
+                    )
+                if audio_delete_windows:
+                    project.script.add_track(draft.TrackType.audio, LITE_TRACKS["reused_audio"])
+                    for cut_start, cut_end in audio_delete_windows:
+                        _add_audio_segment(
+                            project,
+                            draft,
+                            audio_material,
+                            track_name=LITE_TRACKS["reused_audio"],
+                            timeline_start=cut_start,
+                            source_start=cut_start,
+                            duration=cut_end - cut_start,
+                        )
+                    reused_audio_expected = True
+                else:
+                    reused_audio_expected = False
+            else:
+                _add_audio_segment(
+                    project,
+                    draft,
+                    audio_material,
+                    track_name=LITE_TRACKS["source_audio"],
+                    timeline_start=0.0,
+                    source_start=0.0,
+                    duration=source_audio_duration,
+                )
+
         audio_requests: List[Tuple[float, float, float, str]] = []
-        reused_audio_expected = False
+        if layout == "copy" and not segmented_audio_delivery:
+            reused_audio_expected = False
         for idx, edit in enumerate(request.edits):
             kind = _edit_kind(edit)
+            if kind == "timing":
+                # Lite execution intentionally leaves picture timing requests as labels only.
+                continue
             source_start, source_end = _bounded_window(edit.start, edit.end, total_duration)
             duration = source_end - source_start
             if duration <= 0 and kind in {"cut", "timing"}:
@@ -526,17 +910,26 @@ def execute_lite_revision_request(
                 target_start = source_start
                 target_track = LITE_TRACKS["cut_segments"]
                 source_path = request.project.source_video
-                segment = _add_video_segment(
-                    project,
-                    draft,
-                    video_material,
-                    track_name=target_track,
-                    timeline_start=target_start,
-                    source_start=source_start,
-                    duration=duration,
-                    volume=0.0,
-                )
-                if _reuse_audio(edit, kind):
+                if layout == "split_gap":
+                    # Merged V2 segments are written before this loop so overlapping
+                    # review rows do not create duplicate timeline clips.
+                    segment = None
+                else:
+                    segment = _add_video_segment(
+                        project,
+                        draft,
+                        video_material,
+                        track_name=target_track,
+                        timeline_start=target_start,
+                        source_start=source_start,
+                        duration=duration,
+                        volume=0.0,
+                    )
+                if (
+                    layout == "copy"
+                    and not segmented_audio_delivery
+                    and _reuse_audio(edit, kind)
+                ):
                     reusable_duration = min(duration, max(0.0, audio_duration - source_start))
                     if reusable_duration > 0:
                         reused_audio_expected = True
@@ -561,7 +954,12 @@ def execute_lite_revision_request(
                     duration=duration,
                     volume=0.0,
                 )
-                if _reuse_audio(edit, kind) and duration > 0:
+                if (
+                    layout == "copy"
+                    and not segmented_audio_delivery
+                    and _reuse_audio(edit, kind)
+                    and duration > 0
+                ):
                     reusable_duration = min(duration, max(0.0, audio_duration - source_start))
                     if reusable_duration > 0:
                         reused_audio_expected = True
@@ -572,14 +970,14 @@ def execute_lite_revision_request(
                 segment = None
                 target_start = source_start
 
-            if segment is not None:
+            if segment is not None or (kind == "cut" and layout == "split_gap"):
                 segment_receipts.append(
                     {
                         "item_id": edit.doc_item_id or f"edit_{idx + 1:03d}",
                         "kind": kind,
                         "track_name": target_track,
-                        "segment_id": str(getattr(segment, "segment_id", "")),
-                        "material_id": str(getattr(segment, "material_id", "")),
+                        "segment_id": str(getattr(segment, "segment_id", "")) if segment is not None else "merged",
+                        "material_id": str(getattr(segment, "material_id", "")) if segment is not None else str(getattr(video_material, "material_id", "")),
                         "source_start": source_start,
                         "timeline_start": target_start,
                         "duration": duration,
@@ -617,6 +1015,8 @@ def execute_lite_revision_request(
                     duration=visual_duration,
                     mock_media=mock_media,
                     total_duration=total_duration,
+                    spec=spec,
+                    material_cache=visual_material_cache,
                 )
                 if asset_segment is None:
                     raise RuntimeError(f"Lite visual asset failed to import: {asset_path}")
@@ -631,12 +1031,17 @@ def execute_lite_revision_request(
                         "source_start": _spec_float(spec, "source_start", default=0.0),
                         "timeline_start": visual_start,
                         "duration": visual_duration,
+                        "scale_x": _spec_float(spec, "scale_x", default=1.0),
+                        "scale_y": _spec_float(spec, "scale_y", default=1.0),
+                        "transform_x": _spec_float(spec, "transform_x", default=0.0),
+                        "transform_y": _spec_float(spec, "transform_y", default=0.0),
                         "audio_preserved": False,
                     }
                 )
 
-        if reused_audio_expected:
-            project.script.add_track(draft.TrackType.audio, LITE_TRACKS["reused_audio"])
+        if reused_audio_expected and not segmented_audio_delivery:
+            if layout == "copy":
+                project.script.add_track(draft.TrackType.audio, LITE_TRACKS["reused_audio"])
             for timeline_start, source_start, duration, item_id in audio_requests:
                 audio_segment = _add_audio_segment(
                     project,
@@ -689,6 +1094,9 @@ def execute_lite_revision_request(
                 marker_plan=marker_plan,
                 marker_receipts=marker_receipt_dicts,
                 reused_audio_expected=reused_audio_expected,
+                layout=layout,
+                delete_windows=delete_windows,
+                audio_duration=source_audio_duration,
             )
             for _name, content in variants
         ]
@@ -708,6 +1116,7 @@ def execute_lite_revision_request(
             "requested_draft_name": write_info["requested_draft_name"],
             "write_mode": write_info.get("write_mode", "requested_draft"),
             "workflow_mode": "lite",
+            "lite_cut_layout": layout,
             "draft_path": save_result.get("draft_path", ""),
             "source_duration_seconds": total_duration,
             "tracks": list(LITE_TRACKS.values()),
@@ -718,8 +1127,10 @@ def execute_lite_revision_request(
             "acceptance_validation": validation,
             "retention": retention,
             "non_destructive": True,
-            "delete_operations": "cut_boundaries_only",
-            "visual_transform_policy": "none",
+            "delete_operations": (
+                "split_gap_cut_boundaries" if layout == "split_gap" else "cut_boundaries_only"
+            ),
+            "visual_transform_policy": "request_spec",
         }
     except Exception:
         if not validated and write_info.get("cleanup_on_failure", True):

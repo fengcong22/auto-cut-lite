@@ -11,21 +11,46 @@ Do not fork or copy the full Auto-Cut implementation.
 
 ## Lite Draft Contract
 
+- The default `lite_cut_layout` is `split_gap`. In this layout, delete windows are real
+  editable cut boundaries while the project duration stays unchanged: V1 (`Original Video`)
+  and A1 (`Separated Source Audio`) contain only the non-delete intervals; V2 (`Lite Cut
+  Segments`) and A2 (`Lite Reused Audio`) contain the source-aligned delete intervals. This is
+  written directly to the JianYing timeline and does not require opening the editor or relying
+  on magnetic-main-track or linked-edit UI switches.
+- Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
+  review timestamp directly into a spoken-word cut. Resolve every final boundary from Chinese
+  word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
+  `must_keep` phrases and strategy, then run reverse validation. Lite draft generation fails
+  closed when that boundary receipt is absent or does not match the saved cut.
+- For source ASR, use the same local path as the full workflow: extract audio from the local source
+  video when no separate source audio is present, then submit it through the bundled
+  `volc.bigasr.auc` adapter. Do not ask the user to create TOS storage, a bucket, a signed URL,
+  or storage credentials.
+- Set `lite_cut_layout=copy` only for compatibility with older lite drafts that intentionally
+  keep a full V1/A1 and use V2 copies as a manual reference lane.
+
 - Import local video, audio, images, text, subtitles, flower text, and local BGM through the
   maintained repository APIs.
-- Keep the complete source video on `Original Video` and separated source audio on
-  `Separated Source Audio`.
-- Convert every delete request into a source-range copy on `Lite Cut Segments`. Preserve the
-  original range and total project duration.
+- In the default split-gap layout, write the non-delete source intervals to `Original Video`
+  and `Separated Source Audio`, and write every merged delete interval to `Lite Cut Segments`
+  and `Lite Reused Audio` at the same timeline/source time. Preserve the original range and
+  total project duration.
+- Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. A
+  pointer request is always execution-required and cannot be downgraded to a marker-only item.
+  Animation or other picture-timing requests are label-only and do not create `Lite Timing
+  Adjusted` segments.
+- Review labels are all retained verbatim. Their text backgrounds are color-coded by kind:
+  spoken delete (red), visual delete (rose), pointer/visual addition (blue), animation timing
+  (amber), and review-only (gray).
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Use their
   imported size and transform without animation, keyframes, automatic scaling, or target
   optimization. Clamp the requested duration to the source project duration.
 - Copy timing-adjusted source ranges to `Lite Timing Adjusted` at the requested target time.
   Never remove the original range.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
-- Keep full source audio on A1. Add source-range audio to `Lite Reused Audio` only when the
-  edit explicitly or implicitly reuses audio. `reuse_audio=false`, visual-only reuse, and
-  still-frame reuse must not create an A2 segment.
+- Keep A1 and A2 source-aligned in split-gap layout. The delete lane's audio is placed on A2
+  even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`
+  layout's optional audio copies.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim, the start must equal the edit start, and the duration is `2s` except
   when clamped at the unchanged source-video end.
@@ -39,10 +64,19 @@ Before delivery, validate the saved root and active timeline variants:
 
 - project duration equals the source video duration;
 - the fixed lite video and A1 tracks exist and remain editable;
-- A2 exists only when at least one source range reuses audio;
+- In split-gap layout, A2 exists when at least one delete window intersects the source audio;
+  in copy layout, A2 follows the legacy `reuse_audio` rule;
 - copied source and target ranges stay inside the unchanged project duration;
 - review labels are verbatim, start-aligned, top-safe, and no longer than `2s`;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.
+- every spoken delete has a passing word/character ASR boundary receipt; the review timestamp is
+  recorded only as `search_hint`, and audio precision/reverse-ASR gates remain enabled. The
+  receipt binds source-audio SHA-256, provider/model or resource, adapter version, ordered
+  matched word/character rows, and `authoritative_cut_boundary=true`; fallback candidates cannot
+  be promoted to cuts merely because their rough time or transcript text looks plausible;
+- every pointer item has a real editable overlay plus the normal pointer binding, lifecycle,
+  placement, and visual-evidence gates. A label by itself is a failure.
 
-Do not claim that delete requests were executed as removals. Report them as cut boundaries and
-trace-track copies for secondary manual editing.
+Report split-gap delete requests as editable cut boundaries with the deleted source intervals
+isolated on V2/A2; the source project duration is intentionally unchanged for secondary manual
+editing.

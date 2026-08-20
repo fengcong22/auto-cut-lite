@@ -34,6 +34,8 @@ class ReviewMarkerItem:
     segment_id: str = ""
     material_id: str = ""
     track_name: str = ""
+    kind: str = "review_only"
+    background_color: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,15 @@ class ReviewMarkerOpsMixin:
     REVIEW_MARKER_CELL_SAFETY = 0.88
     REVIEW_MARKER_CHAR_WIDTH_FACTOR = 0.006
     REVIEW_MARKER_LINE_HEIGHT_FACTOR = 0.025
+    REVIEW_MARKER_BACKGROUND_COLORS = {
+        "spoken_delete": "#B42318",
+        "pause_delete": "#C2410C",
+        "visual_delete": "#9F1239",
+        "pointer_overlay": "#1D4ED8",
+        "visual_overlay": "#2563EB",
+        "animation_timing": "#B45309",
+        "review_only": "#4B5563",
+    }
 
     def add_review_markers(
         self,
@@ -194,7 +205,13 @@ class ReviewMarkerOpsMixin:
                     width=16.0,
                 ),
                 background=draft.TextBackground(
-                    color="#111827",
+                    color=(
+                        marker.background_color
+                        or self.REVIEW_MARKER_BACKGROUND_COLORS.get(
+                            str(marker.kind or "review_only"),
+                            self.REVIEW_MARKER_BACKGROUND_COLORS["review_only"],
+                        )
+                    ),
                     style=1,
                     alpha=0.92,
                     round_radius=0.16,

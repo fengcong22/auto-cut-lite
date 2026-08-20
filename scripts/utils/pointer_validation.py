@@ -78,6 +78,20 @@ _CLEAN_TRACK_HINT = re.compile(
 )
 
 
+def _read_image(path: Any, flags: int) -> Any:
+    """Decode an image without relying on OpenCV's Unicode path handling."""
+
+    if not isinstance(path, (str, os.PathLike)):
+        return None
+    try:
+        payload = Path(os.fspath(path)).expanduser().read_bytes()
+    except OSError:
+        return None
+    if not payload:
+        return None
+    return cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), flags)
+
+
 def _status_passed(value: Any) -> bool:
     return str(value or "").strip().casefold() in PASS_STATUSES
 
@@ -770,7 +784,7 @@ def _same_path(left: Any, right: Any) -> bool:
 def _decode_asset(path: Any) -> tuple[int, int, int] | None:
     if not isinstance(path, (str, os.PathLike)):
         return None
-    decoded = cv2.imread(os.fspath(Path(path).expanduser()), cv2.IMREAD_UNCHANGED)
+    decoded = _read_image(path, cv2.IMREAD_UNCHANGED)
     if decoded is None or decoded.ndim not in (2, 3):
         return None
     height, width = decoded.shape[:2]
@@ -1509,7 +1523,7 @@ def _read_hashed_color_image(record: Mapping[str, Any], path_key: str, hash_key:
     expected_hash = str(record.get(hash_key) or "").strip().lower()
     if _sha256_file(path_value) != expected_hash:
         return None
-    return cv2.imread(os.fspath(Path(os.fspath(path_value)).expanduser()), cv2.IMREAD_COLOR)
+    return _read_image(path_value, cv2.IMREAD_COLOR)
 
 
 def _saved_residual_cover_layer_problems(
@@ -1589,7 +1603,7 @@ def _saved_residual_cover_layer_problems(
         else None
     )
     pointer_decoded = (
-        cv2.imread(str(pointer_material.get("path")), cv2.IMREAD_UNCHANGED)
+        _read_image(pointer_material.get("path"), cv2.IMREAD_UNCHANGED)
         if pointer_material is not None
         else None
     )
@@ -1676,7 +1690,7 @@ def _saved_pointer_segment_and_rgba(
     segment = segments[0] if len(segments) == 1 else None
     material = _material_by_id(content, segment.get("material_id")) if segment is not None else None
     rgba = (
-        cv2.imread(str(material.get("path")), cv2.IMREAD_UNCHANGED)
+        _read_image(material.get("path"), cv2.IMREAD_UNCHANGED)
         if material is not None
         else None
     )
@@ -2030,7 +2044,7 @@ def _trajectory_receipt_problems(
     decoded_intervals: list[float] = []
     previous_decoded_time: float | None = None
     union = np.zeros((height, width), dtype=np.uint8)
-    cover_rgba = cv2.imread(str(cover.get("asset_path")), cv2.IMREAD_UNCHANGED)
+    cover_rgba = _read_image(cover.get("asset_path"), cv2.IMREAD_UNCHANGED)
     cover_regions = _comparison_exclusion_regions(cover.get("opaque_regions"), width, height)
     cover_mask = _regions_mask(cover_regions, width, height) if cover_regions is not None else None
     for frame_receipt in frames:
@@ -2105,9 +2119,7 @@ def _trajectory_receipt_problems(
     mask_path = mask_record["path"]
     if _sha256_file(mask_path) != str(mask_record["sha256"] or "").strip().lower():
         return ["pointer_cover.trajectory_mask_mismatch"]
-    saved_mask = cv2.imread(
-        os.fspath(Path(os.fspath(mask_path)).expanduser()), cv2.IMREAD_GRAYSCALE
-    )
+    saved_mask = _read_image(mask_path, cv2.IMREAD_GRAYSCALE)
     if (
         saved_mask is None
         or saved_mask.shape != union.shape
@@ -2452,7 +2464,7 @@ def _opened_recorded_pointer_problems(
         raw_region = _positive_rectangle(cover.get("opaque_regions")[0])
         if raw_region is not None:
             raw_x, raw_y, raw_width, raw_height = [int(round(v)) for v in raw_region]
-            cover_rgba = cv2.imread(str(cover.get("asset_path")), cv2.IMREAD_UNCHANGED)
+            cover_rgba = _read_image(cover.get("asset_path"), cv2.IMREAD_UNCHANGED)
             cover_reference = (
                 cover_rgba[
                     raw_y : raw_y + raw_height,
@@ -2756,7 +2768,7 @@ def _opened_artifact_problems(
         else None
     )
     pointer_rgba = (
-        cv2.imread(str(pointer_material.get("path")), cv2.IMREAD_UNCHANGED)
+        _read_image(pointer_material.get("path"), cv2.IMREAD_UNCHANGED)
         if pointer_material is not None
         else None
     )
@@ -2765,7 +2777,7 @@ def _opened_artifact_problems(
     contexts: list[Any] = []
     detected_regions: list[tuple[int, int, int, int]] = []
     registrations: list[tuple[int, int, int, int, float]] = []
-    cover_rgba = cv2.imread(str(cover.get("asset_path")), cv2.IMREAD_UNCHANGED)
+    cover_rgba = _read_image(cover.get("asset_path"), cv2.IMREAD_UNCHANGED)
     raw_regions = cover.get("opaque_regions")
     pointer_search_region = (
         _positive_rectangle(raw_regions[0])
@@ -3039,7 +3051,7 @@ def pointer_saved_residual_cover_problems(
     expected_hash = str(cover.get("asset_sha256") or "").strip().lower()
     if _sha256_file(path_value) != expected_hash:
         return ["pointer_cover.saved_material_mismatch"]
-    rgba = cv2.imread(os.fspath(Path(os.fspath(path_value)).expanduser()), cv2.IMREAD_UNCHANGED)
+    rgba = _read_image(path_value, cv2.IMREAD_UNCHANGED)
     if rgba is None or rgba.ndim != 3 or rgba.shape[2] != 4:
         return ["pointer_cover.asset_not_rgba"]
     canvas = _canvas_size(content)
@@ -3351,7 +3363,7 @@ def _saved_display_safe_problems(
                     > NUMBER_TOLERANCE
                 ):
                     problems.append("pointer_layers.display_safe_drift_artifact_invalid")
-        elif cv2.imread(str(artifact_path), cv2.IMREAD_UNCHANGED) is None:
+        elif _read_image(artifact_path, cv2.IMREAD_UNCHANGED) is None:
             problems.append("pointer_layers.display_safe_drift_artifact_invalid")
 
     drift_timeline_id = fallback.get("opened_draft_drift_timeline_id")

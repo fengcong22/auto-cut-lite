@@ -21,6 +21,7 @@ class MarkerPlanItem:
     end: float
     verbatim_status: str
     source: str = ""
+    kind: str = "review_only"
 
 
 def _deleted_duration_before(point: float, delete_windows: List[List[float]]) -> float:
@@ -45,6 +46,15 @@ def _inserted_duration_before(point: float, request: RevisionRequest) -> float:
 def map_marker_plan_to_timeline(
     plan: Sequence[MarkerPlanItem], request: RevisionRequest
 ) -> List[MarkerPlanItem]:
+    # Lite drafts intentionally preserve the source project duration.  A split-gap
+    # delete is represented by a hole on V1/A1 plus a source-aligned reference clip
+    # on V2/A2; it does not compress the marker timeline.  The same source-time
+    # contract applies to the legacy lite copy layout.  Keep marker mapping in
+    # source time so strict root/active-timeline validation agrees with the saved
+    # editable draft.
+    if str(getattr(request, "workflow_mode", "") or "").strip().casefold() == "lite":
+        return [replace(item) for item in plan]
+
     delete_windows = _collect_delete_windows(request)
     mapped_plan: List[MarkerPlanItem] = []
     for item in plan:
@@ -619,6 +629,7 @@ def _build_legacy_plan(request: RevisionRequest) -> List[MarkerPlanItem]:
                 end=end,
                 verbatim_status=_UNVERIFIED_SOURCE,
                 source="legacy_marker",
+                kind="review_only",
             )
         )
     for index, edit in enumerate(request.edits):
@@ -631,6 +642,7 @@ def _build_legacy_plan(request: RevisionRequest) -> List[MarkerPlanItem]:
                 end=end,
                 verbatim_status=_UNVERIFIED_SOURCE,
                 source="legacy_edit",
+                kind=str(getattr(edit, "source_kind", "") or getattr(edit, "op_type", "") or "review_only"),
             )
         )
     return plan
@@ -676,6 +688,7 @@ def build_marker_plan(
                 end=float(end),
                 verbatim_status=verbatim_status,
                 source=str(source_item.source or ""),
+                kind=str(source_item.kind or "review_only"),
             )
         )
 

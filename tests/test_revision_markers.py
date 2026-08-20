@@ -19,7 +19,7 @@ from utils.env_setup import setup_env
 setup_env()
 
 from core.review_marker_ops import ReviewMarkerItem, ReviewMarkerOpsMixin
-from utils.revision_markers import build_marker_plan
+from utils.revision_markers import build_marker_plan, map_marker_plan_to_timeline
 from utils.revision_models import (
     PreservationRules,
     RevisionEdit,
@@ -50,6 +50,41 @@ class _ReviewMarkerProject(ReviewMarkerOpsMixin):
 
 
 class TestReviewMarkerRendering(unittest.TestCase):
+    def test_lite_marker_mapping_keeps_source_time_for_split_gap(self):
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="LiteMarkerMapping",
+                source_video="source.mp4",
+            ),
+            edits=[
+                RevisionEdit(
+                    op_type="delete",
+                    source_kind="spoken_delete",
+                    start=2.0,
+                    end=4.0,
+                    label="delete",
+                    doc_item_id="item-1",
+                )
+            ],
+            markers=[],
+            preserve=PreservationRules(),
+            workflow_mode="lite",
+            lite_cut_layout="split_gap",
+        )
+        plan = [
+            revision_markers.MarkerPlanItem(
+                item_id="item-1",
+                source_text="delete",
+                start=5.0,
+                end=7.0,
+                verbatim_status="verified",
+            )
+        ]
+
+        mapped = map_marker_plan_to_timeline(plan, request)
+
+        self.assertEqual([(item.start, item.end) for item in mapped], [(5.0, 7.0)])
+
     def test_verbatim_marker_receipt_preserves_source_metadata_and_rendered_ids(self):
         source_text = "Canonical source text that must remain exactly unchanged."
         project = _ReviewMarkerProject()

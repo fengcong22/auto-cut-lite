@@ -6,7 +6,10 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import string
+import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -19,13 +22,16 @@ from typing import Any, Sequence
 from .config import PROJECT_ROOT, load_env_file
 
 VOLC_ASR_ADAPTER_VERSION = "auto-cut-volc-asr-v3"
-DEFAULT_RESOURCE_ID = "volc.seedasr.auc"
+# The full Auto-Cut workflow uses the recording ASR resource, which accepts
+# the locally extracted source audio directly. Keep lite mode on the same path.
+DEFAULT_RESOURCE_ID = "volc.bigasr.auc"
 DEFAULT_SUBMIT_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/submit"
 DEFAULT_QUERY_URL = "https://openspeech.bytedance.com/api/v3/auc/bigmodel/query"
 SUCCESS_STATUS = "20000000"
 PROCESSING_STATUS_CODES = {"20000001", "20000002"}
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
 _EVIDENCE_KEY = "_auto_cut_evidence"
+_VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".ts"}
 
 
 class VolcAsrError(RuntimeError):
@@ -51,7 +57,10 @@ def _config_value(env_values: dict[str, str], *names: str) -> str:
     for name in names:
         value = os.environ.get(name) or env_values.get(name)
         if value:
-            return value.strip()
+            cleaned = value.strip()
+            if not cleaned or any(ord(character) < 32 for character in cleaned):
+                continue
+            return cleaned
     return ""
 
 
@@ -199,6 +208,46 @@ def _read_audio_bytes(audio_path: Path) -> bytes:
     if size > MAX_AUDIO_BYTES:
         raise VolcAsrError(f"Audio input exceeds {MAX_AUDIO_BYTES} bytes")
     return audio_path.read_bytes()
+
+
+def extract_audio_from_video(
+    video_path: Path,
+    output_path: Path,
+    *,
+    ffmpeg_bin: str | None = None,
+) -> Path:
+    """Extract compact local audio for the shared ASR path without cloud storage."""
+
+    if not video_path.is_file():
+        raise FileNotFoundError(f"Video input not found: {video_path}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    binary = ffmpeg_bin or os.environ.get("AUDIO_SOUND_FFMPEG") or shutil.which("ffmpeg")
+    if not binary:
+        raise VolcAsrError("FFmpeg is required to extract audio from video")
+    command = [
+        str(binary),
+        "-y",
+        "-hide_banner",
+        "-nostdin",
+        "-i",
+        str(video_path),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "64k",
+        str(output_path),
+    ]
+    completed = subprocess.run(command, capture_output=True)
+    if completed.returncode != 0 or not output_path.is_file() or output_path.stat().st_size <= 0:
+        detail_bytes = completed.stderr or completed.stdout
+        detail = detail_bytes.decode("utf-8", errors="replace").strip() if detail_bytes else "FFmpeg extraction failed"
+        raise VolcAsrError(f"Unable to extract ASR audio from video: {detail[-1000:]}")
+    return output_path
 
 
 def submit_audio(
@@ -531,13 +580,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             if output_path:
                 Path(output_path).parent.mkdir(parents=True, exist_ok=True)
         config = load_volc_asr_config(args.env)
-        raw_payload = run_volc_asr(
-            Path(args.audio),
-            config=config,
-            timeout_seconds=args.timeout_seconds,
-            poll_interval_seconds=args.poll_interval_seconds,
-            max_wait_seconds=args.max_wait_seconds,
-        )
+        input_path = Path(args.audio)
+        with tempfile.TemporaryDirectory(prefix="auto-cut-volc-asr-") as temp_dir:
+            asr_path = input_path
+            if input_path.suffix.casefold() in _VIDEO_SUFFIXES:
+                asr_path = extract_audio_from_video(
+                    input_path,
+                    Path(temp_dir) / f"{input_path.stem}.asr.m4a",
+                )
+            raw_payload = run_volc_asr(
+                asr_path,
+                config=config,
+                timeout_seconds=args.timeout_seconds,
+                poll_interval_seconds=args.poll_interval_seconds,
+                max_wait_seconds=args.max_wait_seconds,
+            )
         normalized = normalize_result(raw_payload)
         anchor_start, anchor_end = parse_anchor(args.anchor)
         if args.phrase:

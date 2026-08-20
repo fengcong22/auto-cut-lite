@@ -155,14 +155,24 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 
 - `workflow_mode=full` is the default and preserves the existing full-capability behavior.
 - `workflow_mode=lite` selects the High School History compact workflow. It keeps the source
-  duration unchanged, preserves a complete `Original Video` plus `Separated Source Audio`, writes
-  delete ranges to `Lite Cut Segments`, simple downloaded assets to `Lite Visual Assets`, timing
-  copies to `Lite Timing Adjusted`, and only requested reused source audio to `Lite Reused Audio`.
+  duration unchanged. Its default `lite_cut_layout=split_gap` writes non-delete intervals to
+  `Original Video` and `Separated Source Audio`, delete intervals to `Lite Cut Segments` and
+  `Lite Reused Audio`, simple downloaded assets to `Lite Visual Assets`, and timing copies to
+  `Lite Timing Adjusted`. Set `lite_cut_layout=copy` for the older full-V1/A1 reference layout.
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
 - Lite review labels use source text verbatim, start at the edit time, remain in the top safe band,
   and last `2s` unless clamped by the unchanged project end.
+- Lite mode does not weaken spoken-delete or pointer evidence. Review-document timestamps are
+  `search_hint` values only. A spoken delete must carry a passing word/character `asr_alignment`
+  receipt whose `resolved_cut_window` equals the edit start/end, together with `delete`, explicit
+  `must_keep`, and `strategy`. The receipt must bind the source-audio SHA-256, provider plus
+  model/resource identity, adapter version, ordered positive-duration matched word/character
+  rows, and `authoritative_cut_boundary=true`. Candidate transcripts, prompted local ASR, or a
+  rough-time match must keep `authoritative_cut_boundary=false` and cannot be written as a cut.
+  Pointer rows remain execution-required and retain the ordinary pointer binding, lifecycle,
+  placement, and visual acceptance gates.
 
 ## Required Fields
 

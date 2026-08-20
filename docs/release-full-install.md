@@ -122,7 +122,7 @@ account.
 
 The current [HTTP API reference](https://www.volcengine.com/docs/6561/1354868)
 maps model 1.0 to `volc.bigasr.auc` and model 2.0 to
-`volc.seedasr.auc`. The default `volc.seedasr.auc` is valid only when that exact
+`volc.seedasr.auc`. The default `volc.bigasr.auc` follows the full Auto-Cut recording path;
 application has model 2.0 trial or paid entitlement. Both authentication modes
 still require `X-Api-Resource-Id`; a configured credential or default resource
 ID is not entitlement evidence.

@@ -748,6 +748,7 @@ def _build_review_marker_item(
     item_id: str = "",
     source_text: str = "",
     verbatim_status: str = "legacy",
+    kind: str = "review_only",
 ):
     return ReviewMarkerItem(
         label=label,
@@ -757,6 +758,7 @@ def _build_review_marker_item(
         item_id=item_id,
         source_text=source_text,
         verbatim_status=verbatim_status,
+        kind=kind,
     )
 
 
@@ -1452,6 +1454,7 @@ def execute_revision_request(
                 item_id=item.item_id,
                 source_text=item.source_text,
                 verbatim_status=item.verbatim_status,
+                kind=item.kind,
             )
             for item in marker_plan
         ]

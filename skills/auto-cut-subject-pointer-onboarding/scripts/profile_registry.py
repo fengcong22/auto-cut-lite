@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import cv2
+import numpy as np
 
 SCHEMA_VERSION = 1
 ASPECT_RATIO_16_9 = 16 / 9
@@ -344,9 +345,10 @@ def _scale_reference_problems(raw_entry: Any, index: int) -> list[str]:
 
 
 def _hand_media_contract(source_path: Path, label: str) -> dict[str, Any]:
-    if source_path.read_bytes()[: len(PNG_SIGNATURE)] != PNG_SIGNATURE:
+    payload = source_path.read_bytes()
+    if payload[: len(PNG_SIGNATURE)] != PNG_SIGNATURE:
         raise ValueError(f"{label}.hand_asset_png_invalid")
-    decoded = cv2.imread(os.fspath(source_path), cv2.IMREAD_UNCHANGED)
+    decoded = cv2.imdecode(np.frombuffer(payload, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
     if decoded is None or decoded.ndim != 3:
         raise ValueError(f"{label}.hand_asset_png_invalid")
     height, width = decoded.shape[:2]

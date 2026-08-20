@@ -119,7 +119,7 @@ def build_volc_guide() -> dict[str, object]:
             APP_ID_KEY: "Volcengine speech application ID for the target user's account.",
             ACCESS_TOKEN_KEY: "Volcengine speech access token; entered with masked input.",
             API_KEY_KEY: "Volcengine new-console API key; entered with masked input.",
-            RESOURCE_ID_KEY: ("Authorized ASR resource ID. Press Enter to use volc.seedasr.auc."),
+            RESOURCE_ID_KEY: ("Authorized ASR resource ID. Press Enter to use volc.bigasr.auc."),
         },
         "commands": [
             r".\.venv\Scripts\python.exe scripts\auto_cut_first_run.py volc-config",

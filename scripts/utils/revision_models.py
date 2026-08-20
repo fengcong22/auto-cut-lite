@@ -134,6 +134,7 @@ class RevisionRequest:
     pause_alignment: Dict[str, Any] = field(default_factory=dict)
     audio_delivery_plan: AudioDeliveryPlan = field(default_factory=AudioDeliveryPlan)
     workflow_mode: str = "full"
+    lite_cut_layout: str = "split_gap"
 
 
 def _as_float(value: Any, field_name: str) -> float:
@@ -867,6 +868,14 @@ def load_revision_request(path: str) -> RevisionRequest:
     if workflow_mode not in {"full", "lite"}:
         raise ValueError("workflow_mode must be either 'full' or 'lite'.")
 
+    lite_cut_layout = str(
+        payload.get("lite_cut_layout")
+        or (project_payload.get("lite_cut_layout") if isinstance(project_payload, dict) else "")
+        or "split_gap"
+    ).strip().lower()
+    if lite_cut_layout not in {"split_gap", "copy"}:
+        raise ValueError("lite_cut_layout must be either 'split_gap' or 'copy'.")
+
     return RevisionRequest(
         project=project,
         edits=edits,
@@ -883,6 +892,7 @@ def load_revision_request(path: str) -> RevisionRequest:
         pause_alignment=dict(pause_alignment_payload),
         audio_delivery_plan=audio_delivery_plan,
         workflow_mode=workflow_mode,
+        lite_cut_layout=lite_cut_layout,
     )
 
 
