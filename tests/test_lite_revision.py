@@ -713,6 +713,13 @@ class LiteRevisionTests(unittest.TestCase):
             "\u2026\u2026\u6240\u4ee5\u6211\u4eec\u628a\u5b83\u653e\u5230\u4e00\u8d77\u6765\u8bf4\u554a\u3002\u201d"
         )
         self.assertEqual(_classify_review_text(implicit), "ellipsis_range_delete")
+        chinese_full_stop_ellipsis = (
+            "02:20-02:56，删除\u201c那么它对各国的。。。指导的作用。对吧？\u201d"
+        )
+        self.assertEqual(
+            _classify_review_text(chinese_full_stop_ellipsis),
+            "ellipsis_range_delete",
+        )
         gap = (
             "09\uff1a20\uff0c\u5220\u9664\u201c\u5bb0\u76f8\u201d\u548c"
             "\u201c\u4e3a\u6838\u5fc3\u201d\u4e2d\u95f4\u7684\u505c\u987f"

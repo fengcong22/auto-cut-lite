@@ -206,7 +206,7 @@ _COLORED_DELETE_KEYWORDS = (
     "颜色字",
     "着色字",
 )
-_ELLIPSIS_MARKERS = ("…", "...")
+_ELLIPSIS_MARKERS = ("…", "...", "。。。")
 _EXECUTION_KEYWORDS = (
     "修改",
     "删除",
