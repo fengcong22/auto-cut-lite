@@ -806,6 +806,44 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(item["evidence"]["colored_spans"], [])
         self.assertEqual(item["evidence"]["colored_span_status"], "missing_markup")
 
+    def test_red_rich_text_fragments_stay_independent(self):
+        source_text = (
+            "05:21、05:23、05:30，\u201c当时法国就是法兰西第二帝国嘛，"
+            "他的皇帝拿破仑三世和 10 万官兵就成了俘虏，这法法军就惨败\u201d，删除红字"
+        )
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "red-1",
+                            "source_text": source_text,
+                            "markup": (
+                                '当时<span text-color="rgb(216,57,49)">法国就是</span>'
+                                '法兰西第二帝国<span text-color="#d83931">嘛</span>，'
+                                '这<span text-color="rgb(216, 57, 49)">法</span>法军就惨败'
+                            ),
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "RedSpanDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "colored_span_delete")
+        self.assertTrue(item["execution_required"])
+        self.assertEqual(item["evidence"]["colored_span_status"], "resolved")
+        self.assertEqual(
+            [span["text"] for span in item["evidence"]["colored_spans"]],
+            ["法国就是", "嘛", "法"],
+        )
+
     def test_precise_semantic_requires_must_keep_safe_boundary_evidence(self):
         request = _load_request(
             {

@@ -56,7 +56,15 @@ _REVIEW_ONLY_HINTS = ("校对", "核对", "检查", "确认", "review", "check",
 _RANGE_SEPARATOR = re.compile(r"\s*(?:-|–|—|~|至|\bto\b)\s*", re.IGNORECASE)
 
 
-_BLUE_NOTE_HINTS = ("蓝色字", "蓝字", "标色字", "颜色字", "着色字")
+_COLORED_NOTE_HINTS = (
+    "蓝色字",
+    "蓝字",
+    "红色字",
+    "红字",
+    "标色字",
+    "颜色字",
+    "着色字",
+)
 _RICH_TEXT_KEYS = ("colored_spans", "text_runs", "rich_text_spans", "spans", "runs", "elements")
 _TEXT_KEYS = ("text", "content", "value", "plain_text", "plainText")
 _COLOR_KEYS = ("color", "text_color", "textColor", "foreground_color", "foregroundColor")
@@ -100,6 +108,18 @@ def _is_blue_color(value: Any) -> bool:
     return max(abs(rgb[index] - (36.0, 91.0, 219.0)[index]) for index in range(3)) <= 12.0
 
 
+def _is_red_color(value: Any) -> bool:
+    rgb = _color_triplet(value)
+    if rgb is None:
+        return False
+    # Feishu's red review color is rgb(216,57,49). Allow small theme rounding.
+    return max(abs(rgb[index] - (216.0, 57.0, 49.0)[index]) for index in range(3)) <= 12.0
+
+
+def _is_review_delete_color(value: Any) -> bool:
+    return _is_blue_color(value) or _is_red_color(value)
+
+
 def _run_text(run: Mapping[str, Any]) -> str:
     for key in _TEXT_KEYS:
         value = run.get(key)
@@ -135,8 +155,8 @@ def _iter_rich_runs(value: Any) -> Iterable[Mapping[str, Any]]:
             yield from _iter_rich_runs(child)
 
 
-def _extract_blue_spans(row: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Extract blue rich-text runs without collapsing uncolored text between them."""
+def _extract_colored_spans(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Extract review-colored runs without collapsing uncolored text between them."""
     candidates: list[Any] = []
     for key in _RICH_TEXT_KEYS:
         if key in row:
@@ -152,15 +172,23 @@ def _extract_blue_spans(row: Mapping[str, Any]) -> list[dict[str, Any]]:
             attrs = value[match.start() : match.end()]
             color_match = re.search(r"(?:rgb\([^)]*\)|#[0-9a-f]{6,8})", attrs, re.IGNORECASE)
             text = re.sub(r"<[^>]+>", "", match.group(1)).strip()
-            if text and color_match and _is_blue_color(color_match.group(0)):
+            if text and color_match and _is_review_delete_color(color_match.group(0)):
                 candidates.append({"text": text, "color": color_match.group(0)})
     spans: list[dict[str, Any]] = []
     for run in _iter_rich_runs(candidates):
         text = _run_text(run)
         color = _run_color(run)
-        if not text or not (_is_blue_color(color) or run.get("blue") is True or run.get("is_blue") is True):
+        explicitly_colored = any(
+            run.get(key) is True for key in ("blue", "is_blue", "red", "is_red")
+        )
+        if not text or not (_is_review_delete_color(color) or explicitly_colored):
             continue
-        entry: dict[str, Any] = {"text": text, "color": color or "rgb(36,91,219)"}
+        default_color = (
+            "rgb(216,57,49)"
+            if run.get("red") is True or run.get("is_red") is True
+            else "rgb(36,91,219)"
+        )
+        entry: dict[str, Any] = {"text": text, "color": color or default_color}
         for key in ("start", "end", "start_index", "end_index"):
             if key in run and run.get(key) not in (None, ""):
                 entry[key] = run.get(key)
@@ -523,22 +551,22 @@ def _canonical_review_items(
         }:
             kind = inferred_kind
 
-        # Blue text in a Feishu review note means delete the marked spoken
+        # Colored text in a Feishu review note means delete the marked spoken
         # fragments. Keep the rich-text spans in the source ledger so ASR can
         # resolve one physical window per fragment; never guess that the whole
-        # quoted sentence is blue when markup was not captured.
-        if any(hint.casefold() in inference_text.casefold() for hint in _BLUE_NOTE_HINTS):
+        # quoted sentence is colored when markup was not captured.
+        if any(hint.casefold() in inference_text.casefold() for hint in _COLORED_NOTE_HINTS):
             kind = "colored_span_delete"
-            blue_spans = _extract_blue_spans(source_row)
-            row["colored_spans"] = copy.deepcopy(blue_spans)
+            colored_spans = _extract_colored_spans(source_row)
+            row["colored_spans"] = copy.deepcopy(colored_spans)
             row_evidence = source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
             row_evidence = copy.deepcopy(row_evidence)
-            row_evidence["colored_spans"] = copy.deepcopy(blue_spans)
-            row_evidence["colored_span_status"] = "resolved" if blue_spans else "missing_markup"
+            row_evidence["colored_spans"] = copy.deepcopy(colored_spans)
+            row_evidence["colored_span_status"] = "resolved" if colored_spans else "missing_markup"
             row["evidence"] = row_evidence
-            if not blue_spans:
+            if not colored_spans:
                 warnings.append(
-                    f"Review item {explicit_id or f'index_{index + 1:03d}'} requests blue-span deletion "
+                    f"Review item {explicit_id or f'index_{index + 1:03d}'} requests colored-span deletion "
                     "but rich-text markup was not captured."
                 )
 

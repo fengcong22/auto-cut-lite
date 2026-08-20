@@ -65,7 +65,7 @@ Classify each review item before matching ASR. Do not flatten every item into on
 - `pause_timing_review`: when a spoken deletion leaves a questionable pause, decide `shorten`, `extend`, `keep`, `semantic_pause_adjustment`, or `visual_hold_review` separately from whether the delete itself succeeded.
 - `tail_particle_delete`: for particles such as `吧`, `啊`, `哈`, `哎`, protect the following word onset and use a precise non-destructive duck/mute pass if the tail remains.
 
-If the review document contains blue text, inspect the document markup for the colored spans instead of relying on the plain-text rendering. Treat `text-color="rgb(36,91,219)"` as blue-span evidence when present.
+If the review document contains blue or red deletion text, inspect the document markup for the colored spans instead of relying on the plain-text rendering. Treat `text-color="rgb(36,91,219)"` as blue-span evidence and `text-color="rgb(216,57,49)"` as red-span evidence when present. Preserve every marked fragment independently and never absorb uncolored words between two marked spans.
 
 ## Alignment Rules
 

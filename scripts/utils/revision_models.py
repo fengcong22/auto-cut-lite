@@ -197,7 +197,15 @@ _ANIMATION_KEYWORDS = (
 )
 _ANIMATION_ACTION_KEYWORDS = ("提前", "推迟", "延后", "加快", "变速", "挪", "移到", "改到", "调到")
 _DELETE_KEYWORDS = ("删除", "删掉", "剪掉", "去掉", "移除")
-_COLORED_DELETE_KEYWORDS = ("蓝色字", "蓝字", "标色字", "颜色字", "着色字")
+_COLORED_DELETE_KEYWORDS = (
+    "蓝色字",
+    "蓝字",
+    "红色字",
+    "红字",
+    "标色字",
+    "颜色字",
+    "着色字",
+)
 _ELLIPSIS_MARKERS = ("…", "...")
 _EXECUTION_KEYWORDS = (
     "修改",

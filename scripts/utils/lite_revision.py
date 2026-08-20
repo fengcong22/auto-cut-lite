@@ -316,7 +316,7 @@ def _spoken_cut_alignment_problems(
         colored_spans = evidence.get("colored_spans")
         colored_status = str(evidence.get("colored_span_status") or "").strip().casefold()
         if colored_status != "resolved" or not isinstance(colored_spans, list) or not colored_spans:
-            problems.append("colored_span_delete requires resolved blue rich-text spans")
+            problems.append("colored_span_delete requires resolved review-colored rich-text spans")
 
     source_kind = str(edit.source_kind or "").strip().casefold()
     if source_kind in _PRECISE_BOUNDARY_KINDS:
