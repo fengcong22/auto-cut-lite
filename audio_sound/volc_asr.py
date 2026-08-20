@@ -401,28 +401,50 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
     )
     utterances: list[dict[str, Any]] = []
     words: list[dict[str, Any]] = []
+    discarded_word_rows: list[dict[str, Any]] = []
 
-    for utterance in utterances_payload:
+    for utterance_index, utterance in enumerate(utterances_payload):
         if not isinstance(utterance, dict):
             continue
         utterance_words: list[dict[str, Any]] = []
         raw_words = utterance.get("words")
         if not isinstance(raw_words, list):
             raise VolcAsrError("Volc ASR word timing evidence is invalid")
-        for word in raw_words:
+        for word_index, word in enumerate(raw_words):
             if not isinstance(word, dict):
                 raise VolcAsrError("Volc ASR word timing evidence is invalid")
             raw_start = word.get("start_time", word.get("start"))
             raw_end = word.get("end_time", word.get("end"))
             if raw_start is None or raw_end is None:
                 raise VolcAsrError("Volc ASR word timing evidence is invalid")
+            raw_text = str(word.get("text", ""))
+            try:
+                whitespace_sentinel = (
+                    not raw_text.strip()
+                    and float(raw_start) < 0
+                    and float(raw_end) < 0
+                )
+            except (TypeError, ValueError, OverflowError):
+                whitespace_sentinel = False
+            if whitespace_sentinel:
+                discarded_word_rows.append(
+                    {
+                        "utterance_index": utterance_index,
+                        "word_index": word_index,
+                        "text": raw_text,
+                        "raw_start": raw_start,
+                        "raw_end": raw_end,
+                        "reason": "service_whitespace_sentinel",
+                    }
+                )
+                continue
             try:
                 start = _seconds(raw_start)
                 end = _seconds(raw_end)
             except (TypeError, ValueError, OverflowError) as exc:
                 raise VolcAsrError("Volc ASR word timing evidence is invalid") from exc
             item: dict[str, Any] = {
-                "text": str(word.get("text", "")),
+                "text": raw_text,
                 "start": start,
                 "end": end,
             }
@@ -473,6 +495,7 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
         "utterances": utterances,
         "words": words,
         "word_timing_count": len(words),
+        "discarded_word_rows": discarded_word_rows,
     }
 
 

@@ -226,6 +226,33 @@ def test_normalize_result_rejects_invalid_or_nonmonotonic_word_timings(
         normalize_result(payload)
 
 
+def test_normalize_result_discards_negative_whitespace_service_sentinel() -> None:
+    payload = _payload_with_evidence()
+    payload["result"]["utterances"][0]["words"].insert(
+        2,
+        {"text": " ", "start_time": -1, "end_time": -1},
+    )
+
+    normalized = normalize_result(payload)
+
+    assert [word["text"] for word in normalized["words"]] == [
+        "自动",
+        "剪辑",
+        "语音",
+        "测试",
+    ]
+    assert normalized["discarded_word_rows"] == [
+        {
+            "utterance_index": 0,
+            "word_index": 2,
+            "text": " ",
+            "raw_start": -1,
+            "raw_end": -1,
+            "reason": "service_whitespace_sentinel",
+        }
+    ]
+
+
 def test_find_phrase_matches_ignores_punctuation_and_uses_anchor() -> None:
     normalized = normalize_result(_payload_with_evidence())
 
