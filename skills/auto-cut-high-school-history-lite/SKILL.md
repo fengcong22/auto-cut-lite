@@ -9,6 +9,24 @@ Use this as the named compact entrypoint for `stage=高中`, `subject=历史`. S
 `workflow_mode=lite` in every revision request and hand off to the canonical `auto-cut` router.
 Do not fork or copy the full Auto-Cut implementation.
 
+## Repository Identity Gate
+
+Before any task input is read, compiled, or executed, resolve the execution repository and report
+`repository`, `branch`, and `workflow_mode`. In the current development checkout, require:
+
+- `repository=E:/codex/Auto-cut-高中历史/worktrees/auto-cut-lite`
+- `branch=feature/auto-cut-lite`
+- `workflow_mode=lite`
+
+The first repository command for every lite task must be
+`python scripts/assert_lite_workspace.py`, run from that repository. Require exit code zero and
+the JSON fields `ok=true`, `repository=auto-cut-lite`, `branch=feature/auto-cut-lite`, and
+`workflow_mode=lite`, then report those fields before continuing. Read the repository's
+`AGENTS.md` and use its scripts and runtime files for the complete task. If the identity does not
+match, stop before task execution; never search for or fall back to `Auto-Cut-v1.7.0`. Both the
+nested and top-level 1.7.0 directories are read-only comparison sources for lite work. Do not
+reuse task intermediates produced by a mistaken full-version run.
+
 ## Lite Acceptance Scope
 
 - `lite` keeps the editable timeline and audio/marker safeguards that are useful
