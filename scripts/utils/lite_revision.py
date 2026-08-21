@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
@@ -30,6 +31,12 @@ LITE_TRACKS = {
     "timing_adjusted": "Lite Timing Adjusted",
     "source_audio": "Separated Source Audio",
     "reused_audio": "Lite Reused Audio",
+}
+_LITE_VIDEO_RENDER_INDEXES = {
+    LITE_TRACKS["original_video"]: 0,
+    LITE_TRACKS["cut_segments"]: 100,
+    LITE_TRACKS["visual_assets"]: 11_000,
+    LITE_TRACKS["timing_adjusted"]: 12_000,
 }
 _DELETE_TOKENS = ("delete", "删除", "删掉", "剪掉", "去掉", "移除")
 _TIMING_TOKENS = (
@@ -504,6 +511,9 @@ def _add_audio_segment(
 def _asset_specs(edit: RevisionEdit) -> List[Dict[str, Any]]:
     specs = list(_visual_plan_segments(edit))
     if specs:
+        # Lite deliberately preserves the caller's raw asset spec.  In
+        # particular, do not read subject-pointer receipts to calibrate scale,
+        # transforms, anchors, or target geometry.
         return [dict(spec) for spec in specs]
     return [
         {
@@ -516,17 +526,20 @@ def _asset_specs(edit: RevisionEdit) -> List[Dict[str, Any]]:
     ]
 
 
+def _lite_visual_track_name(spec: Dict[str, Any]) -> str:
+    """Use one ordinary editable visual lane for all lite overlays."""
+
+    return LITE_TRACKS["visual_assets"]
+
+
 def _lite_visual_results(
     request: RevisionRequest,
     segment_receipts: List[Dict[str, Any]],
+    *,
+    source_track_name: str = "",
+    source_material_id: str = "",
 ) -> List[Dict[str, Any]]:
-    """Translate saved lite overlays into the canonical acceptance evidence shape.
-
-    Lite keeps every overlay on one fixed editable lane, but pointer and visual
-    acceptance must still use the same saved-segment/material attribution as the
-    full workflow.  Preserve the planner's binding/lifecycle/landing evidence;
-    this helper only adds identities that can be known after the draft is saved.
-    """
+    """Translate saved lite overlays into simple editable execution evidence."""
 
     visual_by_item: Dict[str, List[Dict[str, Any]]] = {}
     for receipt in segment_receipts:
@@ -540,6 +553,13 @@ def _lite_visual_results(
     for index, edit in enumerate(request.edits):
         item_id = str(edit.doc_item_id or f"edit_{index + 1:03d}")
         receipts = visual_by_item.get(item_id.casefold(), [])
+        if request.workflow_mode == "lite":
+            receipts = [
+                receipt
+                for receipt in receipts
+                if str(receipt.get("role") or "").strip().casefold()
+                not in {"clean_cover", "cleanup", "clean_layer", "residual_pointer_cover"}
+            ]
         if not receipts:
             continue
         segments = [
@@ -563,32 +583,53 @@ def _lite_visual_results(
         ]
         first = segments[0]
         operation = str(edit.source_kind or edit.op_type or "visual_overlay")
+        evidence = deepcopy(edit.evidence) if isinstance(edit.evidence, dict) else {}
+        if request.workflow_mode == "lite" and operation.strip().casefold() == "pointer_overlay":
+            for key in (
+                "subject_profile_receipt",
+                "residual_pointer_cover",
+                "lifecycle_mode",
+                "target_point",
+                "target_geometry",
+                "hotspot_landing",
+                "clean_layers",
+                "underline_layers",
+                "source_pointer_window",
+                "recorded_pointer_visibility",
+                "source_pointer_handoff",
+                "tail_scan",
+                "clean_cover_window",
+            ):
+                evidence.pop(key, None)
+        evidence.update(
+            {
+                "status": "pass",
+                "executed": True,
+                "operation": operation,
+                "edit_type": edit.op_type,
+                "asset_path": first["asset_path"],
+                "asset_paths": [segment["asset_path"] for segment in segments],
+                "track_name": first["track_name"],
+                "track_names": [segment["track_name"] for segment in segments],
+                "segment_id": first["segment_id"],
+                "segment_ids": [segment["segment_id"] for segment in segments],
+                "material_id": first["material_id"],
+                "material_ids": [segment["material_id"] for segment in segments],
+                "overlay_track": first["track_name"],
+                "overlay_segment": first["segment_id"],
+                "overlay_segments": segments,
+                "validation": {
+                    "status": "pass",
+                    "method": "editable_lite_overlay_segment_written",
+                },
+            }
+        )
         results.append(
             {
                 "item_id": item_id,
                 "kind": operation,
                 "segments": segments,
-                "evidence": {
-                    "status": "pass",
-                    "executed": True,
-                    "operation": operation,
-                    "edit_type": edit.op_type,
-                    "asset_path": first["asset_path"],
-                    "asset_paths": [segment["asset_path"] for segment in segments],
-                    "track_name": first["track_name"],
-                    "track_names": [segment["track_name"] for segment in segments],
-                    "segment_id": first["segment_id"],
-                    "segment_ids": [segment["segment_id"] for segment in segments],
-                    "material_id": first["material_id"],
-                    "material_ids": [segment["material_id"] for segment in segments],
-                    "overlay_track": first["track_name"],
-                    "overlay_segment": first["segment_id"],
-                    "overlay_segments": segments,
-                    "validation": {
-                        "status": "pass",
-                        "method": "editable_lite_overlay_segment_written",
-                    },
-                },
+                "evidence": evidence,
                 "validation": {
                     "status": "pass",
                     "method": "editable_lite_overlay_segment_written",
@@ -628,6 +669,7 @@ def _add_asset_segment(
     material_cache: Optional[Dict[str, Any]] = None,
 ) -> Any:
     spec = spec or {}
+    track_name = _lite_visual_track_name(spec)
     extension = os.path.splitext(path)[1].lower()
     cache_key = os.path.normcase(os.path.abspath(path))
     if mock_media:
@@ -640,7 +682,7 @@ def _add_asset_segment(
             project,
             draft,
             material,
-            track_name=LITE_TRACKS["visual_assets"],
+            track_name=track_name,
             timeline_start=timeline_start,
             source_start=0.0,
             duration=duration,
@@ -674,14 +716,14 @@ def _add_asset_segment(
             clip_settings=clip_settings,
             volume=0.0,
         )
-        project.script.add_segment(segment, LITE_TRACKS["visual_assets"])
+        project.script.add_segment(segment, track_name)
         return segment
     if extension in _IMAGE_EXTENSIONS:
         return project.add_image_simple(
             path,
             start_time=f"{timeline_start:.6f}s",
             duration=f"{duration:.6f}s",
-            track_name=LITE_TRACKS["visual_assets"],
+            track_name=track_name,
             scale_x=_spec_float(spec, "scale_x", default=1.0),
             scale_y=_spec_float(spec, "scale_y", default=1.0),
             transform_x=_spec_float(spec, "transform_x", default=0.0),
@@ -694,7 +736,7 @@ def _add_asset_segment(
             path,
             start_time=f"{timeline_start:.6f}s",
             duration=f"{duration:.6f}s",
-            track_name=LITE_TRACKS["visual_assets"],
+            track_name=track_name,
         )
         if segment is not None:
             segment.volume = 0.0
@@ -748,6 +790,7 @@ def _validate_lite_content(
     layout: str = "split_gap",
     delete_windows: Optional[List[Tuple[float, float]]] = None,
     audio_duration: Optional[float] = None,
+    planned_audio_segments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
@@ -798,11 +841,15 @@ def _validate_lite_content(
             )
             return
         for index, (saved_start, saved_end, source_start) in enumerate(actual):
-            expected_start, expected_end = expected[index]
+            expected_row = expected[index]
+            expected_start, expected_end = expected_row[:2]
+            expected_source_start = (
+                expected_row[2] if len(expected_row) >= 3 else expected_start
+            )
             if (
                 abs(saved_start - expected_start) > 0.01
                 or abs(saved_end - expected_end) > 0.01
-                or abs(source_start - expected_start) > 0.01
+                or abs(source_start - expected_source_start) > 0.01
             ):
                 errors.append(
                     f"{label} segment {index + 1} is not source-aligned: "
@@ -819,16 +866,38 @@ def _validate_lite_content(
         cut_track = by_name.get(LITE_TRACKS["cut_segments"])
         if cut_track is not None:
             _expect_windows(LITE_TRACKS["cut_segments"], merged_deletes, "V2")
-        audio_total = min(total_duration, float(audio_duration or total_duration))
-        audio_deletes = _merge_windows(
-            (start, min(end, audio_total))
-            for start, end in merged_deletes
-            if start < audio_total
-        )
-        keep_audio = _complement_windows(audio_deletes, audio_total)
-        _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
-        if audio_deletes:
-            _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+        if planned_audio_segments:
+            def _planned_windows(track_name: str) -> List[Tuple[float, float]]:
+                windows = []
+                for planned in planned_audio_segments:
+                    if str(planned.get("track_name") or "") != track_name:
+                        continue
+                    start = float(planned.get("timeline_start", 0.0))
+                    duration = float(planned.get("duration", 0.0))
+                    source_start = float(planned.get("source_start", 0.0))
+                    windows.append((start, start + duration, source_start))
+                return windows
+
+            _expect_windows(
+                LITE_TRACKS["source_audio"],
+                _planned_windows(LITE_TRACKS["source_audio"]),
+                "A1",
+            )
+            planned_reused = _planned_windows(LITE_TRACKS["reused_audio"])
+            if planned_reused:
+                _expect_windows(LITE_TRACKS["reused_audio"], planned_reused, "A2")
+        else:
+            audio_total = min(total_duration, float(audio_duration or total_duration))
+            audio_deletes = _merge_windows(
+                (start, min(end, audio_total))
+                for start, end in merged_deletes
+                if start < audio_total
+            )
+            keep_audio = _complement_windows(audio_deletes, audio_total)
+            _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
+            if audio_deletes:
+                _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+        if by_name.get(LITE_TRACKS["reused_audio"]) is not None:
             a2 = by_name.get(LITE_TRACKS["reused_audio"])
             if a2 is not None:
                 muted = [
@@ -988,7 +1057,15 @@ def execute_lite_revision_request(
         if not segmented_audio_delivery:
             fixed_tracks.append((LITE_TRACKS["source_audio"], draft.TrackType.audio))
         for track_name, track_type in fixed_tracks:
-            project.script.add_track(track_type, track_name)
+            absolute_index = _LITE_VIDEO_RENDER_INDEXES.get(track_name)
+            if absolute_index is None:
+                project.script.add_track(track_type, track_name)
+            else:
+                project.script.add_track(
+                    track_type,
+                    track_name,
+                    absolute_index=absolute_index,
+                )
 
         video_material = _make_video_material(
             draft,
@@ -1217,16 +1294,21 @@ def execute_lite_revision_request(
                 asset_path = str(spec.get("asset_path") or "").strip()
                 if not asset_path:
                     continue
+                # Clean-cover assets belong to the full pointer replacement
+                # workflow.  Lite does not erase or mask the recorded pointer;
+                # it only places the requested asset at the edit start.
+                role = str(spec.get("role") or "").strip().casefold()
+                if role in {"clean_cover", "cleanup", "clean_layer", "residual_pointer_cover"}:
+                    continue
                 if kind in {"cut", "timing"} and os.path.normcase(os.path.abspath(asset_path)) == os.path.normcase(
                     os.path.abspath(request.project.source_video)
                 ):
                     continue
                 if not mock_media and not os.path.exists(asset_path):
                     raise FileNotFoundError(asset_path)
-                visual_start = max(
-                    0.0,
-                    min(_spec_float(spec, "timeline_start", "start", default=source_start), total_duration),
-                )
+                # The lite timing contract intentionally ignores any
+                # full-workflow remapping or lifecycle handoff timestamp.
+                visual_start = max(0.0, min(source_start, total_duration))
                 available_visual_duration = max(0.0, total_duration - visual_start)
                 if available_visual_duration <= 0:
                     raise ValueError(f"Lite visual asset starts outside the project: {asset_path}")
@@ -1234,6 +1316,10 @@ def execute_lite_revision_request(
                     max(0.01, _spec_float(spec, "duration", default=max(0.01, duration))),
                     available_visual_duration,
                 )
+                # Do not carry full-workflow geometry into the lite draft.
+                # The asset is intentionally inserted with default JianYing
+                # scale/position; only its path and start time are meaningful.
+                lite_spec = {"role": role}
                 asset_segment = _add_asset_segment(
                     project,
                     draft,
@@ -1243,7 +1329,7 @@ def execute_lite_revision_request(
                     duration=visual_duration,
                     mock_media=mock_media,
                     total_duration=total_duration,
-                    spec=spec,
+                    spec=lite_spec,
                     material_cache=visual_material_cache,
                 )
                 if asset_segment is None:
@@ -1258,17 +1344,17 @@ def execute_lite_revision_request(
                             if os.path.splitext(asset_path)[1].lower() in _VIDEO_EXTENSIONS
                             else "image"
                         ),
-                        "track_name": LITE_TRACKS["visual_assets"],
+                        "track_name": _lite_visual_track_name(spec),
                         "segment_id": str(getattr(asset_segment, "segment_id", "")),
                         "material_id": str(getattr(asset_segment, "material_id", "")),
                         "asset_path": asset_path,
                         "source_start": _spec_float(spec, "source_start", default=0.0),
                         "timeline_start": visual_start,
                         "duration": visual_duration,
-                        "scale_x": _spec_float(spec, "scale_x", default=1.0),
-                        "scale_y": _spec_float(spec, "scale_y", default=1.0),
-                        "transform_x": _spec_float(spec, "transform_x", default=0.0),
-                        "transform_y": _spec_float(spec, "transform_y", default=0.0),
+                        "scale_x": 1.0,
+                        "scale_y": 1.0,
+                        "transform_x": 0.0,
+                        "transform_y": 0.0,
                         "audio_preserved": False,
                     }
                 )
@@ -1332,6 +1418,15 @@ def execute_lite_revision_request(
                 layout=layout,
                 delete_windows=delete_windows,
                 audio_duration=source_audio_duration,
+                planned_audio_segments=[
+                    {
+                        "track_name": segment.track_name,
+                        "source_start": segment.source_start,
+                        "timeline_start": segment.timeline_start,
+                        "duration": segment.duration,
+                    }
+                    for segment in request.audio_delivery_plan.segments
+                ],
             )
             validations.append((variant_name, variant_validation))
         primary_name, primary_validation = validations[0]
@@ -1358,7 +1453,12 @@ def execute_lite_revision_request(
             raise RuntimeError("Lite editable draft validation failed: " + "; ".join(validation["errors"]))
         validated = True
 
-        visual_results = _lite_visual_results(request, segment_receipts)
+        visual_results = _lite_visual_results(
+            request,
+            segment_receipts,
+            source_track_name=LITE_TRACKS["original_video"],
+            source_material_id=str(getattr(video_material, "material_id", "")),
+        )
         from utils.revision_runner import (
             RevisionAcceptanceError,
             _merge_visual_results_into_items,
@@ -1453,7 +1553,7 @@ def execute_lite_revision_request(
             "delete_operations": (
                 "split_gap_cut_boundaries" if layout == "split_gap" else "cut_boundaries_only"
             ),
-            "visual_transform_policy": "request_spec",
+            "visual_transform_policy": "lite_start_only_default_geometry",
         }
     except Exception:
         if not validated and write_info.get("cleanup_on_failure", True):

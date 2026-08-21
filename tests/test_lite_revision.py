@@ -12,7 +12,12 @@ SCRIPTS_PATH = os.path.join(REPO_ROOT, "scripts")
 if SCRIPTS_PATH not in sys.path:
     sys.path.insert(0, SCRIPTS_PATH)
 
-from utils.lite_revision import LITE_TRACKS, _add_asset_segment, _spoken_cut_alignment_problems
+from utils.lite_revision import (
+    LITE_TRACKS,
+    _asset_specs,
+    _lite_visual_results,
+    _spoken_cut_alignment_problems,
+)
 from utils.review_job_compiler import compile_review_job
 from utils.revision_models import _classify_review_text
 from utils.revision_runner import (
@@ -36,44 +41,169 @@ def _track(content, name):
 
 
 class LiteRevisionTests(unittest.TestCase):
-    def test_lite_image_overlay_applies_requested_transform(self):
-        class Project:
-            def __init__(self):
-                self.calls = []
-
-            def add_image_simple(self, path, **kwargs):
-                self.calls.append((path, kwargs))
-                return object()
-
-        project = Project()
-        segment = _add_asset_segment(
-            project,
-            draft=None,
-            mock_video=None,
-            path="C:/media/pointer.png",
-            timeline_start=12.5,
-            duration=2.25,
-            mock_media=False,
-            total_duration=30.0,
-            spec={
-                "scale_x": 0.04,
-                "scale_y": 0.05,
-                "transform_x": -315.0,
-                "transform_y": 120.0,
-                "rotation": 3.0,
-                "alpha": 0.9,
-            },
+    def test_lite_pointer_spec_does_not_calibrate_bound_anchor(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePointerAnchor",
+                    "source_video": "C:/media/source.mp4",
+                },
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-1",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "pointer_asset",
+                                    "asset_path": "C:/media/pointer.png",
+                                    "scale_x": 0.04,
+                                    "scale_y": 0.04,
+                                }
+                            ]
+                        },
+                        "evidence": {
+                            "target_point": [507.5, 664.0],
+                            "target_geometry": {
+                                "canvas_width": 1920,
+                                "canvas_height": 1080,
+                            },
+                            "subject_profile_receipt": {
+                                "anchor": [0.04, 0.03],
+                                "media_contract": {"width": 354, "height": 354},
+                            },
+                        },
+                    }
+                ],
+            }
         )
 
-        self.assertIsNotNone(segment)
-        self.assertEqual(len(project.calls), 1)
-        _path, kwargs = project.calls[0]
-        self.assertEqual(kwargs["scale_x"], 0.04)
-        self.assertEqual(kwargs["scale_y"], 0.05)
-        self.assertEqual(kwargs["transform_x"], -315.0)
-        self.assertEqual(kwargs["transform_y"], 120.0)
-        self.assertEqual(kwargs["rotation"], 3.0)
-        self.assertEqual(kwargs["alpha"], 0.9)
+        spec = _asset_specs(request.edits[0])[0]
+        self.assertEqual(spec["scale_x"], 0.04)
+        self.assertNotIn("transform_x", spec)
+        self.assertNotIn("transform_y", spec)
+
+    def test_lite_pointer_results_keep_only_simple_execution_evidence(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePointerEvidence",
+                    "source_video": "C:/media/source.mp4",
+                },
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-1",
+                        "evidence": {
+                            "lifecycle_mode": "replace_recorded_pointer_then_handoff",
+                            "target_point": [500.0, 600.0],
+                            "subject_profile_receipt": {
+                                "asset_role": "hand",
+                                "scale_reference_layout": "history-layout",
+                            },
+                            "residual_pointer_cover": {
+                                "status": "pass",
+                                "mode": "transparent_roi_still_cover",
+                                "cover_sha256": "a" * 64,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+        receipts = [
+            {
+                "item_id": "pointer-1",
+                "kind": "visual",
+                "role": "pointer_asset",
+                "asset_path": "C:/media/pointer.png",
+                "track_name": LITE_TRACKS["visual_assets"],
+                "segment_id": "pointer-segment",
+                "material_id": "pointer-material",
+                "timeline_start": 2.0,
+                "duration": 1.0,
+            },
+            {
+                "item_id": "pointer-1",
+                "kind": "visual",
+                "role": "clean_cover",
+                "asset_path": "C:/media/cover.png",
+                "track_name": LITE_TRACKS["visual_assets"],
+                "segment_id": "cover-segment",
+                "material_id": "cover-material",
+                "timeline_start": 2.0,
+                "duration": 1.0,
+            },
+        ]
+
+        evidence = _lite_visual_results(
+            request,
+            receipts,
+            source_track_name=LITE_TRACKS["original_video"],
+            source_material_id="source-material",
+        )[0]["evidence"]
+
+        self.assertEqual(evidence["segment_id"], "pointer-segment")
+        self.assertEqual(evidence["track_name"], LITE_TRACKS["visual_assets"])
+        self.assertTrue(evidence["executed"])
+        self.assertNotIn("subject_profile_receipt", evidence)
+        self.assertNotIn("residual_pointer_cover", evidence)
+
+    def test_lite_execution_ignores_requested_visual_geometry(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteDefaultGeometry",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-geometry",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "pointer_asset",
+                                    "asset_path": "C:/media/pointer.png",
+                                    "scale_x": 0.04,
+                                    "scale_y": 0.05,
+                                    "transform_x": -315.0,
+                                    "transform_y": 120.0,
+                                    "rotation": 3.0,
+                                    "alpha": 0.9,
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+            )
+
+        segment = result["visual_overlay_results"][0]["segments"][0]
+        self.assertEqual(segment["timeline_start"], 2.0)
+        self.assertEqual(segment["scale_x"], 1.0)
+        self.assertEqual(segment["scale_y"], 1.0)
+        self.assertEqual(segment["transform_x"], 0.0)
+        self.assertEqual(segment["transform_y"], 0.0)
 
     def test_review_job_compiler_preserves_lite_mode_with_precision_audio_gate(self):
         with tempfile.TemporaryDirectory() as output_dir:
@@ -135,11 +265,13 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(
             request_payload["review_items"][0]["review_timestamp_role"], "search_hint"
         )
-        self.assertTrue(request_payload["acceptance"]["require_visual_evidence"])
-        self.assertTrue(request_payload["acceptance"]["require_subject_pointer_binding"])
-        self.assertTrue(request_payload["acceptance"]["require_pointer_lifecycle_evidence"])
+        self.assertFalse(request_payload["acceptance"]["require_visual_evidence"])
+        self.assertFalse(request_payload["acceptance"]["require_subject_pointer_binding"])
+        self.assertFalse(request_payload["acceptance"]["require_pointer_lifecycle_evidence"])
+        self.assertNotIn("visual", request_payload["acceptance_profile"]["enabled_gates"])
+        self.assertNotIn("pointer", request_payload["acceptance_profile"]["enabled_gates"])
 
-    def test_lite_explicit_visual_gate_uses_full_acceptance_with_saved_overlay(self):
+    def test_lite_explicit_visual_flag_still_uses_lite_start_alignment(self):
         request = _load_request(
             {
                 "workflow_mode": "lite",
@@ -187,7 +319,7 @@ class LiteRevisionTests(unittest.TestCase):
             LITE_TRACKS["visual_assets"],
         )
 
-    def test_lite_pointer_gate_rejects_missing_full_binding_evidence(self):
+    def test_lite_pointer_does_not_require_full_binding_evidence(self):
         request = _load_request(
             {
                 "workflow_mode": "lite",
@@ -224,16 +356,68 @@ class LiteRevisionTests(unittest.TestCase):
             }
         )
         with tempfile.TemporaryDirectory() as drafts_root:
-            with self.assertRaises(RevisionAcceptanceError) as raised:
-                execute_revision_request(
-                    request,
-                    drafts_root=drafts_root,
-                    mock_media=True,
-                    strict=True,
-                )
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+                strict=True,
+            )
 
-        errors = raised.exception.result_data["acceptance_validation"]["errors"]
-        self.assertTrue(any("subject pointer binding receipt" in row for row in errors))
+        self.assertTrue(result["acceptance_validation"]["ok"])
+        self.assertEqual(
+            result["acceptance_validation"]["metrics"]["subject_pointer_binding_errors"],
+            [],
+        )
+
+    def test_lite_visual_roles_keep_clean_cover_on_v3_and_pointer_on_v4(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePointerLayering",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "visual_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-layering",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "clean_cover",
+                                    "asset_path": "C:/media/clean.png",
+                                    "timeline_start": 2.0,
+                                    "duration": 1.0,
+                                },
+                                {
+                                    "role": "pointer_asset",
+                                    "asset_path": "C:/media/pointer.png",
+                                    "timeline_start": 2.0,
+                                    "duration": 1.0,
+                                    "scale_x": 0.05,
+                                    "scale_y": 0.05,
+                                },
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LitePointerLayering", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertEqual(len(_track(content, LITE_TRACKS["visual_assets"])["segments"]), 1)
+        self.assertEqual(len(_track(content, LITE_TRACKS["timing_adjusted"])["segments"]), 0)
 
     def test_load_revision_request_defaults_to_full_and_accepts_lite(self):
         base = {
@@ -244,6 +428,20 @@ class LiteRevisionTests(unittest.TestCase):
         }
         self.assertEqual(_load_request(base).workflow_mode, "full")
         self.assertEqual(_load_request({**base, "workflow_mode": "lite"}).workflow_mode, "lite")
+        lite_flags = _load_request(
+            {
+                **base,
+                "workflow_mode": "lite",
+                "acceptance": {
+                    "require_visual_evidence": True,
+                    "require_subject_pointer_binding": True,
+                    "require_pointer_lifecycle_evidence": True,
+                },
+            }
+        )
+        self.assertFalse(lite_flags.acceptance.require_visual_evidence)
+        self.assertFalse(lite_flags.acceptance.require_subject_pointer_binding)
+        self.assertFalse(lite_flags.acceptance.require_pointer_lifecycle_evidence)
         with self.assertRaisesRegex(ValueError, "workflow_mode"):
             _load_request({**base, "workflow_mode": "compact"})
 

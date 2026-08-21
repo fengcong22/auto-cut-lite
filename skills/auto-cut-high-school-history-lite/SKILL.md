@@ -9,21 +9,22 @@ Use this as the named compact entrypoint for `stage=高中`, `subject=历史`. S
 `workflow_mode=lite` in every revision request and hand off to the canonical `auto-cut` router.
 Do not fork or copy the full Auto-Cut implementation.
 
-## Full-Capability Quality Engine
+## Lite Acceptance Scope
 
-- `lite` changes the editable timeline/output policy only. It must not weaken
-  source ASR, word/character boundary resolution, reverse-ASR, subject-pointer
-  binding, pointer placement/lifecycle evidence, visual attribution, or final
-  acceptance gates owned by the canonical full workflow.
-- Run the canonical full-workflow preflight before opening JianYing whenever a
-  compiled request enables audio, visual, pointer, pause, source-coverage, or
-  final-acceptance gates. A missing or stale receipt fails before draft writes.
-- After saving, run canonical acceptance independently against the root draft
-  and every active timeline variant. Lite track validation is necessary but is
-  never a substitute for item-level full-capability acceptance.
-- Preserve the lite prohibitions on destructive deletion, generated animation,
-  keyframes, and automatic scaling. Full capability means full precision and
-  evidence, not silently changing the lite editing contract.
+- `lite` keeps the editable timeline and audio/marker safeguards that are useful
+  for this compact workflow, but it deliberately does **not** use the full
+  visual/pointer evidence contract.
+- For every supplied visual or pointer asset, the only visual acceptance rules
+  are: the local material is saved as an editable segment and its timeline start
+  equals the edit's requested start (within the normal timing tolerance).
+- Lite does not inspect or require scale, position, transform, rotation, alpha,
+  target geometry, fingertip landing, occlusion, recorded-pointer lifetime,
+  clean-cover/cleanup layers, subject-pointer binding receipts, or opened-state
+  screenshots. Strict mode and explicit full-workflow visual flags do not turn
+  these checks back on for `workflow_mode=lite`.
+- Spoken-word deletion still uses the lite workflow's ASR-resolved boundary and
+  reverse-audio checks when that edit type is requested. Review labels and the
+  editable cut structure remain required.
 
 ## Lite Draft Contract
 
@@ -62,9 +63,9 @@ Do not fork or copy the full Auto-Cut implementation.
 - Review labels are all retained verbatim. Their text backgrounds are color-coded by kind:
   spoken delete (red), visual delete (rose), pointer/visual addition (blue), animation timing
   (amber), and review-only (gray).
-- Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Use their
-  imported size and transform without animation, keyframes, automatic scaling, or target
-  optimization. Clamp the requested duration to the source project duration.
+- Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
+  with JianYing's default geometry; do not calibrate or optimize size, position, transform,
+  occlusion, or target landing. Clamp the requested duration to the source project duration.
 - Copy timing-adjusted source ranges to `Lite Timing Adjusted` at the requested target time.
   Never remove the original range.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
@@ -97,8 +98,9 @@ Before delivery, validate the saved root and active timeline variants:
   receipt binds source-audio SHA-256, provider/model or resource, adapter version, ordered
   matched word/character rows, and `authoritative_cut_boundary=true`; fallback candidates cannot
   be promoted to cuts merely because their rough time or transcript text looks plausible;
-- every pointer item has a real editable overlay plus the normal pointer binding, lifecycle,
-  placement, and visual-evidence gates. A label by itself is a failure.
+- every visual/pointer item has a real editable overlay whose material is saved and whose
+  timeline start equals the edit start. No pointer binding, lifecycle, placement, geometry,
+  occlusion, clean-cover, or opened-state evidence is required in lite mode.
 
 Report split-gap delete requests as editable cut boundaries with the deleted source intervals
 isolated on V2/A2; the source project duration is intentionally unchanged for secondary manual

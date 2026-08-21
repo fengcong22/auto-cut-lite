@@ -750,10 +750,16 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     acceptance["require_audio_validation"] = bool(
         {"audio_precision", "audio_join"} & enabled_gates
     )
-    acceptance["require_visual_evidence"] = "visual" in enabled_gates
+    acceptance["require_visual_evidence"] = (
+        workflow_mode != "lite" and "visual" in enabled_gates
+    )
     acceptance["require_pause_validation"] = "pause_fit" in enabled_gates
-    acceptance["require_subject_pointer_binding"] = "pointer" in enabled_gates
-    acceptance["require_pointer_lifecycle_evidence"] = "pointer" in enabled_gates
+    acceptance["require_subject_pointer_binding"] = (
+        workflow_mode != "lite" and "pointer" in enabled_gates
+    )
+    acceptance["require_pointer_lifecycle_evidence"] = (
+        workflow_mode != "lite" and "pointer" in enabled_gates
+    )
     request_model, model_items = _request_model(normalized_project, review_items, acceptance)
     acceptance_profile = derive_acceptance_profile(request_model, doc_items=model_items)
 

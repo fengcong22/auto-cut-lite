@@ -2581,6 +2581,106 @@ def _validate_timeline_plan_mapping(request: RevisionRequest) -> Dict[str, Any]:
     return {"path": path, "errors": errors, "timeline_mapping_errors": sorted(set(mapping_errors))}
 
 
+def _validate_lite_visual_start_alignment(
+    request: RevisionRequest,
+    content: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Validate the only visual placement rule kept by lite mode.
+
+    Lite overlays are required to begin at the review edit's start time and to
+    reference a saved editable material.  No scale, transform, hotspot,
+    lifecycle, cover, or occlusion evidence is inspected here.  A generated
+    clean-cover helper asset is deliberately ignored because lite mode does not
+    perform recorded-pointer replacement or obstruction cleanup.
+    """
+
+    result = {"ok": True, "errors": [], "checked_items": 0, "matched_segments": 0}
+    if request.workflow_mode != "lite" or not isinstance(content, dict):
+        return result
+
+    materials = content.get("materials") or {}
+    material_paths: Dict[str, str] = {}
+    if isinstance(materials, dict):
+        for group in materials.values():
+            if not isinstance(group, list):
+                continue
+            for material in group:
+                if not isinstance(material, dict):
+                    continue
+                material_id = str(material.get("id") or material.get("material_id") or "").strip()
+                material_path = str(
+                    material.get("path")
+                    or material.get("media_path")
+                    or material.get("file_path")
+                    or ""
+                ).strip()
+                if material_id and material_path:
+                    material_paths[material_id] = _normalize_material_path(material_path)
+
+    saved_segments: List[Dict[str, Any]] = []
+    for track in content.get("tracks") or []:
+        if not isinstance(track, dict) or _normalize_track_type_name(track.get("type")) != "video":
+            continue
+        for segment in track.get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            target = segment.get("target_timerange") or {}
+            try:
+                target_start = int(target.get("start", 0) or 0) / 1_000_000.0
+            except (TypeError, ValueError, OverflowError):
+                continue
+            saved_segments.append(
+                {
+                    "path": material_paths.get(str(segment.get("material_id") or ""), ""),
+                    "start": target_start,
+                }
+            )
+
+    for index, edit in enumerate(request.edits):
+        if not _is_visual_edit(edit):
+            continue
+        specs = list(_visual_plan_segments(edit))
+        if not specs:
+            specs = [{"asset_path": path} for path in edit.asset_paths]
+        if not specs:
+            continue
+        result["checked_items"] += 1
+        try:
+            expected_start = float(edit.start)
+        except (TypeError, ValueError, OverflowError):
+            result["errors"].append(
+                f"Lite visual edit {edit.doc_item_id or index + 1} has an invalid start time."
+            )
+            continue
+        for spec in specs:
+            if not isinstance(spec, dict):
+                continue
+            role = str(spec.get("role") or "").strip().casefold()
+            if role in {"clean_cover", "cleanup", "clean_layer", "residual_pointer_cover"}:
+                continue
+            asset_path = _normalize_material_path(spec.get("asset_path"))
+            if not asset_path:
+                continue
+            candidates = [row for row in saved_segments if row["path"] == asset_path]
+            if not candidates:
+                result["errors"].append(
+                    f"Lite visual edit {edit.doc_item_id or index + 1} asset is not saved as an editable segment: "
+                    f"{spec.get('asset_path')}."
+                )
+                continue
+            if not any(abs(float(row["start"]) - expected_start) <= 0.01 for row in candidates):
+                result["errors"].append(
+                    f"Lite visual edit {edit.doc_item_id or index + 1} asset start is not aligned: "
+                    f"expected {expected_start:.3f}s."
+                )
+                continue
+            result["matched_segments"] += 1
+
+    result["errors"] = list(dict.fromkeys(result["errors"]))
+    result["ok"] = not result["errors"]
+    return result
+
+
 def _pointer_landing_is_proven(evidence: Dict[str, Any], validation: Dict[str, Any]) -> bool:
     candidate_payloads = [
         evidence.get("hotspot_landing"),
@@ -2652,6 +2752,7 @@ _CONDITIONAL_ACCEPTANCE_GATES = (
     "pointer",
     "animation",
 )
+_LITE_VISUAL_ACCEPTANCE_GATES = {"visual", "pointer"}
 _CHEAP_AUDIO_KINDS = {
     "bgm_replace",
     "replace_bgm",
@@ -2990,6 +3091,18 @@ def derive_acceptance_profile(
     """Derive low-cost global and item-specific revision acceptance gates."""
 
     records = _acceptance_route_records(request, doc_items)
+    # Lite revisions intentionally do not use the full visual/pointer evidence
+    # contract.  A visual edit is still an execution item (the edit and marker
+    # must exist), but its acceptance is limited to the saved asset and start
+    # time.  Removing these gates here also prevents downstream full-workflow
+    # checks from being reached through strict validation or compiled jobs.
+    if request.workflow_mode == "lite":
+        for record in records:
+            record["gates"] = [
+                gate
+                for gate in record.get("gates") or []
+                if gate not in _LITE_VISUAL_ACCEPTANCE_GATES
+            ]
     acceptance = request.acceptance
     enabled = list(_ALWAYS_ACCEPTANCE_GATES)
     gate_reasons: Dict[str, List[str]] = {
@@ -3014,7 +3127,11 @@ def derive_acceptance_profile(
             explicit_item_gates.append(
                 (gate, "Explicit require_audio_validation=true adds this gate.")
             )
-    if acceptance.require_visual_evidence and acceptance._explicit_require_visual_evidence:
+    if (
+        request.workflow_mode != "lite"
+        and acceptance.require_visual_evidence
+        and acceptance._explicit_require_visual_evidence
+    ):
         explicit_item_gates.append(
             ("visual", "Explicit require_visual_evidence=true adds this gate.")
         )
@@ -3066,7 +3183,9 @@ def derive_acceptance_profile(
             "require_audio_validation",
         ),
         (
-            acceptance.require_visual_evidence and acceptance._explicit_require_visual_evidence,
+            request.workflow_mode != "lite"
+            and acceptance.require_visual_evidence
+            and acceptance._explicit_require_visual_evidence,
             "visual",
             "require_visual_evidence",
         ),
@@ -3807,7 +3926,12 @@ def validate_revision_acceptance(
         "layer_problems": [],
         "pointer_item_count": 0,
     }
-    if strict and content is not None and "pointer" in profile["enabled_gates"]:
+    if (
+        strict
+        and content is not None
+        and request.workflow_mode != "lite"
+        and "pointer" in profile["enabled_gates"]
+    ):
         pointer_saved_state_validation = _pointer_saved_state_validation(
             review_items,
             routes_by_id,
@@ -4018,6 +4142,12 @@ def validate_revision_acceptance(
     failures.extend(
         _acceptance_failure("visual", reason) for reason in timeline_mapping_validation["errors"]
     )
+    lite_visual_start_validation = _validate_lite_visual_start_alignment(request, content)
+    errors.extend(lite_visual_start_validation["errors"])
+    failures.extend(
+        _acceptance_failure("execution_evidence", reason)
+        for reason in lite_visual_start_validation["errors"]
+    )
 
     for item in review_items:
         route = routes_by_id.get(_normalize_review_id(item.item_id), {})
@@ -4028,7 +4158,7 @@ def validate_revision_acceptance(
         item_has_validation = _evidence_has_validation(item.validation, item.evidence)
         item_audio_validation_passed = _audio_validation_is_pass(item.validation, item.evidence)
 
-        lifecycle_required = strict and (
+        lifecycle_required = request.workflow_mode != "lite" and strict and (
             "pointer" in item_gates
             or kind == "pointer_overlay"
             or _classify_review_text(item.source_text) == "pointer_overlay"
@@ -4105,7 +4235,11 @@ def validate_revision_acceptance(
         )
         marker_only = bool(matches) and not executed_by_action
 
-        if "pointer" in item_gates and (strict or acceptance.require_subject_pointer_binding):
+        if (
+            request.workflow_mode != "lite"
+            and "pointer" in item_gates
+            and (strict or acceptance.require_subject_pointer_binding)
+        ):
             receipt = item.evidence.get("subject_profile_receipt")
             if not isinstance(receipt, dict) or not receipt:
                 subject_pointer_binding_errors.append(item.item_id)
@@ -4162,7 +4296,7 @@ def validate_revision_acceptance(
                     _acceptance_failure("execution_evidence", reason, item_id=item.item_id)
                 )
 
-            if "visual" in item_gates:
+            if request.workflow_mode != "lite" and "visual" in item_gates:
                 visual_required_items.append(item)
                 visual_attribution = _visual_evidence_attribution(item, kind, matches, content)
                 if visual_attribution["requires_overlay"]:
@@ -4255,6 +4389,7 @@ def validate_revision_acceptance(
             "processed_audio_summary": processed_audio_summary_validation,
             "timeline_mapping": timeline_mapping_validation,
             "timeline_mapping_errors": timeline_mapping_validation["timeline_mapping_errors"],
+            "lite_visual_start_alignment": lite_visual_start_validation,
             "pointer_landing_errors": pointer_landing_errors,
             "subject_pointer_binding_errors": subject_pointer_binding_errors,
             "pointer_lifecycle_errors": pointer_lifecycle_errors,
@@ -4494,7 +4629,7 @@ def validate_saved_revision_draft(
     }
     if strict:
         saved_profile = derive_acceptance_profile(request, doc_items=doc_items)
-        if "pointer" in saved_profile["enabled_gates"]:
+        if request.workflow_mode != "lite" and "pointer" in saved_profile["enabled_gates"]:
             saved_routes_by_id = {
                 record["normalized_item_id"]: record for record in saved_profile["items"]
             }
@@ -4562,7 +4697,7 @@ def validate_saved_revision_draft(
         errors.append("Draft does not contain any video segments.")
     if "source_audio_track" in summary["required_tracks"] and audio_segment_count <= 0:
         errors.append("Draft does not contain any audio segments.")
-    if "replacement_audio_track" in summary["required_tracks"]:
+    if request.workflow_mode != "lite" and "replacement_audio_track" in summary["required_tracks"]:
         replacement_tracks = [
             track
             for track in audio_tracks
@@ -4614,9 +4749,10 @@ def validate_saved_revision_draft(
         ):
             errors.append(
                 "Draft collapsed the main video timeline into one full-length segment while keep_cut_points=true."
-            )
+        )
         if (
-            keep_cut_points
+            request.workflow_mode != "lite"
+            and keep_cut_points
             and edit_count > 1
             and main_video_segment_count < max(2, expected_video_segments)
         ):

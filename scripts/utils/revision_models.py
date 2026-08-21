@@ -2,7 +2,7 @@ import json
 import math
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -915,6 +915,17 @@ def load_revision_request(path: str) -> RevisionRequest:
     workflow_mode = str(payload.get("workflow_mode") or "full").strip().lower()
     if workflow_mode not in {"full", "lite"}:
         raise ValueError("workflow_mode must be either 'full' or 'lite'.")
+    if workflow_mode == "lite":
+        # Lite keeps visual assets executable, but never promotes the full
+        # visual/pointer evidence flags into acceptance requirements.  Keep
+        # the explicit markers for diagnostics while exposing the effective
+        # lite contract in summaries and downstream request consumers.
+        acceptance = replace(
+            acceptance,
+            require_visual_evidence=False,
+            require_subject_pointer_binding=False,
+            require_pointer_lifecycle_evidence=False,
+        )
 
     lite_cut_layout = str(
         payload.get("lite_cut_layout")
@@ -974,7 +985,10 @@ def build_revision_summary(
         required_tracks.append("source_audio_track")
     if request.audio_delivery_plan.mode == "segmented":
         required_tracks.append("audio_delivery_tracks")
-    if replacement_windows or _request_uses_full_track_replacement_audio(request):
+    if (
+        request.workflow_mode != "lite"
+        and (replacement_windows or _request_uses_full_track_replacement_audio(request))
+    ):
         required_tracks.append("replacement_audio_track")
     if marker_plan:
         required_tracks.append("review_marker_tracks")
