@@ -62,8 +62,11 @@ _LITE_GROUPED_MARKER_TRACK = re.compile(
 )
 _LITE_GROUPED_MARKER_MIN_FONT_SIZE = 4.0
 _LITE_GROUPED_MARKER_MAX_FONT_SIZE = 5.0
+_LITE_GROUPED_DELETE_COLOR = "#B42318"
 _LITE_GROUPED_MARKER_CANVAS_BOUND = 0.9
+_LITE_GROUPED_MAX_LINE_WIDTH = 0.9
 _LITE_GROUPED_VISUAL_COLOR = "#15803D"
+_LITE_GROUPED_ANIMATION_COLOR = "#B45309"
 _ALIGNMENT_PASS_STATUSES = {"pass", "passed", "ok", "validated", "complete", "completed"}
 _ASR_GRANULARITIES = {"word", "character", "word_character", "word+character"}
 _SHA256_HEX_LENGTH = 64
@@ -833,6 +836,18 @@ def _lite_grouped_marker_layout_problems(content: Dict[str, Any]) -> List[str]:
             alignment = material.get("alignment", -1)
             if not isinstance(alignment, (int, float)) or int(alignment) != 0:
                 problems.append(f"Lite marker {segment_id} is not left-aligned.")
+            line_max_width = material.get("line_max_width")
+            if (
+                not isinstance(line_max_width, (int, float))
+                or not math.isfinite(float(line_max_width))
+                or not 0.0 < float(line_max_width) <= _LITE_GROUPED_MAX_LINE_WIDTH
+            ):
+                problems.append(
+                    f"Lite marker {segment_id} line width {line_max_width!r} "
+                    "is outside the safe range."
+                )
+            if str(material.get("type") or "").casefold() != "subtitle":
+                problems.append(f"Lite marker {segment_id} does not enable automatic wrapping.")
             background_width = material.get("background_width")
             if not isinstance(background_width, (int, float)) or not math.isfinite(
                 float(background_width)
@@ -862,8 +877,19 @@ def _lite_grouped_marker_layout_problems(content: Dict[str, Any]) -> List[str]:
                 problems.append(
                     f"Lite marker {segment_id} font size {size!r} is outside 4..5."
                 )
-            if group == "Visual" and str(material.get("background_color") or "").upper() != _LITE_GROUPED_VISUAL_COLOR:
+            background_color = str(material.get("background_color") or "").upper()
+            if group == "Visual" and background_color != _LITE_GROUPED_VISUAL_COLOR:
                 problems.append(f"Lite visual marker {segment_id} is not green.")
+            elif group == "Delete" and background_color != _LITE_GROUPED_DELETE_COLOR:
+                problems.append(
+                    f"Lite delete marker {segment_id} does not use the stable delete color."
+                )
+            elif group == "Animation" and background_color != _LITE_GROUPED_ANIMATION_COLOR:
+                problems.append(
+                    f"Lite animation marker {segment_id} does not use the stable animation color."
+                )
+            if material.get("force_apply_line_max_width") is not True:
+                problems.append(f"Lite marker {segment_id} does not force the safe line width.")
     return problems
 
 

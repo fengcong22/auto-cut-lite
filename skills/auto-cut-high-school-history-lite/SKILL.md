@@ -71,8 +71,10 @@ Do not fork or copy the full Auto-Cut implementation.
 - Lite marker text is left-aligned (`alignment=0`), rendered at a 4–5 font-size range, and uses
   the full normalized safe width with a clamped background/transform so neither stage edge is
   crossed. These grouped lanes are the intentional lite exception to the full workflow's
-  `Review Marker N` horizontal-lane contract; the saved lite validator checks the grouped names,
-  text alignment, font range, green visual backgrounds, and both stage bounds.
+  `Review Marker N` horizontal-lane contract; long marker text must force JianYing's line-width
+  wrapping without changing the verbatim text. Delete/Visual/Animation families use stable
+  red/green/amber colors (`#B42318`/`#15803D`/`#B45309`), and the saved lite validator checks
+  these colors, wrapping, text alignment, font range, and both stage bounds.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
   occlusion, or target landing. Clamp the requested duration to the source project duration.

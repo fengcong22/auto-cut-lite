@@ -132,7 +132,8 @@ Each revision note must remain independently traceable:
 - `workflow_mode=lite` may use the explicit `auto-cut-high-school-history-lite` grouped exception:
   `Review Marker Delete/Visual/Animation N` families are separate, each saved label remains in
   the top safe band, and the lite validator additionally enforces left alignment, 4–5 font size,
-  green visual labels, and stage-edge bounds.
+  forced safe-width wrapping for long text, stable red/green/amber family colors, and stage-edge
+  bounds.
 - caller-supplied `x_positions` cannot override automatic or explicitly named dynamic tracks; explicit positioning is reserved for explicitly non-dynamic track groups
 - caller-supplied lane hints are ignored for dynamic tracks so actual time overlap alone determines compact lanes; mixed dynamic/custom track-name groups are invalid
 - require every saved dynamic marker segment's `clip.transform.y` to remain inside normalized `0.7..0.9` in both root and active timeline content

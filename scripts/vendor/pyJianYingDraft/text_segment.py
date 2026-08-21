@@ -46,12 +46,15 @@ class TextStyle:
     """是否自动换行"""
     max_line_width: float
     """最大行宽, 取值范围为[0, 1]"""
+    force_apply_line_max_width: bool
+    """是否强制应用最大行宽"""
 
     def __init__(self, *, size: float = 8.0, bold: bool = False, italic: bool = False, underline: bool = False,
                  color: Tuple[float, float, float] = (1.0, 1.0, 1.0), alpha: float = 1.0,
                  align: Literal[0, 1, 2] = 0, vertical: bool = False,
                  letter_spacing: int = 0, line_spacing: int = 0,
-                 auto_wrapping: bool = False, max_line_width: float = 0.82):
+                 auto_wrapping: bool = False, max_line_width: float = 0.82,
+                 force_apply_line_max_width: bool = False):
         """
         Args:
             size (`float`, optional): 字体大小, 默认为8.0
@@ -83,6 +86,7 @@ class TextStyle:
 
         self.auto_wrapping = auto_wrapping
         self.max_line_width = max_line_width
+        self.force_apply_line_max_width = force_apply_line_max_width
 
 class TextBorder:
     """文本描边的参数"""
@@ -439,7 +443,7 @@ class TextSegment(VisualSegment):
 
             "line_feed": 1,
             "line_max_width": self.style.max_line_width,
-            "force_apply_line_max_width": False,
+            "force_apply_line_max_width": bool(self.style.force_apply_line_max_width),
 
             "check_flag": check_flag,
 

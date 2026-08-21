@@ -445,11 +445,18 @@ class TestReviewMarkerRendering(unittest.TestCase):
             [receipt.track_name for receipt in receipts[:2]],
             ["Review Marker Delete 1", "Review Marker Delete 2"],
         )
+        self.assertEqual(project.text_calls[0]["background"].color, "#B42318")
+        self.assertEqual(project.text_calls[1]["background"].color, "#B42318")
         self.assertEqual(project.text_calls[2]["background"].color, "#15803D")
+        self.assertEqual(project.text_calls[3]["background"].color, "#B45309")
         for call in project.text_calls:
             self.assertEqual(call["style"].align, 0)
             self.assertGreaterEqual(call["style"].size, 4.0)
             self.assertLessEqual(call["style"].size, 5.0)
+            self.assertTrue(call["style"].auto_wrapping)
+            self.assertTrue(call["style"].force_apply_line_max_width)
+            self.assertGreater(call["style"].max_line_width, 0.0)
+            self.assertLessEqual(call["style"].max_line_width, 0.9)
             self.assertEqual(call["clip_settings"].transform_x, 0.0)
             background = call["background"]
             self.assertGreaterEqual(
@@ -460,6 +467,33 @@ class TestReviewMarkerRendering(unittest.TestCase):
                 call["clip_settings"].transform_x + background.width / 2.0,
                 0.9,
             )
+
+    def test_lite_grouped_long_marker_forces_wrapping_without_rewriting_text(self):
+        project = _ReviewMarkerProject()
+        source_text = "30，当时法国就是法兰西第二帝国，他的皇帝拿破仑三世和10万官兵就成了俘虏，这法法军就惨败"
+
+        receipts = project.add_review_markers(
+            [
+                ReviewMarkerItem(
+                    label=source_text,
+                    source_text=source_text,
+                    start_time="10s",
+                    duration="2s",
+                    item_id="long-delete",
+                    kind="colored_span_delete",
+                    background_color="#6D28D9",
+                )
+            ],
+            layout_mode="lite_grouped",
+        )
+
+        self.assertEqual(receipts[0].source_text, source_text)
+        self.assertEqual(project.text_calls[0]["text"], source_text)
+        self.assertEqual(project.text_calls[0]["background"].color, "#B42318")
+        style = project.text_calls[0]["style"]
+        self.assertTrue(style.auto_wrapping)
+        self.assertTrue(style.force_apply_line_max_width)
+        self.assertLessEqual(style.max_line_width, 0.9)
 
     def test_default_track_names_respect_subclass_prefix_and_extend_last_number(self):
         class CustomTrackProject(_ReviewMarkerProject):

@@ -97,7 +97,9 @@ class ReviewMarkerOpsMixin:
     # its established marker sizing and one-row lane behavior.
     LITE_GROUPED_MARKER_MIN_FONT_SIZE = 4.0
     LITE_GROUPED_MARKER_MAX_FONT_SIZE = 5.0
+    LITE_GROUPED_DELETE_BACKGROUND_COLOR = "#B42318"
     LITE_GROUPED_MARKER_BACKGROUND_COLOR = "#15803D"
+    LITE_GROUPED_ANIMATION_BACKGROUND_COLOR = "#B45309"
     LITE_GROUPED_MARKER_GROUPS = (
         ("delete", "Review Marker Delete"),
         ("visual", "Review Marker Visual"),
@@ -341,14 +343,19 @@ class ReviewMarkerOpsMixin:
                     minimum_font_size=self.LITE_GROUPED_MARKER_MIN_FONT_SIZE,
                     maximum_font_size=self.LITE_GROUPED_MARKER_MAX_FONT_SIZE,
                     cell_safety=0.98,
-                    line_height_factor=0.02,
+                    line_height_factor=0.015,
                 )
-                background_color = marker.background_color
                 if group == "visual":
                     # Visual/pointer labels are intentionally green in lite
                     # mode, even when an upstream marker carried a legacy
                     # blue/other override.
                     background_color = self.LITE_GROUPED_MARKER_BACKGROUND_COLOR
+                elif group == "delete":
+                    # Keep all lite Delete labels visually consistent.  Do
+                    # not leak subtype colors such as colored-span purple.
+                    background_color = self.LITE_GROUPED_DELETE_BACKGROUND_COLOR
+                else:
+                    background_color = self.LITE_GROUPED_ANIMATION_BACKGROUND_COLOR
                 segment = self.add_text_simple(
                     marker.label,
                     start_time=marker.start_time,
@@ -365,6 +372,7 @@ class ReviewMarkerOpsMixin:
                         align=0,
                         auto_wrapping=True,
                         max_line_width=text_layout.max_line_width,
+                        force_apply_line_max_width=True,
                     ),
                     border=draft.TextBorder(
                         color=(0.0, 0.0, 0.0),
@@ -479,7 +487,10 @@ class ReviewMarkerOpsMixin:
             1.0,
             safe_cell_height * safety,
         )
-        max_line_width = background_width * 0.82
+        # TextStyle.line_max_width is a 0..1 fraction of the whole screen,
+        # while marker/background geometry uses the -1..1 canvas span.  Keep
+        # the units separate so JianYing receives a valid forced wrap width.
+        max_line_width = min(1.0, background_width * 0.5 * 0.92)
         max_text_height = max_background_height * 0.78
 
         def estimate(font_size: float) -> tuple[int, float]:
@@ -487,7 +498,11 @@ class ReviewMarkerOpsMixin:
                 font_size * self.REVIEW_MARKER_CHAR_WIDTH_FACTOR,
                 1e-12,
             )
-            characters_per_line = max(1, int(max_line_width / character_width))
+            estimated_normalized_line_width = max_line_width * 2.0
+            characters_per_line = max(
+                1,
+                int(estimated_normalized_line_width / character_width),
+            )
             line_count = sum(
                 max(1, math.ceil(len(line) / characters_per_line))
                 for line in str(text or "").split("\n")
