@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -56,6 +57,13 @@ _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
+_LITE_GROUPED_MARKER_TRACK = re.compile(
+    r"^Review Marker (Delete|Visual|Animation) ([1-9]\d*)$"
+)
+_LITE_GROUPED_MARKER_MIN_FONT_SIZE = 4.0
+_LITE_GROUPED_MARKER_MAX_FONT_SIZE = 5.0
+_LITE_GROUPED_MARKER_CANVAS_BOUND = 0.9
+_LITE_GROUPED_VISUAL_COLOR = "#15803D"
 _ALIGNMENT_PASS_STATUSES = {"pass", "passed", "ok", "validated", "complete", "completed"}
 _ASR_GRANULARITIES = {"word", "character", "word_character", "word+character"}
 _SHA256_HEX_LENGTH = 64
@@ -780,6 +788,85 @@ def _load_content_variants(save_result: Dict[str, Any]) -> List[Tuple[str, Dict[
     return _load_saved_draft_content_variants(save_result)
 
 
+def _lite_grouped_marker_layout_problems(content: Dict[str, Any]) -> List[str]:
+    """Validate the saved lite marker families and their stage-safe styling."""
+    tracks = content.get("tracks") or []
+    text_materials = {
+        str(material.get("id") or ""): material
+        for material in (content.get("materials") or {}).get("texts", []) or []
+        if isinstance(material, dict)
+    }
+    problems: List[str] = []
+    for track in tracks:
+        if not isinstance(track, dict):
+            continue
+        name = str(track.get("name") or "")
+        if not name.startswith("Review Marker"):
+            continue
+        match = _LITE_GROUPED_MARKER_TRACK.fullmatch(name)
+        if match is None:
+            problems.append(
+                f"Lite marker track {name!r} is not one of the grouped Delete/Visual/Animation lanes."
+            )
+            continue
+        group = match.group(1)
+        for index, segment in enumerate(track.get("segments") or []):
+            segment_id = str(segment.get("id") or f"index {index}")
+            clip = segment.get("clip") or {}
+            transform = clip.get("transform") or {}
+            x = transform.get("x")
+            y = transform.get("y")
+            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+                problems.append(f"Lite marker {segment_id} has a non-finite x transform.")
+                continue
+            if not isinstance(y, (int, float)) or not math.isfinite(float(y)):
+                problems.append(f"Lite marker {segment_id} has a non-finite y transform.")
+            elif not 0.7 <= float(y) <= 0.9:
+                problems.append(
+                    f"Lite marker {segment_id} y={float(y):g} is outside the top safe band 0.7..0.9."
+                )
+
+            material = text_materials.get(str(segment.get("material_id") or ""))
+            if not isinstance(material, dict):
+                problems.append(f"Lite marker {segment_id} text material is missing.")
+                continue
+            alignment = material.get("alignment", -1)
+            if not isinstance(alignment, (int, float)) or int(alignment) != 0:
+                problems.append(f"Lite marker {segment_id} is not left-aligned.")
+            background_width = material.get("background_width")
+            if not isinstance(background_width, (int, float)) or not math.isfinite(
+                float(background_width)
+            ):
+                problems.append(f"Lite marker {segment_id} has no finite background width.")
+            elif (
+                float(x) - float(background_width) / 2.0 < -_LITE_GROUPED_MARKER_CANVAS_BOUND - 1e-6
+                or float(x) + float(background_width) / 2.0
+                > _LITE_GROUPED_MARKER_CANVAS_BOUND + 1e-6
+            ):
+                problems.append(f"Lite marker {segment_id} background exceeds the stage bounds.")
+
+            raw_content = material.get("content")
+            try:
+                parsed = raw_content if isinstance(raw_content, dict) else json.loads(str(raw_content or ""))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed = {}
+            styles = parsed.get("styles") if isinstance(parsed, dict) else None
+            style = styles[0] if isinstance(styles, list) and styles else {}
+            size = style.get("size") if isinstance(style, dict) else None
+            if (
+                not isinstance(size, (int, float))
+                or not math.isfinite(float(size))
+                or not _LITE_GROUPED_MARKER_MIN_FONT_SIZE - 1e-6 <= float(size)
+                <= _LITE_GROUPED_MARKER_MAX_FONT_SIZE + 1e-6
+            ):
+                problems.append(
+                    f"Lite marker {segment_id} font size {size!r} is outside 4..5."
+                )
+            if group == "Visual" and str(material.get("background_color") or "").upper() != _LITE_GROUPED_VISUAL_COLOR:
+                problems.append(f"Lite visual marker {segment_id} is not green.")
+    return problems
+
+
 def _validate_lite_content(
     content: Dict[str, Any],
     *,
@@ -953,12 +1040,21 @@ def _validate_lite_content(
                     "text": texts.get(str(segment.get("material_id") or ""), ""),
                 }
             )
-    planned = sorted(marker_plan, key=lambda item: (float(item.start), item.item_id))
+    # The renderer allocates lanes by start time and visible text.  Match the
+    # same deterministic order here; item IDs are intentionally opaque and
+    # must not reorder simultaneous labels across grouped families.
+    planned = sorted(
+        marker_plan,
+        key=lambda item: (float(item.start), item.source_text, item.item_id),
+    )
     if len(saved_markers) != len(planned):
         errors.append(
             f"Lite marker count mismatch: expected {len(planned)}, found {len(saved_markers)}."
         )
-    for marker, saved in zip(planned, sorted(saved_markers, key=lambda item: item["start"])):
+    for marker, saved in zip(
+        planned,
+        sorted(saved_markers, key=lambda item: (item["start"], item["text"])),
+    ):
         if saved["text"] != marker.source_text:
             errors.append(f"Lite marker {marker.item_id} is not verbatim.")
         expected_start = max(0.0, min(float(marker.start), total_duration))
@@ -969,6 +1065,7 @@ def _validate_lite_content(
         if saved["duration"] <= 0 or saved["duration"] > 2.001:
             errors.append(f"Lite marker {marker.item_id} duration is outside the 2s rule.")
     errors.extend(review_marker_top_layout_problems(content))
+    errors.extend(_lite_grouped_marker_layout_problems(content))
 
     return {
         "ok": not errors,
@@ -1391,7 +1488,9 @@ def execute_lite_revision_request(
             doc_items,
             total_duration,
         )
-        marker_receipts = project.add_review_markers(markers)
+        # Lite labels use independent Delete/Visual/Animation track families.
+        # The full workflow keeps the default dynamic horizontal layout.
+        marker_receipts = project.add_review_markers(markers, layout_mode="lite_grouped")
         marker_receipt_dicts = [
             {
                 "item_id": item.item_id,

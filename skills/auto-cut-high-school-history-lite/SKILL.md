@@ -60,9 +60,19 @@ Do not fork or copy the full Auto-Cut implementation.
   pointer request is always execution-required and cannot be downgraded to a marker-only item.
   Animation or other picture-timing requests are label-only and do not create `Lite Timing
   Adjusted` segments.
-- Review labels are all retained verbatim. Their text backgrounds are color-coded by kind:
-  spoken delete (red), visual delete (rose), pointer/visual addition (blue), animation timing
-  (amber), and review-only (gray).
+- Review labels are all retained verbatim. Lite uses three isolated marker track families rather
+  than the full workflow's dynamic horizontal lanes:
+  - `Review Marker Delete 1/2/...` contains spoken/delete/noise items; an overlap only adds
+    another Delete lane.
+  - `Review Marker Visual 1/2/...` contains pointer or other visual-material items and is green.
+  - `Review Marker Animation 1/2/...` contains animation-timing items.
+  The three families never share a track. Unknown review-only items remain visible in the Delete
+  family as a safe three-family fallback.
+- Lite marker text is left-aligned (`alignment=0`), rendered at a 4–5 font-size range, and uses
+  the full normalized safe width with a clamped background/transform so neither stage edge is
+  crossed. These grouped lanes are the intentional lite exception to the full workflow's
+  `Review Marker N` horizontal-lane contract; the saved lite validator checks the grouped names,
+  text alignment, font range, green visual backgrounds, and both stage bounds.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
   occlusion, or target landing. Clamp the requested duration to the source project duration.
@@ -76,7 +86,9 @@ Do not fork or copy the full Auto-Cut implementation.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim, the start must equal the edit start, and the duration is `2s` except
   when clamped at the unchanged source-video end.
-- Place review labels in the existing top safe-band review-marker layout.
+- Place grouped review labels in the existing top safe-band review-marker layout. Keep each
+  marker aligned to its edit start and preserve the exact source text; do not re-enable the
+  full-workflow horizontal compression or move a label into the picture body.
 - Save `workflow_mode=lite` in execution reports and keep this mode for later revisions unless
   the user explicitly requests the full-capability workflow.
 

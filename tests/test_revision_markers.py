@@ -393,6 +393,74 @@ class TestReviewMarkerRendering(unittest.TestCase):
         self.assertGreaterEqual(background.width, cell.cell_width * 0.85)
         self.assertLessEqual(background.width, cell.cell_width * 0.9 + 1e-9)
 
+    def test_lite_grouped_layout_separates_kinds_and_keeps_labels_readable(self):
+        project = _ReviewMarkerProject()
+        markers = [
+            ReviewMarkerItem(
+                label="delete one",
+                source_text="delete one",
+                start_time="10s",
+                duration="2s",
+                item_id="delete-1",
+                kind="phrase_delete",
+            ),
+            ReviewMarkerItem(
+                label="delete two",
+                source_text="delete two",
+                start_time="10s",
+                duration="2s",
+                item_id="delete-2",
+                kind="spoken_delete",
+            ),
+            ReviewMarkerItem(
+                label="point to the supplied object",
+                source_text="point to the supplied object",
+                start_time="10s",
+                duration="2s",
+                item_id="visual-1",
+                kind="pointer_overlay",
+            ),
+            ReviewMarkerItem(
+                label="advance the animation",
+                source_text="advance the animation",
+                start_time="10s",
+                duration="2s",
+                item_id="animation-1",
+                kind="animation_timing",
+            ),
+        ]
+
+        receipts = project.add_review_markers(markers, layout_mode="lite_grouped")
+
+        self.assertEqual(
+            {receipt.track_name for receipt in receipts},
+            {
+                "Review Marker Delete 1",
+                "Review Marker Delete 2",
+                "Review Marker Visual 1",
+                "Review Marker Animation 1",
+            },
+        )
+        self.assertEqual(
+            [receipt.track_name for receipt in receipts[:2]],
+            ["Review Marker Delete 1", "Review Marker Delete 2"],
+        )
+        self.assertEqual(project.text_calls[2]["background"].color, "#15803D")
+        for call in project.text_calls:
+            self.assertEqual(call["style"].align, 0)
+            self.assertGreaterEqual(call["style"].size, 4.0)
+            self.assertLessEqual(call["style"].size, 5.0)
+            self.assertEqual(call["clip_settings"].transform_x, 0.0)
+            background = call["background"]
+            self.assertGreaterEqual(
+                call["clip_settings"].transform_x - background.width / 2.0,
+                -0.9,
+            )
+            self.assertLessEqual(
+                call["clip_settings"].transform_x + background.width / 2.0,
+                0.9,
+            )
+
     def test_default_track_names_respect_subclass_prefix_and_extend_last_number(self):
         class CustomTrackProject(_ReviewMarkerProject):
             REVIEW_MARKER_TRACKS = ("Audit Marker 4", "Audit Marker 5")

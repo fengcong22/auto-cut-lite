@@ -129,6 +129,10 @@ Each revision note must remain independently traceable:
 - do not merge unrelated fixes into one umbrella label
 - source-ledger marker wording is the exact canonical `source_text`; item IDs and execution summaries stay in receipts/evidence rather than decorating visible text
 - place every dynamic `Review Marker N` label in one horizontal top safe band on centerline `y=0.8`; concurrent markers divide the width horizontally and never create a second row in the middle of the picture
+- `workflow_mode=lite` may use the explicit `auto-cut-high-school-history-lite` grouped exception:
+  `Review Marker Delete/Visual/Animation N` families are separate, each saved label remains in
+  the top safe band, and the lite validator additionally enforces left alignment, 4–5 font size,
+  green visual labels, and stage-edge bounds.
 - caller-supplied `x_positions` cannot override automatic or explicitly named dynamic tracks; explicit positioning is reserved for explicitly non-dynamic track groups
 - caller-supplied lane hints are ignored for dynamic tracks so actual time overlap alone determines compact lanes; mixed dynamic/custom track-name groups are invalid
 - require every saved dynamic marker segment's `clip.transform.y` to remain inside normalized `0.7..0.9` in both root and active timeline content

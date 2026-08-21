@@ -63,6 +63,10 @@ For precise spoken-word revision:
 - No source-ledger marker adds a summary, prefix, ID, translation, or truncation unless those characters are present in the source.
 - Each stable source item ID has exactly one marker. Multiple internal edits share it; duplicate IDs fail; identical text under different IDs remains separate.
 - Marker tracks are actual dynamically allocated `Review Marker N` text tracks.
+- For `workflow_mode=lite`, the named grouped exception is accepted instead:
+  `Review Marker Delete/Visual/Animation N` families are independently allocated and must pass
+  the lite saved-layout checks for left alignment, 4–5 font size, green Visual backgrounds, and
+  both stage edges.
 - Dynamic marker labels occupy one horizontal top safe band on centerline `y=0.8`; concurrent lanes divide the width instead of adding a middle-picture row.
 - Caller-supplied `x_positions` cannot override automatic or explicitly named dynamic tracks; custom positioning is limited to explicitly non-dynamic track groups.
 - Caller-supplied lane hints are ignored for dynamic layouts, and mixed dynamic/custom track-name groups are invalid.

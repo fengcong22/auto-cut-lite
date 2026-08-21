@@ -92,6 +92,34 @@ class ReviewMarkerOpsMixin:
     REVIEW_MARKER_CELL_SAFETY = 0.88
     REVIEW_MARKER_CHAR_WIDTH_FACTOR = 0.006
     REVIEW_MARKER_LINE_HEIGHT_FACTOR = 0.025
+    # Lite mode intentionally uses a separate, grouped layout.  Keep these
+    # values out of the default dynamic layout so the full workflow retains
+    # its established marker sizing and one-row lane behavior.
+    LITE_GROUPED_MARKER_MIN_FONT_SIZE = 4.0
+    LITE_GROUPED_MARKER_MAX_FONT_SIZE = 5.0
+    LITE_GROUPED_MARKER_BACKGROUND_COLOR = "#15803D"
+    LITE_GROUPED_MARKER_GROUPS = (
+        ("delete", "Review Marker Delete"),
+        ("visual", "Review Marker Visual"),
+        ("animation", "Review Marker Animation"),
+    )
+    LITE_GROUPED_DELETE_KINDS = frozenset(
+        {
+            "spoken_delete",
+            "phrase_delete",
+            "ellipsis_range_delete",
+            "colored_span_delete",
+            "range_delete",
+            "gap_delete",
+            "pause_delete",
+            "visual_delete",
+            "noise_cleanup",
+            "review_only",
+        }
+    )
+    LITE_GROUPED_VISUAL_KINDS = frozenset(
+        {"pointer_overlay", "visual_overlay", "visual_addition", "other_visual"}
+    )
     REVIEW_MARKER_BACKGROUND_COLORS = {
         "spoken_delete": "#B42318",
         # Keep each spoken-delete interpretation visually distinct in the
@@ -118,9 +146,15 @@ class ReviewMarkerOpsMixin:
         *,
         track_names: Optional[Sequence[str]] = None,
         x_positions: Optional[Sequence[float]] = None,
+        layout_mode: str = "dynamic",
     ) -> List[ReviewMarkerItem]:
         if not markers:
             return []
+
+        if str(layout_mode or "dynamic").strip().casefold() == "lite_grouped":
+            return self._add_lite_grouped_review_markers(markers)
+        if str(layout_mode or "dynamic").strip().casefold() != "dynamic":
+            raise ValueError(f"Unsupported review marker layout mode: {layout_mode!r}.")
 
         configured_track_names = tuple(track_names) if track_names is not None else None
         x_positions = tuple(x_positions) if x_positions is not None else None
@@ -239,6 +273,132 @@ class ReviewMarkerOpsMixin:
             )
         return receipts
 
+    def _lite_group_for_marker(self, marker: ReviewMarkerItem) -> str:
+        kind = str(marker.kind or "review_only").strip().casefold()
+        if kind == "animation_timing":
+            return "animation"
+        if kind in self.LITE_GROUPED_VISUAL_KINDS:
+            return "visual"
+        # Keep unknown/review-only source items visible in the stable three
+        # groups rather than dropping them or creating an unclassified lane.
+        return "delete"
+
+    def _lite_grouped_marker_layout(self) -> ReviewMarkerLayoutCell:
+        # One label owns the complete safe width.  Its left edge is -0.882 at
+        # most, leaving a small stage margin even after JianYing rounds values.
+        return ReviewMarkerLayoutCell(
+            x=0.0,
+            y=_REVIEW_MARKER_TOP_Y,
+            cell_width=self.REVIEW_MARKER_CANVAS_BOUND * 2.0,
+            cell_height=_REVIEW_MARKER_TOP_MAX_Y - _REVIEW_MARKER_TOP_MIN_Y,
+        )
+
+    def _add_lite_grouped_review_markers(
+        self,
+        markers: Sequence[ReviewMarkerItem],
+    ) -> List[ReviewMarkerItem]:
+        """Render lite markers in Delete/Visual/Animation track families.
+
+        This opt-in layout deliberately does not change the full-workflow
+        dynamic marker behavior.  Lanes are allocated independently inside
+        each family, so an overlap adds ``Review Marker <Family> 2`` instead
+        of mixing an unrelated kind into the same track.
+        """
+        layout_cell = self._lite_grouped_marker_layout()
+        grouped: dict[str, list[ReviewMarkerItem]] = {
+            group: [] for group, _prefix in self.LITE_GROUPED_MARKER_GROUPS
+        }
+        for marker in markers:
+            grouped[self._lite_group_for_marker(marker)].append(
+                replace(marker, lane=None)
+            )
+
+        assigned_by_group: dict[str, list[ReviewMarkerItem]] = {}
+        track_names_by_group: dict[str, tuple[str, ...]] = {}
+        for group, prefix in self.LITE_GROUPED_MARKER_GROUPS:
+            group_markers = grouped[group]
+            if not group_markers:
+                continue
+            assigned = self._assign_review_marker_lanes(group_markers, lane_count=None)
+            assigned_by_group[group] = assigned
+            lane_count = max((item.lane or 0) for item in assigned) + 1
+            names = tuple(f"{prefix} {index}" for index in range(1, lane_count + 1))
+            track_names_by_group[group] = names
+            for track_name in names:
+                self._ensure_track(draft.TrackType.text, track_name)
+
+        receipts: List[ReviewMarkerItem] = []
+        # Preserve the canonical source-plan order in receipts while rendering
+        # each family on its own track set.
+        rendered: dict[str, ReviewMarkerItem] = {}
+        for group, _prefix in self.LITE_GROUPED_MARKER_GROUPS:
+            for marker in assigned_by_group.get(group, []):
+                lane = marker.lane or 0
+                text_layout = self._marker_text_layout(
+                    marker.label,
+                    cell_width=layout_cell.cell_width,
+                    cell_height=layout_cell.cell_height,
+                    minimum_font_size=self.LITE_GROUPED_MARKER_MIN_FONT_SIZE,
+                    maximum_font_size=self.LITE_GROUPED_MARKER_MAX_FONT_SIZE,
+                    cell_safety=0.98,
+                    line_height_factor=0.02,
+                )
+                background_color = marker.background_color
+                if group == "visual":
+                    # Visual/pointer labels are intentionally green in lite
+                    # mode, even when an upstream marker carried a legacy
+                    # blue/other override.
+                    background_color = self.LITE_GROUPED_MARKER_BACKGROUND_COLOR
+                segment = self.add_text_simple(
+                    marker.label,
+                    start_time=marker.start_time,
+                    duration=marker.duration,
+                    track_name=track_names_by_group[group][lane],
+                    clip_settings=draft.ClipSettings(
+                        transform_x=layout_cell.x,
+                        transform_y=layout_cell.y,
+                    ),
+                    style=draft.TextStyle(
+                        size=text_layout.font_size,
+                        bold=True,
+                        color=(1.0, 1.0, 1.0),
+                        align=0,
+                        auto_wrapping=True,
+                        max_line_width=text_layout.max_line_width,
+                    ),
+                    border=draft.TextBorder(
+                        color=(0.0, 0.0, 0.0),
+                        alpha=1.0,
+                        width=16.0,
+                    ),
+                    background=draft.TextBackground(
+                        color=(
+                            background_color
+                            or self.REVIEW_MARKER_BACKGROUND_COLORS.get(
+                                str(marker.kind or "review_only"),
+                                self.REVIEW_MARKER_BACKGROUND_COLORS["review_only"],
+                            )
+                        ),
+                        style=1,
+                        alpha=0.92,
+                        round_radius=0.16,
+                        height=text_layout.background_height,
+                        width=text_layout.background_width,
+                    ),
+                )
+                rendered[marker.item_id] = replace(
+                    marker,
+                    segment_id=segment.segment_id,
+                    material_id=segment.material_id,
+                    track_name=track_names_by_group[group][lane],
+                )
+
+        for marker in markers:
+            receipt = rendered.get(marker.item_id)
+            if receipt is not None:
+                receipts.append(receipt)
+        return receipts
+
     def _default_track_names(self, lane_count: int) -> Sequence[str]:
         configured = tuple(str(name) for name in self.REVIEW_MARKER_TRACKS)
         names = list(configured[:lane_count])
@@ -297,13 +457,27 @@ class ReviewMarkerOpsMixin:
         *,
         cell_width: float,
         cell_height: float,
+        minimum_font_size: Optional[float] = None,
+        maximum_font_size: Optional[float] = None,
+        cell_safety: Optional[float] = None,
+        line_height_factor: Optional[float] = None,
     ) -> ReviewMarkerTextLayout:
         safe_cell_width = max(float(cell_width), 1e-9)
         safe_cell_height = max(float(cell_height), 1e-9)
-        background_width = safe_cell_width * self.REVIEW_MARKER_CELL_SAFETY
+        safety = (
+            self.REVIEW_MARKER_CELL_SAFETY
+            if cell_safety is None
+            else max(0.01, min(1.0, float(cell_safety)))
+        )
+        line_height = (
+            self.REVIEW_MARKER_LINE_HEIGHT_FACTOR
+            if line_height_factor is None
+            else max(1e-6, float(line_height_factor))
+        )
+        background_width = safe_cell_width * safety
         max_background_height = min(
             1.0,
-            safe_cell_height * self.REVIEW_MARKER_CELL_SAFETY,
+            safe_cell_height * safety,
         )
         max_line_width = background_width * 0.82
         max_text_height = max_background_height * 0.78
@@ -318,18 +492,28 @@ class ReviewMarkerOpsMixin:
                 max(1, math.ceil(len(line) / characters_per_line))
                 for line in str(text or "").split("\n")
             )
-            text_height = line_count * font_size * self.REVIEW_MARKER_LINE_HEIGHT_FACTOR
+            text_height = line_count * font_size * line_height
             return line_count, text_height
 
-        minimum_font_size = self.REVIEW_MARKER_MIN_FONT_SIZE
-        maximum_font_size = self.REVIEW_MARKER_MAX_FONT_SIZE
-        if estimate(maximum_font_size)[1] <= max_text_height:
-            font_size = maximum_font_size
-        elif estimate(minimum_font_size)[1] > max_text_height:
-            font_size = minimum_font_size
+        minimum_size = (
+            self.REVIEW_MARKER_MIN_FONT_SIZE
+            if minimum_font_size is None
+            else max(0.001, float(minimum_font_size))
+        )
+        maximum_size = (
+            self.REVIEW_MARKER_MAX_FONT_SIZE
+            if maximum_font_size is None
+            else max(minimum_size, float(maximum_font_size))
+        )
+        if estimate(maximum_size)[1] <= max_text_height:
+            font_size = maximum_size
+        elif estimate(minimum_size)[1] > max_text_height:
+            # A grouped lite marker never drops below the requested 4pt
+            # floor.  The full dynamic layout retains its old shrinking rule.
+            font_size = minimum_size
         else:
-            low = minimum_font_size
-            high = maximum_font_size
+            low = minimum_size
+            high = maximum_size
             for _ in range(40):
                 midpoint = (low + high) / 2.0
                 if estimate(midpoint)[1] <= max_text_height:
