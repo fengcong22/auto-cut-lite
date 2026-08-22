@@ -25,10 +25,11 @@ from utils.revision_models import (
     _normalize_review_id,
 )
 from utils.revision_validation import derive_acceptance_profile
+from utils.replacement_timebase import resolve_review_timebases
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
-_TOOL_VERSION = 1
+_TOOL_VERSION = 2
 _OUTPUT_NAMES = {
     "doc_items": "doc_items.json",
     "revision_request": "revision_request.json",
@@ -736,8 +737,12 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     project_copy = _mapping_copy(project, "project")
     source_rows = _extract_items(snapshot_copy)
     document = _document_identity(snapshot_copy)
-    review_items, warnings = _canonical_review_items(source_rows)
     normalized_project = _normalize_project(project_copy)
+    review_items, warnings = _canonical_review_items(source_rows)
+    review_items, timebase_warnings, unresolved_timebase_ids, replacement_anchors = (
+        resolve_review_timebases(review_items, snapshot=snapshot_copy, project=normalized_project)
+    )
+    warnings.extend(timebase_warnings)
     workflow_mode = str(normalized_project.get("workflow_mode") or "full")
 
     acceptance = _acceptance_payload(review_items)
@@ -773,6 +778,13 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     doc_items_payload = {
         "schema_version": _SCHEMA_VERSION,
         "document": document,
+        "timebase_schema": {
+            "version": 1,
+            "clock_policy": "main_global_or_replacement_local_with_explicit_mapping",
+            "unresolved_item_policy": "review_only_until_resolved",
+        },
+        "replacement_anchors": replacement_anchors,
+        "unresolved_timebase_item_ids": unresolved_timebase_ids,
         "review_items": review_items,
     }
     revision_request_payload = {
@@ -786,6 +798,12 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
         "review_items": review_items,
         "acceptance": acceptance,
         "acceptance_profile": acceptance_profile,
+        "timebase": {
+            "schema_version": 1,
+            "replacement_anchors": replacement_anchors,
+            "unresolved_item_ids": unresolved_timebase_ids,
+            "warnings": timebase_warnings,
+        },
         "preserve": preserve,
         "audio_delivery_plan": (
             {
@@ -873,6 +891,8 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
         "item_ids": [str(item["id"]) for item in review_items],
         "unverified_item_ids": unverified_ids,
         "warning_item_ids": warning_ids,
+        "unresolved_timebase_item_ids": unresolved_timebase_ids,
+        "replacement_anchors": replacement_anchors,
         "warnings": warnings,
         "acceptance_profile": acceptance_profile,
         "acceptance_gates": acceptance_profile["enabled_gates"],

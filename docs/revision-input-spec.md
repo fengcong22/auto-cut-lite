@@ -29,6 +29,38 @@ For a natural-language Feishu/Lark source-document job, compile the document sna
 
 Keep compiled requests, cache entries, checkpoints, evidence plans, and timing files under an ignored `tmp/` job directory. Missing source text follows the nonblocking recovery contract below and never removes the item or stops unrelated editing work.
 
+### Replacement-video timebases
+
+Review documents may contain timestamps from more than one clock. The compiler treats the main
+video clock as global timeline seconds and a replacement/补录 clock as local seconds relative to
+its declared replacement anchor. Extraction must preserve document order and either provide
+`source_role`/`replacement_anchor_id` fields or retain the declaration text so the compiler can
+resolve them with its state machine. A compiled item records both ranges:
+
+```json
+{
+  "source_role": "replacement_video",
+  "source_time_range": [5.0, 13.0],
+  "timeline_time_range": [458.0, 466.0],
+  "timebase": {
+    "kind": "replacement_local",
+    "offset_seconds": 453.0,
+    "status": "resolved"
+  },
+  "replacement_anchor_id": "replacement-01",
+  "review_timestamp_role": "search_hint"
+}
+```
+
+The downstream edit builder consumes only `timeline_time_range`; it must never reinterpret a
+replacement-local `start/end` as main-video time. Explicit handoff phrases such as “延长至原视频
+09:42” close the replacement section and use `09:42` as a main-video timestamp. Multiple sections
+are independent. If a declaration, anchor, local range, replacement duration, or handoff is
+ambiguous or out of range, the compiler removes executable `start/end`, records
+`timebase.status=unresolved_*`, and lists the item in `unresolved_timebase_item_ids`. Strict
+acceptance fails closed until that item is resolved; no heuristic threshold or fixed timestamp is
+allowed to promote it.
+
 ## Cache Identity And Invalidation
 
 Use content-addressed identities for every reusable artifact:

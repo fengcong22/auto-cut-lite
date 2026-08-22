@@ -4153,6 +4153,15 @@ def validate_revision_acceptance(
         route = routes_by_id.get(_normalize_review_id(item.item_id), {})
         item_gates = set(route.get("gates") or [])
         kind = str(route.get("kind") or item.kind or _classify_review_text(item.source_text))
+        timebase = item.evidence.get("timebase") if isinstance(item.evidence, dict) else None
+        if isinstance(timebase, dict) and str(timebase.get("status") or "").startswith("unresolved"):
+            reason = (
+                f"Review item {item.item_id} has unresolved timebase "
+                f"{timebase.get('status')}; a replacement-local timestamp cannot be executed."
+            )
+            errors.append(reason)
+            failures.append(_acceptance_failure("execution_evidence", reason, item_id=item.item_id))
+            continue
         matches = _matching_actions_for_item(item, action_entries)
         item_has_execution_evidence = _evidence_has_execution(item.evidence)
         item_has_validation = _evidence_has_validation(item.validation, item.evidence)

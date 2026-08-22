@@ -339,6 +339,98 @@ class LiteRevisionTests(unittest.TestCase):
             request_payload["review_items"][0]["review_timestamp_role"], "search_hint"
         )
 
+    def test_review_job_compiler_normalizes_replacement_local_clock_once(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "replace-anchor",
+                            "source_text": "07:33-09:32 替换为以下视频",
+                            "start": 453.0,
+                            "end": 572.0,
+                            "kind": "visual_replace",
+                        },
+                        {
+                            "id": "replace-local",
+                            "source_text": "00:05-00:13 删除补录口误",
+                            "start": 5.0,
+                            "end": 13.0,
+                            "kind": "spoken_delete",
+                        },
+                        {
+                            "id": "replace-handoff",
+                            "source_text": "02:01-结尾，延长至原视频 09:42",
+                            "start": 121.0,
+                            "end": 125.0,
+                            "kind": "spoken_delete",
+                        },
+                        {
+                            "id": "main-after",
+                            "source_text": "09:45 删除主片口误",
+                            "start": 585.0,
+                            "end": 586.0,
+                            "kind": "spoken_delete",
+                        },
+                    ]
+                },
+                {
+                    "draft_name": "ReplacementTimebaseDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                    "media_duration_seconds": 627.48,
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                payload = json.load(source_file)
+
+        items = {item["id"]: item for item in payload["review_items"]}
+        local = items["replace-local"]
+        self.assertEqual(local["source_time_range"], [5.0, 13.0])
+        self.assertEqual(local["timeline_time_range"], [458.0, 466.0])
+        self.assertEqual([local["start"], local["end"]], [458.0, 466.0])
+        self.assertEqual(local["timebase"]["kind"], "replacement_local")
+        self.assertEqual(items["replace-handoff"]["timeline_time_range"], [574.0, 582.0])
+        self.assertEqual(items["main-after"]["timeline_time_range"], [585.0, 586.0])
+        self.assertEqual(payload["unresolved_timebase_item_ids"], [])
+
+    def test_review_job_compiler_does_not_guess_unanchored_replacement_time(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "unanchored-local",
+                            "source_role": "replacement_video",
+                            "source_text": "00:05-00:13 删除补录口误",
+                            "start": 5.0,
+                            "end": 13.0,
+                            "kind": "spoken_delete",
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "UnanchoredReplacementDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                payload = json.load(source_file)
+            with open(compiled["job_manifest"], "r", encoding="utf-8") as manifest_file:
+                manifest = json.load(manifest_file)
+
+        item = payload["review_items"][0]
+        self.assertNotIn("start", item)
+        self.assertNotIn("end", item)
+        self.assertNotIn("timeline_time_range", item)
+        self.assertEqual(item["source_time_range"], [5.0, 13.0])
+        self.assertEqual(item["timebase"]["status"], "unresolved_no_anchor")
+        self.assertEqual(payload["unresolved_timebase_item_ids"], ["unanchored-local"])
+        self.assertEqual(manifest["unresolved_timebase_item_ids"], ["unanchored-local"])
+
     def test_review_job_compiler_does_not_downgrade_lite_pointer_to_marker_only(self):
         with tempfile.TemporaryDirectory() as output_dir:
             compiled = compile_review_job(
