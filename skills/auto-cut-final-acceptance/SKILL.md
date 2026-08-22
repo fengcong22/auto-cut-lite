@@ -66,6 +66,14 @@ Acceptance also inspects `job_state.json` and `job_timing.json` for incomplete p
 
 ## Fixed-Path Native Delivery
 
+When `workflow_mode=lite` and the user requests the complete lite workflow, the final delivery
+boundary is the offline ZIP produced by `revision-run --package-zip` after saved-draft acceptance.
+Require `completion_boundary=lite_zip_delivery`, `delivery.delivery_mode=lite_zip`, a passing ZIP
+CRC check, a matching extracted-tree SHA-256, `json_rewritten=false`, `ui_invoked=false`, and
+`opened_jianying=false` in the command result/receipt. The ZIP must contain the complete editable
+draft directory, the bundled material relink tool, and `使用说明.txt`. Do not run the native
+draft mirror below for this lite path.
+
 Apply this additional gate only when the user asks for a complete project, migratable project, formal delivery, full Auto-Cut delivery, or transfer to another computer. Intermediate drafts are exempt unless delivery was explicitly requested.
 
 Run the existing editable-draft gates first. The deliverable remains an editable timeline with source video, source audio, separated/replacement audio, visible cut structure, markers, and local materials. Then confirm the recipient path; the delivery does not open JianYing:

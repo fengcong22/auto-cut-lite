@@ -47,6 +47,7 @@ from utils.jianying_native_delivery import (
     mirror_draft_tree,
     resolve_configured_native_target_root,
 )
+from utils.lite_package import package_lite_delivery
 from utils.jianying_env import detect_jianying_environment, sync_draft_runtime_metadata
 from utils.jianying_smoke import (
     SMOKE_TEXT,
@@ -2373,6 +2374,10 @@ def cmd_revision_run(
     doc_items_json: str = None,
     strict: bool = False,
     workflow_mode: str = None,
+    package_zip: str = None,
+    relink_tool: str = None,
+    package_root_name: str = None,
+    package_receipt: str = None,
 ) -> Dict[str, Any]:
     try:
         request = load_revision_request(request_json)
@@ -2389,6 +2394,39 @@ def cmd_revision_run(
             strict=strict,
             doc_items=doc_items,
         )
+        if package_zip is not None:
+            if request.workflow_mode != "lite":
+                raise ValueError("--package-zip is only available for workflow_mode=lite.")
+            if not str(result.get("draft_path") or "").strip():
+                raise ValueError("Lite revision result is missing the saved draft path.")
+            draft_path = Path(str(result["draft_path"])).expanduser().resolve(strict=False)
+            if draft_path.name == "draft_content.json":
+                draft_path = draft_path.parent
+            tool_path = relink_tool
+            if tool_path is None:
+                default_tool = (
+                    Path(__file__).resolve().parents[1]
+                    / "tools"
+                    / "relink_tool"
+                    / "Auto-Cut剪映素材重链工具.exe"
+                ).resolve(strict=False)
+                if default_tool.is_file():
+                    tool_path = str(default_tool)
+            if tool_path is None:
+                raise ValueError(
+                    "--package-zip requires the bundled lite material relink tool, "
+                    "but it was not found."
+                )
+            package = package_lite_delivery(
+                draft_path,
+                package_zip,
+                relink_tool=tool_path,
+                package_root_name=package_root_name,
+                receipt_json=package_receipt,
+            )
+            result = dict(result)
+            result["delivery"] = package
+            result["completion_boundary"] = "lite_zip_delivery"
     except RevisionAcceptanceError as exc:
         return make_result(
             False,
@@ -2446,6 +2484,10 @@ def _build_command_handlers():
             doc_items_json=args.doc_items_json,
             strict=args.strict,
             workflow_mode=args.workflow_mode,
+            package_zip=args.package_zip,
+            relink_tool=args.relink_tool,
+            package_root_name=args.package_root_name,
+            package_receipt=args.package_receipt,
         ),
         "review-job-compile": lambda args: cmd_review_job_compile(
             args.snapshot_json,

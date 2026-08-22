@@ -484,6 +484,13 @@ Execute with the strict post-save gate:
 python scripts/jy_wrapper.py revision-run --request-json path/to/request.json --doc-items-json path/to/doc_items.json --strict --drafts-root "<draft root>" --json
 ```
 
+For a complete High School History lite delivery, append `--workflow-mode lite` and
+`--package-zip "<Desktop>\\<final-name>.zip"`. The command keeps the whole final stage offline:
+it runs the saved-draft acceptance first, then packages the editable draft, the bundled material
+relink tool, and `使用说明.txt`, validates the ZIP CRC and extracted tree hash, and returns only
+after the ZIP and external receipt are published. It never opens JianYing or rewrites draft JSON.
+If packaging fails, the draft may remain for diagnosis but the run is not a delivered lite job.
+
 For dry-run or test environments without real media probing:
 
 ```bash

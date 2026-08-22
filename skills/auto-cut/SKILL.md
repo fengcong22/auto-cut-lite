@@ -108,6 +108,11 @@ For mixed tasks, route ordinary pointer work to `auto-cut-pointer-targeting` fir
 
 Trigger this contract when the user requests a complete project, migratable project, formal delivery, full Auto-Cut delivery, or a project that can move to another computer and remain editable. Intermediate drafts are exempt unless delivery is explicitly requested.
 
+For an explicit `workflow_mode=lite` full-flow delivery, use the lite skill's final ZIP boundary
+instead of the native draft mirror below. The ZIP step remains offline and does not open JianYing;
+the native mirror rules continue to apply to full-workflow deliveries. For lite, do not continue
+with the numbered native-mirror steps after the ZIP has passed its receipt and tree-hash checks.
+
 1. Pass the ordinary editable draft acceptance first; the fixed path mirror uses the same absolute path and never replaces source coverage, visible cut structure, separated/source audio, material, marker, or root/active-timeline gates.
    The editable timeline retains source video, source audio, and local materials under `Resources/local` or `Resources/audioAlg`.
 2. Resolve the source root from JianYing's explicit `currentCustomDraftPath`. On a new computer run `python scripts/jy_wrapper.py draft-root-check --expected-root "<source_currentCustomDraftPath>" --json`. If the path is absent, missing, ambiguous, or different, stop and show `请在对方电脑创建与源电脑相同的剪映草稿路径：<path>`; never silently select a conventional default.

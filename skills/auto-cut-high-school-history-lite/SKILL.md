@@ -137,3 +137,35 @@ Before delivery, validate the saved root and active timeline variants:
 Report split-gap delete requests as editable cut boundaries with the deleted source intervals
 isolated on V2/A2; the source project duration is intentionally unchanged for secondary manual
 editing.
+
+## Final Lite Delivery Boundary
+
+For an explicit full lite workflow, the final acceptance result is not the saved draft directory;
+the workflow ends only after a validated ZIP is published. Run the editable revision and package
+as one unattended offline command after the canonical request and review-document evidence are
+ready:
+
+```powershell
+python scripts/jy_wrapper.py revision-run `
+  --request-json "<revision_request.json>" `
+  --doc-items-json "<doc_items.json>" `
+  --drafts-root "<JianYing drafts root>" `
+  --workflow-mode lite `
+  --strict `
+  --package-zip "<Desktop>\\<final-name>.zip" `
+  --json
+```
+
+`--package-zip` is accepted only for `workflow_mode=lite`. The runner writes and strictly
+validates the editable draft first, then creates the ZIP in the background without launching
+JianYing or waiting for a user action. The repository-bundled
+`tools/relink_tool/Auto-Cut剪映素材重链工具.exe` is included automatically; if it is missing, the
+package step fails rather than producing a misleading final delivery.
+
+The ZIP contains the complete editable draft directory, the material relink tool, and
+`使用说明.txt`. Before returning success, the packager rejects reparse points and unsafe ZIP
+paths, checks CRCs, extracts to an isolated temporary directory, and compares the extracted tree
+SHA-256 with the staged package tree. It never rewrites draft JSON or opens JianYing. A package
+failure leaves the draft available for diagnosis but the lite workflow remains incomplete and
+must not be reported as delivered. The machine-readable result records
+`completion_boundary=lite_zip_delivery`, the ZIP SHA-256, and an external `.receipt.json`.

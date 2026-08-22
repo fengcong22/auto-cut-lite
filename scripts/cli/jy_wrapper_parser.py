@@ -231,6 +231,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the request workflow mode for this run",
     )
     p_revision_run.add_argument(
+        "--package-zip",
+        default=None,
+        help=(
+            "For lite runs, publish the final editable draft as a validated offline ZIP "
+            "after acceptance"
+        ),
+    )
+    p_revision_run.add_argument(
+        "--relink-tool",
+        default=None,
+        help="Optional path to the lite material relink EXE included in the final ZIP",
+    )
+    p_revision_run.add_argument(
+        "--package-root-name",
+        default=None,
+        help="Optional single-level root directory name inside the final lite ZIP",
+    )
+    p_revision_run.add_argument(
+        "--package-receipt",
+        default=None,
+        help="Optional external JSON receipt path for the final lite ZIP",
+    )
+    p_revision_run.add_argument(
         "--json", action="store_true", help="Print machine-readable JSON response"
     )
 
