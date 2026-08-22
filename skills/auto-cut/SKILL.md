@@ -128,6 +128,16 @@ Read [references/user-action-required.md](references/user-action-required.md) wh
 
 Directly invoked `auto-cut-*` skills inherit this shared contract. Ordinary clarification, progress updates, and nonblocking status messages do not invoke the notifier.
 
+## Feishu Document Identity
+
+For every Feishu/Lark document read, use the current operator's own user identity. The canonical
+read command is `lark-cli docs +fetch --as user`; do not read review documents with an app/bot
+identity or permit an automatic identity fallback. On each target computer, recommend the one-time
+setup `lark-cli config default-as user` and `lark-cli config strict-mode user`. The login token is
+machine-local, must be refreshed by the user when required, and must never be copied into a plugin,
+ZIP package, repository, or another user's machine. Optional Feishu notifications are separate from
+document reads and must not be described as the document authentication mechanism.
+
 ## Maintenance Rule
 
 When adding a new skill:

@@ -56,7 +56,11 @@ reuse task intermediates produced by a mistaken full-version run.
   JianYing toolbar preference (`ToolbarCfg.linkageEnable`), not a portable per-draft field;
   verify or disable it in the local application configuration when an opened-draft check is
   required, and never claim that a draft JSON alone controls it on another computer.
-- Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
+- Feishu/Lark review documents must be read as the current operator's own user identity. Use
+  `lark-cli docs +fetch --as user`; on a new computer configure `lark-cli config default-as user`
+  and `lark-cli config strict-mode user` after the one-time user login. Never use an app/bot
+  identity for document reads, copy another computer's login state, or include tokens in a
+  plugin/package. Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
   review timestamp directly into a spoken-word cut. Resolve every final boundary from Chinese
   word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
   `must_keep` phrases and strategy, then run reverse validation. Lite draft generation fails

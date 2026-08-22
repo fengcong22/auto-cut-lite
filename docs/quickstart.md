@@ -82,6 +82,21 @@ Then run only the actions needed on this target machine:
 .\.venv\Scripts\python.exe scripts/auto_cut_first_run.py tts-status --json
 ```
 
+For Feishu/Lark review documents, bind the person who will run Auto-Cut to their own Feishu user
+identity once on this computer. Document reads must use user identity and must not fall back to an
+application or bot identity:
+
+```powershell
+lark-cli config default-as user
+lark-cli config strict-mode user
+lark-cli auth login --scope <document_read_scopes> --no-wait --json
+lark-cli docs +fetch --as user --doc <document_url> --json
+```
+
+The token is target-local. Do not copy the source computer's login state or put it in a plugin,
+ZIP, repository, or shared package. Optional Feishu notifications are a separate, notification-only
+feature and are not used to authenticate document reads.
+
 Favorite flower-text and template assets are resynchronized from this machine.
 Subject pointers require user assets, reference images, profile approval, and
 explicit binding confirmation. Feishu and Volcengine configuration and

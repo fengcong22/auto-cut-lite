@@ -95,6 +95,21 @@ the dry-run preview all happen independently on the target machine. A Feishu
 message cannot approve or resolve an operation in place of the originating
 Codex task.
 
+Feishu/Lark review documents must be read as the current operator's own user. On
+each target computer, configure the CLI once and keep it in strict user mode:
+
+```powershell
+lark-cli config default-as user
+lark-cli config strict-mode user
+lark-cli auth login --scope <document_read_scopes> --no-wait --json
+lark-cli docs +fetch --as user --doc <document_url> --json
+```
+
+Do not use an application/bot identity or allow automatic identity fallback for
+document reads. The user token is target-local, may refresh when required, and
+must never be copied into a release, plugin, ZIP, repository, or another user's
+computer. Optional notification identity is separate from document access.
+
 Volcengine word alignment and TTS have separate target-local checks:
 
 ```powershell

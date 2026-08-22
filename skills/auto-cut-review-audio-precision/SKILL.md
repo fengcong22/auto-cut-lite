@@ -172,6 +172,12 @@ Then hand the saved draft and reports to `auto-cut-final-acceptance` so audio pa
 When the source is a Feishu/Lark document:
 
 - Read the document through the Lark document tooling, not browser scraping.
+- Bind and use the current operator's own Feishu user identity. Fetch with
+  `lark-cli docs +fetch --as user`; do not use an app/bot identity or silently fall back to one.
+  On a new computer, run `lark-cli config default-as user` and
+  `lark-cli config strict-mode user` after the operator completes the one-time user login.
+  Tokens and login state are target-local and must never be copied from another computer or
+  included in a plugin/package.
 - Append results at the bottom unless the user asks for another location.
 - Upload strictly serially in this order: text label, file, text label, file.
 - Do not parallel-upload attachments because document order can become confusing.

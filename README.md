@@ -79,6 +79,12 @@ Token. The adapter never mixes their headers. See
 [`docs/release-full-install.md`](docs/release-full-install.md) for capability
 status, all 20 machine-readable capability IDs, and troubleshooting.
 
+Feishu/Lark review documents are read with the current operator's own user identity. On a target
+computer, configure `lark-cli config default-as user` and `lark-cli config strict-mode user`, then
+complete the one-time user login and fetch with `lark-cli docs +fetch --as user`. This prevents
+application/bot fallback and keeps optional notification authentication separate from document
+access. The user token remains local to that computer and is never bundled or shared.
+
 The portable package preserves the editable draft contract: source video,
 separated audio, replacement media, visible cut boundaries, one traceable review
 marker per source item, and final acceptance evidence remain available for

@@ -220,22 +220,28 @@ def build_first_run_guide(repo_root: Path) -> dict[str, object]:
             "notification_only": True,
             "reply_can_resolve": False,
             "authorization_is_target_local": True,
+            "document_read_identity": "user",
+            "document_read_identity_policy": "strict_user_only",
             "commands": [
                 "lark-cli config init --new",
-                "lark-cli auth login --scope <required_scope> --no-wait --json",
+                "lark-cli config default-as user",
+                "lark-cli config strict-mode user",
+                "lark-cli auth login --scope <document_read_scopes> --no-wait --json",
+                "lark-cli docs +fetch --as user --doc <document_url> --json",
                 f"{FIRST_RUN_PYTHON} scripts/auto_cut_notifications.py "
-                "setup-preview --as <user|bot> "
+                "setup-preview --as user "
                 "--chat-id <approved_chat_id> --json",
                 f"{FIRST_RUN_PYTHON} scripts/auto_cut_notifications.py "
-                "setup-enable --as <user|bot> "
+                "setup-enable --as user "
                 "--chat-id <approved_chat_id> --preview-digest <preview_digest> "
                 "--confirm-template auto_cut_user_action_required_v1 "
                 "--confirm-privacy auto_cut_notification_privacy_v1 --json",
                 f"{FIRST_RUN_PYTHON} scripts/auto_cut_notifications.py status --json",
             ],
             "authorization_boundary": (
-                "Configure and authorize lark-cli on this computer. Bot identity does not use "
-                "auth login; user identity must request only the required scopes."
+                "Bind the operator's own Feishu account on this computer. Document reads always "
+                "use user identity with --as user; strict user mode prevents fallback to an app "
+                "or bot identity. Never copy another computer's token or login state."
             ),
         },
     }
