@@ -29,6 +29,7 @@ LITE_TRACKS = {
     "original_video": "Original Video",
     "cut_segments": "Lite Cut Segments",
     "visual_assets": "Lite Visual Assets",
+    "visual_assets_covers": "Lite Visual Assets Covers",
     "timing_adjusted": "Lite Timing Adjusted",
     "source_audio": "Separated Source Audio",
     "reused_audio": "Lite Reused Audio",
@@ -37,6 +38,7 @@ _LITE_VIDEO_RENDER_INDEXES = {
     LITE_TRACKS["original_video"]: 0,
     LITE_TRACKS["cut_segments"]: 100,
     LITE_TRACKS["visual_assets"]: 11_000,
+    LITE_TRACKS["visual_assets_covers"]: 11_001,
     LITE_TRACKS["timing_adjusted"]: 12_000,
 }
 _DELETE_TOKENS = ("delete", "删除", "删掉", "剪掉", "去掉", "移除")
@@ -540,6 +542,11 @@ def _asset_specs(edit: RevisionEdit) -> List[Dict[str, Any]]:
 def _lite_visual_track_name(spec: Dict[str, Any]) -> str:
     """Use one ordinary editable visual lane for all lite overlays."""
 
+    # A local cover may intentionally sit on top of a replacement video. Keep
+    # it on a sibling lane because JianYing rejects overlapping clips on one
+    # track, while retaining the lite visual-assets family semantics.
+    if str(spec.get("role") or "").strip().casefold() == "visual_delete_cover":
+        return LITE_TRACKS["visual_assets_covers"]
     return LITE_TRACKS["visual_assets"]
 
 
@@ -1175,6 +1182,7 @@ def execute_lite_revision_request(
             (LITE_TRACKS["original_video"], draft.TrackType.video),
             (LITE_TRACKS["cut_segments"], draft.TrackType.video),
             (LITE_TRACKS["visual_assets"], draft.TrackType.video),
+            (LITE_TRACKS["visual_assets_covers"], draft.TrackType.video),
             (LITE_TRACKS["timing_adjusted"], draft.TrackType.video),
         ]
         if not segmented_audio_delivery:
