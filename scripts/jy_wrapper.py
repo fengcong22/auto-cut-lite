@@ -2386,6 +2386,8 @@ def cmd_revision_run(
             if normalized_workflow_mode not in {"full", "lite"}:
                 raise ValueError("workflow_mode must be either 'full' or 'lite'.")
             request = replace(request, workflow_mode=normalized_workflow_mode)
+        if package_zip is not None and request.workflow_mode != "lite":
+            raise ValueError("--package-zip is only available for workflow_mode=lite.")
         doc_items = load_review_items_json(doc_items_json) if doc_items_json else None
         result = execute_revision_request(
             request,
@@ -2393,10 +2395,9 @@ def cmd_revision_run(
             mock_media=mock_media,
             strict=strict,
             doc_items=doc_items,
+            localize_materials=package_zip is not None,
         )
         if package_zip is not None:
-            if request.workflow_mode != "lite":
-                raise ValueError("--package-zip is only available for workflow_mode=lite.")
             if not str(result.get("draft_path") or "").strip():
                 raise ValueError("Lite revision result is missing the saved draft path.")
             draft_path = Path(str(result["draft_path"])).expanduser().resolve(strict=False)

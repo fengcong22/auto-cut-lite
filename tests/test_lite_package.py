@@ -25,13 +25,24 @@ class LitePackageTests(unittest.TestCase):
     def _draft(self, root: Path) -> Path:
         draft = root / "必修下-第15课-2_从二月革命到十月革命_精简版_R41"
         (draft / "Resources" / "local").mkdir(parents=True)
+        source_video = draft / "Resources" / "local" / "source-video.mp4"
+        source_video.write_bytes(b"video-bytes")
         (draft / "draft_content.json").write_text(
-            '{"materials":{"videos":[]},"tracks":[]}\n', encoding="utf-8"
+            json.dumps(
+                {
+                    "materials": {
+                        "videos": [{"id": "video-1", "path": str(source_video)}]
+                    },
+                    "tracks": [],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         (draft / "draft_meta_info.json").write_text(
             '{"draft_name":"lite"}\n', encoding="utf-8"
         )
-        (draft / "Resources" / "local" / "source-video.mp4").write_bytes(b"video-bytes")
         return draft
 
     def test_package_is_byte_preserving_and_self_validating(self) -> None:
@@ -55,6 +66,7 @@ class LitePackageTests(unittest.TestCase):
             self.assertEqual(result["status"], "pass")
             self.assertEqual(result["workflow_mode"], "lite")
             self.assertEqual(result["delivery_mode"], "lite_zip")
+            self.assertEqual(result["localized_material_reference_count"], 1)
             self.assertTrue(result["relink_tool_included"])
             self.assertFalse(result["json_rewritten"])
             self.assertFalse(result["ui_invoked"])
@@ -96,6 +108,27 @@ class LitePackageTests(unittest.TestCase):
             with self.assertRaises(LitePackageError):
                 package_lite_delivery(draft, root / "same.zip", receipt_json=root / "same.zip")
 
+    def test_package_rejects_external_material_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            draft = self._draft(root)
+            external = root / "external.mp4"
+            external.write_bytes(b"external-video")
+            (draft / "draft_content.json").write_text(
+                json.dumps(
+                    {
+                        "materials": {
+                            "videos": [{"id": "external", "path": str(external)}]
+                        },
+                        "tracks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(LitePackageError, "external material path"):
+                package_lite_delivery(draft, root / "invalid.zip")
+
     def test_revision_run_parser_exposes_unattended_lite_package_flags(self) -> None:
         args = build_parser().parse_args(
             [
@@ -128,7 +161,9 @@ class LitePackageTests(unittest.TestCase):
         }
         with (
             patch.object(jy_wrapper, "load_revision_request", return_value=fake_request),
-            patch.object(jy_wrapper, "execute_revision_request", return_value=fake_execution),
+            patch.object(
+                jy_wrapper, "execute_revision_request", return_value=fake_execution
+            ) as execute,
             patch.object(jy_wrapper, "package_lite_delivery", return_value=fake_package) as package,
         ):
             result = jy_wrapper.cmd_revision_run(
@@ -140,6 +175,7 @@ class LitePackageTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["data"]["completion_boundary"], "lite_zip_delivery")
         self.assertEqual(result["data"]["delivery"], fake_package)
+        self.assertTrue(execute.call_args.kwargs["localize_materials"])
         package.assert_called_once()
         self.assertTrue(str(package.call_args.args[0]).endswith("LiteDraft"))
         self.assertTrue(

@@ -86,6 +86,69 @@ def _inside(path: Path, parent: Path) -> bool:
     return True
 
 
+def _resolve_packaged_material(draft: Path, raw_path: Any) -> Path:
+    value = str(raw_path or "").strip().replace("/", "\\")
+    markers = ("\\resources\\local\\", "\\resources\\audioalg\\")
+    matches = [(marker, value.casefold().find(marker)) for marker in markers]
+    matches = [(marker, index) for marker, index in matches if index >= 0]
+    if len(matches) != 1:
+        raise LitePackageError(f"Lite draft contains an external material path: {raw_path}")
+    marker, index = matches[0]
+    relative_parts = value[index + 1 :].split("\\")
+    if any(part in {"", ".", ".."} for part in relative_parts):
+        raise LitePackageError(f"Lite draft contains an unsafe material path: {raw_path}")
+    target = draft.joinpath(*relative_parts).resolve(strict=False)
+    allowed = (
+        draft / "Resources" / ("audioAlg" if "audioalg" in marker else "local")
+    ).resolve(strict=False)
+    if not _inside(target, allowed) or not target.is_file() or _is_reparse(target):
+        raise LitePackageError(f"Lite draft packaged material is missing: {target}")
+    return target
+
+
+def _validate_packaged_materials(draft: Path) -> int:
+    content_paths = [draft / "draft_content.json"]
+    timelines = draft / "Timelines"
+    if timelines.is_dir():
+        content_paths.extend(sorted(timelines.glob("*/draft_content.json")))
+
+    reference_count = 0
+    for content_path in content_paths:
+        try:
+            content = json.loads(content_path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            raise LitePackageError(
+                f"Lite draft content is not readable JSON: {content_path}"
+            ) from exc
+        materials = content.get("materials") if isinstance(content, dict) else None
+        if not isinstance(materials, dict):
+            raise LitePackageError(f"Lite draft content is missing materials: {content_path}")
+        for rows in materials.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                for field in ("path", "file_path", "file_Path"):
+                    if str(row.get(field) or "").strip():
+                        _resolve_packaged_material(draft, row[field])
+                        reference_count += 1
+
+    meta_path = draft / "draft_meta_info.json"
+    try:
+        metadata = json.loads(meta_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise LitePackageError(f"Lite draft metadata is not readable JSON: {meta_path}") from exc
+    for bucket in metadata.get("draft_materials") or []:
+        if not isinstance(bucket, dict):
+            continue
+        for row in bucket.get("value") or []:
+            if isinstance(row, dict) and str(row.get("file_Path") or "").strip():
+                _resolve_packaged_material(draft, row["file_Path"])
+                reference_count += 1
+    return reference_count
+
+
 def _copy_tree(source: Path, target: Path) -> None:
     target.mkdir(parents=True, exist_ok=False)
     for entry in sorted(os.scandir(source), key=lambda item: (item.name.casefold(), item.name)):
@@ -299,6 +362,7 @@ def package_lite_delivery(
     root_name = _single_component(package_root_name or f"{source.name}_ZIP", "ZIP 根目录名称")
     if source.name in {RELINK_TOOL_FILENAME, INSTRUCTIONS_FILENAME}:
         raise LitePackageError("草稿名称与 ZIP 根目录文件名冲突")
+    localized_material_reference_count = _validate_packaged_materials(source)
     source_tree = capture_draft_tree_receipt(source)
     staging_parent = Path(tempfile.mkdtemp(prefix="autocut-lite-package-", dir=output.parent))
     handle, temporary_name = tempfile.mkstemp(
@@ -358,6 +422,7 @@ def package_lite_delivery(
             "package_file_count": package_tree["file_count"],
             "extracted_file_count": extracted_tree["file_count"],
             "source_byte_size": source_tree["byte_size"],
+            "localized_material_reference_count": localized_material_reference_count,
             "package_byte_size": package_tree["byte_size"],
             "extracted_byte_size": extracted_tree["byte_size"],
             "relink_tool_included": tool is not None,

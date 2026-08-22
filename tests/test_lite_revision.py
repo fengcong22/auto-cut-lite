@@ -15,6 +15,7 @@ if SCRIPTS_PATH not in sys.path:
 from utils.lite_revision import (
     LITE_TRACKS,
     _asset_specs,
+    _localize_lite_request_materials,
     _lite_visual_results,
     _spoken_cut_alignment_problems,
 )
@@ -25,6 +26,7 @@ from utils.revision_runner import (
     execute_revision_request,
     load_revision_request,
 )
+from utils.revision_evidence import audio_delivery_plan_sha256
 from core.review_marker_ops import ReviewMarkerOpsMixin
 
 
@@ -41,6 +43,107 @@ def _track(content, name):
 
 
 class LiteRevisionTests(unittest.TestCase):
+    def test_lite_package_materials_are_localized_before_import(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            media_dir = os.path.join(tmpdir, "media")
+            draft_dir = os.path.join(tmpdir, "draft")
+            os.makedirs(media_dir)
+            os.makedirs(draft_dir)
+            video = os.path.join(media_dir, "source.mp4")
+            audio = os.path.join(media_dir, "source.wav")
+            pointer = os.path.join(media_dir, "pointer.png")
+            report = os.path.join(media_dir, "reverse_asr_bound.json")
+            for path, payload in (
+                (video, b"video"),
+                (audio, b"audio"),
+                (pointer, b"pointer"),
+            ):
+                with open(path, "wb") as material_file:
+                    material_file.write(payload)
+            with open(report, "w", encoding="utf-8") as report_file:
+                json.dump({"audio_delivery_plan_sha256": "old", "rows": []}, report_file)
+
+            request = _load_request(
+                {
+                    "workflow_mode": "lite",
+                    "project": {
+                        "draft_name": "LocalizedLite",
+                        "source_video": video,
+                        "source_audio": audio,
+                    },
+                    "edits": [
+                        {
+                            "type": "visual_overlay",
+                            "start": 1.0,
+                            "end": 2.0,
+                            "doc_item_id": "visual-1",
+                            "asset_paths": [pointer],
+                            "visual_plan": {
+                                "segments": [{"asset_path": pointer, "duration": 1.0}]
+                            },
+                            "evidence": {"asset_path": pointer},
+                        }
+                    ],
+                    "audio_delivery_plan": {
+                        "mode": "segmented",
+                        "segments": [
+                            {
+                                "segment_id": "a1",
+                                "role": "source",
+                                "asset_path": audio,
+                                "track_name": "Separated Source Audio",
+                                "source_start": 0.0,
+                                "timeline_start": 0.0,
+                                "duration": 1.0,
+                            }
+                        ],
+                    },
+                    "processed_audio": {"validation_summary": report},
+                }
+            )
+
+            localized, receipts = _localize_lite_request_materials(request, draft_dir)
+
+            self.assertEqual(len(receipts), 3)
+            localized_root = os.path.join(draft_dir, "Resources", "local")
+            localized_paths = {
+                localized.project.source_video,
+                localized.project.source_audio,
+                localized.edits[0].asset_paths[0],
+            }
+            self.assertTrue(
+                all(
+                    os.path.commonpath([localized_root, path]) == localized_root
+                    for path in localized_paths
+                )
+            )
+            self.assertTrue(all(os.path.isfile(path) for path in localized_paths))
+            self.assertEqual(
+                localized.edits[0].visual_plan["segments"][0]["asset_path"],
+                localized.edits[0].asset_paths[0],
+            )
+            self.assertEqual(
+                localized.edits[0].evidence["asset_path"],
+                localized.edits[0].asset_paths[0],
+            )
+            self.assertEqual(
+                localized.audio_delivery_plan.segments[0].asset_path,
+                localized.project.source_audio,
+            )
+            self.assertTrue(
+                localized.processed_audio["validation_summary"].startswith(
+                    os.path.join(draft_dir, "Evidence")
+                )
+            )
+            with open(
+                localized.processed_audio["validation_summary"], "r", encoding="utf-8"
+            ) as report_file:
+                bound_report = json.load(report_file)
+            self.assertEqual(
+                bound_report["audio_delivery_plan_sha256"],
+                audio_delivery_plan_sha256(localized),
+            )
+
     def test_lite_pointer_spec_does_not_calibrate_bound_anchor(self):
         request = _load_request(
             {

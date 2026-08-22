@@ -1143,6 +1143,7 @@ def execute_revision_request(
     acceptance_repair_callback: Optional[
         Callable[[Any, RevisionRequest, Dict[str, Any]], RevisionRequest]
     ] = None,
+    localize_materials: bool = False,
 ) -> Dict[str, Any]:
     if request.workflow_mode == "lite":
         from utils.lite_revision import execute_lite_revision_request
@@ -1154,7 +1155,11 @@ def execute_revision_request(
             strict=strict,
             doc_items=doc_items,
             acceptance_repair_callback=acceptance_repair_callback,
+            localize_materials=localize_materials,
         )
+
+    if localize_materials:
+        raise ValueError("Material localization is only available for workflow_mode=lite.")
 
     request = normalize_pause_adjustments(request)
     ui_policy = _derive_revision_ui_policy(request, doc_items=doc_items)

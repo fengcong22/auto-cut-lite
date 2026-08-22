@@ -7,10 +7,12 @@ they are never accepted as final spoken-word cut boundaries by themselves.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
 from copy import deepcopy
 from dataclasses import replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -107,6 +109,172 @@ def _open_project(request: RevisionRequest, drafts_root: Optional[str]):
 
     _draft, _marker, _mock_audio, _mock_video, jy_project = _runtime_components()
     return _open_revision_project(jy_project, request.project.draft_name, drafts_root=drafts_root)
+
+
+def _file_sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _rewrite_localized_paths(value: Any, path_map: Dict[str, str]) -> Any:
+    if isinstance(value, str):
+        normalized = os.path.normcase(os.path.abspath(value)) if value else ""
+        return path_map.get(normalized, value)
+    if isinstance(value, list):
+        return [_rewrite_localized_paths(item, path_map) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_rewrite_localized_paths(item, path_map) for item in value)
+    if isinstance(value, dict):
+        return {
+            key: _rewrite_localized_paths(item, path_map)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _localize_lite_request_materials(
+    request: RevisionRequest, draft_dir: str
+) -> Tuple[RevisionRequest, List[Dict[str, Any]]]:
+    """Copy timeline materials into the draft before material import.
+
+    Lite ZIP delivery is byte-preserving, so the saved draft must already own
+    its media. Rewriting the request before JianYing material objects are built
+    also keeps strict validation aligned with the paths saved in the draft.
+    """
+
+    source_paths: List[str] = []
+
+    def add_path(path: str) -> None:
+        candidate = str(path or "").strip()
+        if candidate:
+            source_paths.append(candidate)
+
+    add_path(request.project.source_video)
+    add_path(request.project.source_audio)
+    add_path(request.project.replacement_audio)
+    for edit in request.edits:
+        add_path(edit.audio_path)
+        for path in edit.asset_paths:
+            add_path(path)
+        for spec in _visual_plan_segments(edit):
+            add_path(str(spec.get("asset_path") or ""))
+    for segment in request.audio_delivery_plan.segments:
+        add_path(segment.asset_path)
+    for adjustment in request.pause_adjustments:
+        add_path(adjustment.frame_path)
+
+    resources_dir = os.path.join(os.path.abspath(draft_dir), "Resources", "local")
+    os.makedirs(resources_dir, exist_ok=True)
+    path_map: Dict[str, str] = {}
+    receipts: List[Dict[str, Any]] = []
+    for source_path in source_paths:
+        source = os.path.abspath(source_path)
+        normalized = os.path.normcase(source)
+        if normalized in path_map:
+            continue
+        if not os.path.isfile(source):
+            raise FileNotFoundError(source)
+        source_sha256 = _file_sha256(source)
+        basename = os.path.basename(source)
+        target = os.path.join(resources_dir, f"{source_sha256[:12]}_{basename}")
+        if os.path.normcase(source) != os.path.normcase(target):
+            shutil.copy2(source, target)
+        if _file_sha256(target) != source_sha256:
+            raise RuntimeError(f"Lite material copy hash mismatch: {source}")
+        path_map[normalized] = target
+        receipts.append(
+            {
+                "source_path": source,
+                "localized_path": target,
+                "sha256": source_sha256,
+                "byte_size": os.path.getsize(target),
+            }
+        )
+
+    def mapped(path: str) -> str:
+        candidate = str(path or "")
+        if not candidate:
+            return candidate
+        return path_map.get(os.path.normcase(os.path.abspath(candidate)), candidate)
+
+    project = replace(
+        request.project,
+        source_video=mapped(request.project.source_video),
+        source_audio=mapped(request.project.source_audio),
+        replacement_audio=mapped(request.project.replacement_audio),
+    )
+    edits = [
+        replace(
+            edit,
+            audio_path=mapped(edit.audio_path),
+            asset_paths=[mapped(path) for path in edit.asset_paths],
+            visual_plan=_rewrite_localized_paths(edit.visual_plan, path_map),
+            evidence=_rewrite_localized_paths(edit.evidence, path_map),
+            validation=_rewrite_localized_paths(edit.validation, path_map),
+        )
+        for edit in request.edits
+    ]
+    review_items = [
+        replace(
+            item,
+            evidence=_rewrite_localized_paths(item.evidence, path_map),
+            validation=_rewrite_localized_paths(item.validation, path_map),
+        )
+        for item in request.review_items
+    ]
+    audio_delivery_plan = replace(
+        request.audio_delivery_plan,
+        segments=[
+            replace(segment, asset_path=mapped(segment.asset_path))
+            for segment in request.audio_delivery_plan.segments
+        ],
+    )
+    pause_adjustments = [
+        replace(adjustment, frame_path=mapped(adjustment.frame_path))
+        for adjustment in request.pause_adjustments
+    ]
+    localized_request = replace(
+        request,
+        project=project,
+        edits=edits,
+        review_items=review_items,
+        audio_delivery_plan=audio_delivery_plan,
+        pause_adjustments=pause_adjustments,
+        pause_alignment=_rewrite_localized_paths(request.pause_alignment, path_map),
+        processed_audio=_rewrite_localized_paths(request.processed_audio, path_map),
+    )
+    processed_audio = deepcopy(localized_request.processed_audio)
+    summary_path = ""
+    for key in ("validation_summary", "summary", "reverse_validation_summary"):
+        summary_path = str(processed_audio.get(key) or "").strip()
+        if summary_path:
+            break
+    if not summary_path and isinstance(processed_audio.get("outputs"), dict):
+        for key in ("validation_summary", "summary", "reverse_validation_summary"):
+            summary_path = str(processed_audio["outputs"].get(key) or "").strip()
+            if summary_path:
+                break
+    if summary_path:
+        from utils.revision_evidence import bind_audio_delivery_plan_to_report
+
+        with open(summary_path, "r", encoding="utf-8-sig") as report_file:
+            report = json.load(report_file)
+        if not isinstance(report, dict):
+            raise ValueError("Reverse ASR validation summary must be a JSON object.")
+        evidence_dir = os.path.join(os.path.abspath(draft_dir), "Evidence")
+        os.makedirs(evidence_dir, exist_ok=True)
+        bound_report_path = os.path.join(evidence_dir, "reverse_asr_bound.json")
+        bound_report = bind_audio_delivery_plan_to_report(localized_request, report)
+        with open(bound_report_path, "w", encoding="utf-8", newline="\n") as report_file:
+            json.dump(bound_report, report_file, ensure_ascii=False, indent=2)
+            report_file.write("\n")
+        processed_audio["validation_summary"] = bound_report_path
+        localized_request = replace(localized_request, processed_audio=processed_audio)
+
+    return localized_request, receipts
 
 
 def _disable_maintrack_adsorb(project: Any) -> None:
@@ -1123,6 +1291,7 @@ def execute_lite_revision_request(
     strict: bool = False,
     doc_items: Optional[List[RevisionReviewItem]] = None,
     acceptance_repair_callback: Optional[Callable[..., Any]] = None,
+    localize_materials: bool = False,
 ) -> Dict[str, Any]:
     if acceptance_repair_callback is not None:
         raise ValueError("Lite mode does not support destructive acceptance repair callbacks.")
@@ -1146,7 +1315,12 @@ def execute_lite_revision_request(
     project, write_info = _open_project(request, drafts_root)
     _disable_maintrack_adsorb(project)
     validated = False
+    localized_materials: List[Dict[str, Any]] = []
     try:
+        if localize_materials and not mock_media:
+            request, localized_materials = _localize_lite_request_materials(
+                request, project.draft_dir
+            )
         layout = _lite_layout(request)
         _validate_spoken_cut_alignment(request, doc_items)
         declared_duration = float(request.project.media_duration_seconds or 0.0)
@@ -1676,6 +1850,7 @@ def execute_lite_revision_request(
             "source_duration_seconds": total_duration,
             "tracks": list(LITE_TRACKS.values()),
             "segment_receipts": segment_receipts,
+            "localized_materials": localized_materials,
             "visual_overlay_results": visual_results,
             "review_marker_count": len(marker_receipt_dicts),
             "review_marker_receipts": marker_receipt_dicts,
