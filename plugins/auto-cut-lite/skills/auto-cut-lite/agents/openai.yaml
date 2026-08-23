@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto-Cut 精简通用版"
+  short_description: "生成可编辑的通用精简版剪映工程"
+  default_prompt: "Use $auto-cut-lite to process this review document as a generic editable lite JianYing workflow."

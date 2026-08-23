@@ -1,0 +1,38 @@
+{
+  "name": "auto-cut-lite",
+  "version": "1.0.0",
+  "description": "Generic compact Auto-Cut workflow for editable JianYing projects and review-document revisions.",
+  "author": {
+    "name": "Auto-Cut"
+  },
+  "license": "MIT",
+  "keywords": [
+    "jianying",
+    "capcut",
+    "editable-draft",
+    "review-document",
+    "asr",
+    "timeline"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Auto-Cut 精简通用版",
+    "shortDescription": "按审阅意见生成可编辑的剪映精简版工程",
+    "longDescription": "通用精简版 Auto-Cut 工作流，支持飞书审阅文档、严格用户身份读取、ASR 字词对齐、补录片段局部时间线、只切不删的可编辑剪映草稿、替换素材和交付校验。",
+    "developerName": "Auto-Cut",
+    "category": "Productivity",
+    "capabilities": [
+      "Read review documents",
+      "Resolve ASR word boundaries",
+      "Map replacement-local timelines",
+      "Write editable JianYing drafts",
+      "Validate and package lite deliveries"
+    ],
+    "brandColor": "#1677FF",
+    "defaultPrompt": [
+      "用精简版处理这份审阅文档并生成可编辑剪映草稿",
+      "按补录片段自己的时间线解析修改意见",
+      "校验精简版草稿并生成交付包"
+    ]
+  }
+}
