@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 草稿保留"
+  short_description: "只保留最近 3 个草稿，并限制 fallback 草稿堆积"
+  default_prompt: "Use $auto-cut-draft-retention to clean old JianYing draft projects, retain the latest 3 drafts, and keep at most 1 fallback draft for the current project family."
+
+policy:
+  allow_implicit_invocation: true

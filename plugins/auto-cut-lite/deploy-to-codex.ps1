@@ -286,6 +286,25 @@ function Test-EnvironmentSetting {
     return $false
 }
 
+function Test-RuntimeEnvSetting {
+    param([Parameter(Mandatory)][string]$Name)
+    $path = Join-Path $stateRoot 'config\.env'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        return $false
+    }
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 1048576) {
+        return $false
+    }
+    foreach ($line in Get-Content -LiteralPath $path -Encoding UTF8) {
+        if ($line -match ('^\s*' + [regex]::Escape($Name) + '\s*=\s*(.+?)\s*$') -and
+            -not [string]::IsNullOrWhiteSpace($Matches[1])) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Remove-ExactDeploymentDirectory {
     param([Parameter(Mandatory)][string]$Path)
     $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
@@ -432,8 +451,9 @@ try {
         credentials_bundled = $false
     }
 
-    $legacyAsr = (Test-EnvironmentSetting -Name 'VOLC_ASR_APP_ID') -and (Test-EnvironmentSetting -Name 'VOLC_ASR_ACCESS_TOKEN')
-    $apiKeyAsr = Test-EnvironmentSetting -Name 'VOLC_ASR_API_KEY'
+    $legacyAsr = ((Test-EnvironmentSetting -Name 'VOLC_ASR_APP_ID') -or (Test-RuntimeEnvSetting -Name 'VOLC_ASR_APP_ID')) -and
+        ((Test-EnvironmentSetting -Name 'VOLC_ASR_ACCESS_TOKEN') -or (Test-RuntimeEnvSetting -Name 'VOLC_ASR_ACCESS_TOKEN'))
+    $apiKeyAsr = (Test-EnvironmentSetting -Name 'VOLC_ASR_API_KEY') -or (Test-RuntimeEnvSetting -Name 'VOLC_ASR_API_KEY')
     $report.components.asr = [ordered]@{
         configuration_detected = ($legacyAsr -or $apiKeyAsr)
         mode = $(if ($apiKeyAsr) { 'new_console_api_key' } elseif ($legacyAsr) { 'legacy_app_id_access_token' } else { 'missing' })

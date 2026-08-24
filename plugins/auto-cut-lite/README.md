@@ -1,6 +1,6 @@
 # Auto-Cut 精简通用版
 
-这是一个通用的 Codex 插件包。它将审阅文档转换为可二次编辑的剪映工程，保留源视频、分离音频、替换素材、切点和逐条审阅标记。
+这是一个通用的 Codex 插件包。它保留当前 Auto-Cut 的 17 个通用技能入口，将审阅文档转换为可二次编辑的剪映工程，并支持动画时序、音频、BGM、花字、局部图片、指向物配置和最终验收。
 
 在 Windows x64 目标电脑上解压完整 ZIP，然后在解压出的 `auto-cut-lite` 目录运行：
 
@@ -20,4 +20,4 @@ lark-cli docs +fetch --as user --doc <document-url> --json
 
 部署脚本只会设置严格用户身份，不会代替用户登录或伪造授权。目标机仍需安装 64 位 Python 3.10-3.12、剪映专业版、FFmpeg/FFprobe 和 `lark-cli`；ASR 服务凭据也必须由操作者在本机配置。Codex CLI 必须可执行；若 Codex Desktop 自带入口受 Windows 限制但目标机装有 Node.js，部署器会通过固定版本的官方 `@openai/codex` npm 包执行插件注册。缺少这些本机配置时，插件会显示 `deployment_status=installed` 与 `readiness=pending_user_configuration`，不会误报为全部就绪。
 
-运行代码位于 `runtime/`，依赖安装在插件自己的 `.runtime-venv` 中。通用版不携带任何预置学科指向物库；图片、箭头、手势和其他视觉素材按每个项目单独提供。
+运行代码位于 `runtime/`，依赖安装在插件自己的 `.runtime-venv` 中。通用版不携带任何预置学科、私有指向物库或本机项目绑定；用户可以在目标电脑通过 `auto-cut-profile-onboarding` 为自己的项目建立配置，该数据保存在 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\pointer-profiles.local`，不随插件升级被覆盖。

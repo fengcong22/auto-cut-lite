@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 可编辑广告修订"
+  short_description: "修订 BGM、花字、字幕、重叠和调色，同时保持剪映草稿可编辑"
+  default_prompt: "Use $auto-cut-editable-ad-revision to revise this JianYing ad or oral-video draft while preserving editable tracks."
+
+policy:
+  allow_implicit_invocation: true

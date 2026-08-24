@@ -1,7 +1,7 @@
 {
   "name": "auto-cut-lite",
-  "version": "1.0.3",
-  "description": "Generic compact Auto-Cut workflow for editable JianYing projects and review-document revisions.",
+  "version": "1.1.0",
+  "description": "Generic portable Auto-Cut workflow with the complete editable JianYing skill set.",
   "author": {
     "name": "Auto-Cut"
   },
@@ -18,7 +18,7 @@
   "interface": {
     "displayName": "Auto-Cut 精简通用版",
     "shortDescription": "按审阅意见生成可编辑的剪映精简版工程",
-    "longDescription": "通用精简版 Auto-Cut 工作流，支持飞书审阅文档、严格用户身份读取、ASR 字词对齐、补录片段局部时间线、只切不删的可编辑剪映草稿、替换素材和交付校验。",
+    "longDescription": "通用精简版 Auto-Cut 工作流，内置完整通用技能集：飞书严格用户身份读取、ASR 字词对齐、补录片段局部时间线、可编辑剪映草稿、动画、BGM、花字、音频修复、指向物配置和交付验收。",
     "developerName": "Auto-Cut",
     "category": "Productivity",
     "capabilities": [
@@ -26,6 +26,8 @@
       "Resolve ASR word boundaries",
       "Map replacement-local timelines",
       "Write editable JianYing drafts",
+      "Revise animation, audio, text and BGM",
+      "Calibrate project-local pointer profiles",
       "Validate and package lite deliveries"
     ],
     "brandColor": "#1677FF",

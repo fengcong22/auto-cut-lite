@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.0.3"
+PLUGIN_VERSION = "1.1.0"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 FORBIDDEN_MARKERS = (
     "高中历史",
@@ -29,6 +29,7 @@ FORBIDDEN_MARKERS = (
     "subject_pointer",
     "senior-high-history",
     "private-assets-high-school-history",
+    "C2597_v37_bgm_cloud_funk",
 )
 ROOT_FILES = (
     "LICENSE",
@@ -88,12 +89,13 @@ SANITIZE = {
     "高中历史": "通用精简版",
     "High School History": "Generic Lite",
     "high-school-history": "auto-cut-lite",
-    "subject-pointer": "optional-profile",
-    "subject_pointer": "optional_profile",
-    "SUBJECT_POINTER": "OPTIONAL_PROFILE",
-    "SUBJECT-POINTER": "OPTIONAL-PROFILE",
-    "senior-high-history": "generic-profile",
+    "subject-pointer": "pointer-profile",
+    "subject_pointer": "pointer_profile",
+    "SUBJECT_POINTER": "POINTER_PROFILE",
+    "SUBJECT-POINTER": "POINTER-PROFILE",
+    "senior-high-history": "generic-course-profile",
     "private-assets-high-school-history": "private-assets",
+    "C2597_v37_bgm_cloud_funk": "generic_oral_video_baseline",
 }
 
 

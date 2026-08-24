@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 指向物配置建档"
+  short_description: "增量建立、更新并绑定项目级指向物配置档案"
+  default_prompt: "Use $auto-cut-profile-onboarding to create, update, inspect, bind, or rebind a target-local pointer profile, or continue a same-task handoff from $auto-cut-pointer-targeting."
+
+policy:
+  allow_implicit_invocation: true

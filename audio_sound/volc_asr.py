@@ -71,7 +71,22 @@ def _validate_endpoint(value: str, field_name: str) -> str:
     return value
 
 
-def load_volc_asr_config(env_path: str | Path = PROJECT_ROOT / ".env") -> VolcAsrConfig:
+def default_volc_env_path(
+    *,
+    project_root: str | Path = PROJECT_ROOT,
+    local_app_data: str | Path | None = None,
+) -> Path:
+    root = Path(project_root).resolve()
+    plugin_manifest = root.parent / ".codex-plugin" / "plugin.json"
+    if plugin_manifest.is_file():
+        local_root = local_app_data or os.environ.get("LOCALAPPDATA")
+        if local_root:
+            return Path(local_root).expanduser().resolve() / "Auto-Cut" / "auto-cut-lite" / "config" / ".env"
+    return root / ".env"
+
+
+def load_volc_asr_config(env_path: str | Path | None = None) -> VolcAsrConfig:
+    env_path = default_volc_env_path() if env_path is None else env_path
     env_values = load_env_file(env_path)
     app_id = _config_value(env_values, "VOLC_ASR_APP_ID", "VOLC_SPEECH_APP_ID")
     access_token = _config_value(env_values, "VOLC_ASR_ACCESS_TOKEN", "VOLC_SPEECH_ACCESS_TOKEN")
@@ -584,7 +599,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run Volcengine ASR and emit normalized word-level timings.",
     )
     parser.add_argument("audio", help="Input audio/video file.")
-    parser.add_argument("--env", default=str(PROJECT_ROOT / ".env"), help="Path to .env config.")
+    parser.add_argument("--env", default=str(default_volc_env_path()), help="Path to .env config.")
     parser.add_argument("--output", default=None, help="Write normalized JSON to this path.")
     parser.add_argument("--raw-output", default=None, help="Optionally write raw service JSON.")
     parser.add_argument("--phrase", action="append", default=[], help="Phrase to locate.")

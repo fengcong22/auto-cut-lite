@@ -333,7 +333,8 @@
     {
       "id": "volc_asr_alignment",
       "entrypoints": [
-        "scripts/audio/volc_word_align.py"
+        "scripts/audio/volc_word_align.py",
+        "scripts/portable/volc_setup.py"
       ],
       "required_paths": [
         "audio_sound/volc_asr.py",
@@ -349,7 +350,7 @@
       ],
       "dynamic_service_policy": "user_configured_https",
       "external_tools": [],
-      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py volc-status --json"
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/portable/volc_setup.py status --json"
     },
     {
       "id": "sami_tts",

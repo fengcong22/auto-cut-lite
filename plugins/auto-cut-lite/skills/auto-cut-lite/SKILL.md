@@ -56,7 +56,7 @@ lark-cli docs +fetch --as user --doc <document-url> --json
 
 ## Generic visual handling
 
-本通用包不读取任何预置学科、阶段或私有指向物库。需要手、箭头、圈选或其他视觉素材时，只使用请求中提供的本地素材或明确指定的公共素材，并把它保存到可编辑轨道；没有素材时保留校对标记，不猜测素材身份。
+本通用包不携带任何预置学科、阶段、项目绑定或私有指向物素材。需要手、箭头、圈选或其他精准指向时，先用 `auto-cut-pointer-targeting` 检查目标机本地配置；若缺失，在同一任务中转到 `auto-cut-profile-onboarding` 收集用户提供的素材、比例截图和确认证据。配置数据保存在目标电脑的 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\pointer-profiles.local`，插件更新不会覆盖它。没有通过精确配置门禁时不猜测位置、大小或素材身份。
 
 ## Delivery gate
 

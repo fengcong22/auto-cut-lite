@@ -35,7 +35,7 @@ def _plugin(tmp_path: Path) -> Path:
     manifest = plugin / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.0.3"}), encoding="utf-8"
+        json.dumps({"name": "auto-cut-lite", "version": "1.1.0"}), encoding="utf-8"
     )
     return plugin
 
@@ -186,7 +186,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     package = tmp_path / "auto-cut-lite"
     files = {
         ".codex-plugin/plugin.json": json.dumps(
-            {"name": "auto-cut-lite", "version": "1.0.3"}
+            {"name": "auto-cut-lite", "version": "1.1.0"}
         ).encode(),
         "installer/register_personal_marketplace.py": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
@@ -207,7 +207,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         for relative, data in sorted(files.items())
     ]
     (package / "PACKAGE-MANIFEST.json").write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.0.3", "files": manifest_rows}),
+        json.dumps({"name": "auto-cut-lite", "version": "1.1.0", "files": manifest_rows}),
         encoding="utf-8",
     )
 
@@ -238,7 +238,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "package_validation=pass" in result.stdout
     assert "environment_validation=pass" in result.stdout
-    assert "plugin_version=1.0.3" in result.stdout
+    assert "plugin_version=1.1.0" in result.stdout
     assert "python_version=3.11." in result.stdout
     assert "python_bits=64" in result.stdout
     assert "codex_invocation=direct" in result.stdout
@@ -275,5 +275,5 @@ def test_plugin_and_builder_versions_match() -> None:
     builder = (REPO_ROOT / "scripts" / "release" / "build_lite_plugin.py").read_text(
         encoding="utf-8"
     )
-    assert plugin_manifest["version"] == "1.0.3"
-    assert 'PLUGIN_VERSION = "1.0.3"' in builder
+    assert plugin_manifest["version"] == "1.1.0"
+    assert 'PLUGIN_VERSION = "1.1.0"' in builder

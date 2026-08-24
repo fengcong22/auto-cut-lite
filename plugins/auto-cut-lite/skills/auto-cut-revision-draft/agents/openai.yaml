@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 审片修订草稿"
+  short_description: "按审片意见修订，并保留素材、分离音频、切口和修改标记"
+  default_prompt: "Use $auto-cut-revision-draft to revise a JianYing draft while preserving visible media, separated audio, cut points, visual-aware pause decisions, and review markers."
+
+policy:
+  allow_implicit_invocation: true

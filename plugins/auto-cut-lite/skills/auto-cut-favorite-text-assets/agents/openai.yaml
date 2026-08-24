@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto-Cut 收藏花字"
+  short_description: "同步并调用剪映收藏夹花字效果，区分官方文字模板 adapter 限制"
+  default_prompt: "Use $auto-cut-favorite-text-assets to sync JianYing favorite text assets and verify favorite flower-text or text-template usage."
+
+policy:
+  allow_implicit_invocation: true

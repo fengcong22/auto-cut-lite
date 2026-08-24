@@ -12,6 +12,7 @@ from audio_sound.volc_asr import (
     VolcAsrConfig,
     VolcAsrError,
     _api_headers,
+    default_volc_env_path,
     find_phrase_matches,
     load_volc_asr_config,
     main,
@@ -62,6 +63,24 @@ def test_load_config_requires_credentials_without_echoing_values(tmp_path: Path)
         load_volc_asr_config(tmp_path / ".env")
 
     assert "token-value" not in str(exc_info.value)
+
+
+def test_default_env_path_stays_repository_local_for_source_checkout(tmp_path: Path) -> None:
+    assert default_volc_env_path(project_root=tmp_path, local_app_data=tmp_path / "local") == (
+        tmp_path / ".env"
+    )
+
+
+def test_default_env_path_uses_target_local_state_for_portable_plugin(tmp_path: Path) -> None:
+    runtime = tmp_path / "auto-cut-lite" / "runtime"
+    manifest = runtime.parent / ".codex-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name":"auto-cut-lite"}\n', encoding="utf-8")
+    local = tmp_path / "local"
+
+    assert default_volc_env_path(project_root=runtime, local_app_data=local) == (
+        local / "Auto-Cut" / "auto-cut-lite" / "config" / ".env"
+    )
 
 
 def test_load_config_supports_standard_names_and_resource_default(tmp_path: Path) -> None:
