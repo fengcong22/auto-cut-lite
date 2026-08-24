@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -32,7 +34,7 @@ def _plugin(tmp_path: Path) -> Path:
     manifest = plugin / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.0.1"}), encoding="utf-8"
+        json.dumps({"name": "auto-cut-lite", "version": "1.0.2"}), encoding="utf-8"
     )
     return plugin
 
@@ -177,6 +179,59 @@ def test_deployer_has_valid_windows_powershell_syntax() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "auto-cut-lite"
+    files = {
+        ".codex-plugin/plugin.json": json.dumps(
+            {"name": "auto-cut-lite", "version": "1.0.2"}
+        ).encode(),
+        "installer/register_personal_marketplace.py": b"# validation fixture\n",
+        "runtime/requirements.txt": b"# validation fixture\n",
+    }
+    for relative, data in files.items():
+        target = package / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    deployer = package / "deploy-to-codex.ps1"
+    shutil.copy2(DEPLOYER_PATH, deployer)
+    files["deploy-to-codex.ps1"] = deployer.read_bytes()
+    manifest_rows = [
+        {
+            "path": relative,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for relative, data in sorted(files.items())
+    ]
+    (package / "PACKAGE-MANIFEST.json").write_text(
+        json.dumps({"name": "auto-cut-lite", "version": "1.0.2", "files": manifest_rows}),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-ValidateOnly",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "package_validation=pass" in result.stdout
+    assert "plugin_version=1.0.2" in result.stdout
+
+
 def test_plugin_and_builder_versions_match() -> None:
     plugin_manifest = json.loads(
         (REPO_ROOT / "plugins" / "auto-cut-lite" / ".codex-plugin" / "plugin.json").read_text(
@@ -186,5 +241,5 @@ def test_plugin_and_builder_versions_match() -> None:
     builder = (REPO_ROOT / "scripts" / "release" / "build_lite_plugin.py").read_text(
         encoding="utf-8"
     )
-    assert plugin_manifest["version"] == "1.0.1"
-    assert 'PLUGIN_VERSION = "1.0.1"' in builder
+    assert plugin_manifest["version"] == "1.0.2"
+    assert 'PLUGIN_VERSION = "1.0.2"' in builder

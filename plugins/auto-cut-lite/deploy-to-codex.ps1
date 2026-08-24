@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$WithAudio
+    [switch]$WithAudio,
+    [switch]$ValidateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -107,8 +108,9 @@ function Resolve-ManifestRelativePath {
     if ([string]::IsNullOrWhiteSpace($RelativePath) -or [System.IO.Path]::IsPathRooted($RelativePath)) {
         throw "Unsafe package manifest path: $RelativePath"
     }
-    $parts = $RelativePath.Replace('/', '\').Split('\')
-    if ($parts.Count -eq 0 -or ($parts | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+    $parts = @($RelativePath.Replace('/', '\').Split('\'))
+    $unsafeParts = @($parts | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' })
+    if ($parts.Count -eq 0 -or $unsafeParts.Count -gt 0) {
         throw "Unsafe package manifest path: $RelativePath"
     }
     $resolved = [System.IO.Path]::GetFullPath((Join-Path $packageRoot ($parts -join '\')))
@@ -132,7 +134,7 @@ function Read-AndValidatePackageManifest {
     if ($manifest.name -ne $pluginName -or [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
         throw 'Package identity is invalid.'
     }
-    if ($null -eq $manifest.files -or $manifest.files.Count -eq 0) {
+    if ($null -eq $manifest.files -or @($manifest.files).Count -eq 0) {
         throw 'Package manifest has no file inventory.'
     }
     $seen = @{}
@@ -259,6 +261,12 @@ try {
     $pluginManifest = Get-Content -LiteralPath $pluginManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($pluginManifest.name -ne $pluginName -or $pluginManifest.version -ne $packageManifest.version) {
         throw 'Plugin manifest identity does not match the package manifest.'
+    }
+    if ($ValidateOnly) {
+        Write-Output "package_validation=pass"
+        Write-Output "plugin_name=$pluginName"
+        Write-Output "plugin_version=$($packageManifest.version)"
+        return
     }
 
     $pythonEvidence = Get-CommandEvidence -Name 'python'

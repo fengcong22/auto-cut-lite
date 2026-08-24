@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.0.2"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 FORBIDDEN_MARKERS = (
     "高中历史",
@@ -273,7 +273,7 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "status": "pass",
             "plugin_name": PLUGIN_NAME,
             "plugin_version": PLUGIN_VERSION,
-            "archive_path": str(output),
+            "archive_file": output.name,
             "archive_sha256": zip_sha256,
             "archive_byte_size": output.stat().st_size,
             "archive_entry_count": entry_count,
