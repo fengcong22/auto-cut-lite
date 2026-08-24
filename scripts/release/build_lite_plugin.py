@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.0.2"
+PLUGIN_VERSION = "1.0.3"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 FORBIDDEN_MARKERS = (
     "高中历史",
@@ -160,7 +160,7 @@ def _write_target_setup(stage: Path) -> None:
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\n1. Install 64-bit Python 3.10-3.12, Codex CLI, JianYing/CapCut desktop and FFmpeg/FFprobe.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`; add `-WithAudio` when audio restoration dependencies are needed.\n3. Start a new Codex thread after deployment.\n4. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n5. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n6. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
+        """# Target setup\n\n1. Install 64-bit Python 3.10-3.12, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`; add `-WithAudio` when audio restoration dependencies are needed.\n3. Start a new Codex thread after deployment.\n4. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n5. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n6. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -290,6 +290,7 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "runtime_dependency_installation": "isolated_venv_automatic",
             "deployment_report": "%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json",
             "readiness_model": "installed_can_require_user_configuration",
+            "codex_cli_fallback": "@openai/codex@0.149.1_via_npx",
         }
         receipt_path = output.with_name(output.name + ".receipt.json")
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

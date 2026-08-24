@@ -18,6 +18,6 @@ lark-cli config strict-mode user
 lark-cli docs +fetch --as user --doc <document-url> --json
 ```
 
-部署脚本只会设置严格用户身份，不会代替用户登录或伪造授权。目标机仍需安装 64 位 Python 3.10-3.12、Codex CLI、剪映专业版、FFmpeg/FFprobe 和 `lark-cli`；ASR 服务凭据也必须由操作者在本机配置。缺少这些本机配置时，插件会显示 `deployment_status=installed` 与 `readiness=pending_user_configuration`，不会误报为全部就绪。
+部署脚本只会设置严格用户身份，不会代替用户登录或伪造授权。目标机仍需安装 64 位 Python 3.10-3.12、剪映专业版、FFmpeg/FFprobe 和 `lark-cli`；ASR 服务凭据也必须由操作者在本机配置。Codex CLI 必须可执行；若 Codex Desktop 自带入口受 Windows 限制但目标机装有 Node.js，部署器会通过固定版本的官方 `@openai/codex` npm 包执行插件注册。缺少这些本机配置时，插件会显示 `deployment_status=installed` 与 `readiness=pending_user_configuration`，不会误报为全部就绪。
 
 运行代码位于 `runtime/`，依赖安装在插件自己的 `.runtime-venv` 中。通用版不携带任何预置学科指向物库；图片、箭头、手势和其他视觉素材按每个项目单独提供。

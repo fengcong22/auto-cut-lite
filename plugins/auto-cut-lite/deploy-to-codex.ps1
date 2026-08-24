@@ -8,6 +8,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $pluginName = 'auto-cut-lite'
+$codexNpmPackage = '@openai/codex@0.149.1'
 $startedAt = [DateTime]::UtcNow.ToString('o')
 $packageRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
@@ -200,6 +201,66 @@ function Get-CommandEvidence {
     return [ordered]@{ status = 'detected'; path = $command.Source }
 }
 
+function Resolve-CodexCommand {
+    $direct = Get-Command 'codex' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $direct) {
+        try {
+            & $direct.Source '--version' 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                return [ordered]@{
+                    status = 'detected'
+                    path = $direct.Source
+                    invocation = 'direct'
+                    npm_package = $null
+                }
+            }
+        }
+        catch {
+            # Codex Desktop can expose a packaged binary that normal PowerShell
+            # can locate but cannot execute. Fall through to the official npm CLI.
+        }
+    }
+
+    $npx = Get-Command 'npx.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $npx) {
+        try {
+            & $npx.Source '--version' 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                return [ordered]@{
+                    status = 'detected'
+                    path = $npx.Source
+                    invocation = 'official_npm_fallback'
+                    npm_package = $codexNpmPackage
+                }
+            }
+        }
+        catch {}
+    }
+
+    return [ordered]@{
+        status = 'missing_or_unusable'
+        path = $null
+        invocation = $null
+        npm_package = $null
+    }
+}
+
+function Invoke-CodexPluginAdd {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Evidence,
+        [Parameter(Mandatory)][string]$PluginReference
+    )
+    if ($Evidence.invocation -eq 'direct') {
+        & $Evidence.path 'plugin' 'add' $PluginReference
+        return
+    }
+    if ($Evidence.invocation -eq 'official_npm_fallback') {
+        & $Evidence.path '--yes' $Evidence.npm_package 'plugin' 'add' $PluginReference
+        return
+    }
+    throw 'No usable Codex CLI invocation is available.'
+}
+
 function Find-JianYing {
     $candidates = @(
         (Join-Path $env:LOCALAPPDATA 'JianyingPro\Apps\JianyingPro.exe'),
@@ -262,32 +323,52 @@ try {
     if ($pluginManifest.name -ne $pluginName -or $pluginManifest.version -ne $packageManifest.version) {
         throw 'Plugin manifest identity does not match the package manifest.'
     }
-    if ($ValidateOnly) {
-        Write-Output "package_validation=pass"
-        Write-Output "plugin_name=$pluginName"
-        Write-Output "plugin_version=$($packageManifest.version)"
-        return
-    }
-
     $pythonEvidence = Get-CommandEvidence -Name 'python'
     if ($pythonEvidence.status -ne 'detected') {
         throw 'Python 3.10-3.12 was not found on PATH.'
     }
-    $pythonInfoJson = & $pythonEvidence.path '-c' 'import json,platform,sys; print(json.dumps({"version":platform.python_version(),"major":sys.version_info.major,"minor":sys.version_info.minor,"bits":platform.architecture()[0]}))'
+    # Keep the probe free of quotes and spaces. Windows PowerShell 5.1 otherwise
+    # rewrites embedded quotes while constructing a native-process command line.
+    $pythonProbe = & $pythonEvidence.path '-c' 'import sys,struct;print(sys.version_info[0],sys.version_info[1],sys.version_info[2],struct.calcsize(chr(80))*8,sep=chr(124))'
     if ($LASTEXITCODE -ne 0) {
         throw 'The detected Python command could not run.'
     }
-    $pythonInfo = $pythonInfoJson | ConvertFrom-Json
-    if ($pythonInfo.major -ne 3 -or $pythonInfo.minor -lt 10 -or $pythonInfo.minor -gt 12 -or $pythonInfo.bits -ne '64bit') {
-        throw "Python must be 64-bit version 3.10-3.12; detected $($pythonInfo.version) $($pythonInfo.bits)."
+    $pythonProbeText = [string]($pythonProbe | Select-Object -Last 1)
+    $pythonParts = @($pythonProbeText.Trim().Split('|'))
+    $pythonMajor = 0
+    $pythonMinor = 0
+    $pythonPatch = 0
+    $pythonBits = 0
+    $validPythonProbe = $pythonParts.Count -eq 4 -and
+        [int]::TryParse($pythonParts[0], [ref]$pythonMajor) -and
+        [int]::TryParse($pythonParts[1], [ref]$pythonMinor) -and
+        [int]::TryParse($pythonParts[2], [ref]$pythonPatch) -and
+        [int]::TryParse($pythonParts[3], [ref]$pythonBits)
+    if (-not $validPythonProbe) {
+        throw "The detected Python command returned an invalid runtime probe: $pythonProbeText"
     }
-    $pythonEvidence.version = $pythonInfo.version
+    $pythonVersion = "$pythonMajor.$pythonMinor.$pythonPatch"
+    if ($pythonMajor -ne 3 -or $pythonMinor -lt 10 -or $pythonMinor -gt 12 -or $pythonBits -ne 64) {
+        throw "Python must be 64-bit version 3.10-3.12; detected $pythonVersion ${pythonBits}-bit."
+    }
+    $pythonEvidence.version = $pythonVersion
+    $pythonEvidence.bits = $pythonBits
     $report.components.python = $pythonEvidence
 
-    $codexEvidence = Get-CommandEvidence -Name 'codex'
+    $codexEvidence = Resolve-CodexCommand
     $report.components.codex_cli = $codexEvidence
     if ($codexEvidence.status -ne 'detected') {
-        throw 'Codex CLI was not found on PATH, so the plugin cannot be registered.'
+        throw 'No usable Codex CLI was found. Install Codex CLI, or install Node.js so the official npm CLI fallback can run.'
+    }
+    if ($ValidateOnly) {
+        Write-Output "package_validation=pass"
+        Write-Output "environment_validation=pass"
+        Write-Output "plugin_name=$pluginName"
+        Write-Output "plugin_version=$($packageManifest.version)"
+        Write-Output "python_version=$pythonVersion"
+        Write-Output "python_bits=$pythonBits"
+        Write-Output "codex_invocation=$($codexEvidence.invocation)"
+        return
     }
 
     New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
@@ -372,7 +453,7 @@ try {
     $report.marketplace_name = $marketplaceRegistration.marketplace_name
     $report.marketplace_backup_path = $marketplaceRegistration.marketplace_backup_path
 
-    & $codexEvidence.path 'plugin' 'add' ($pluginName + '@' + $marketplaceRegistration.marketplace_name)
+    Invoke-CodexPluginAdd -Evidence $codexEvidence -PluginReference ($pluginName + '@' + $marketplaceRegistration.marketplace_name)
     if ($LASTEXITCODE -ne 0) {
         throw 'Codex rejected the plugin installation command.'
     }
