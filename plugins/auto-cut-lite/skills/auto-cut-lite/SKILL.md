@@ -12,9 +12,13 @@ description: Use for the generic compact Auto-Cut workflow when the result must 
 插件根目录下的 `runtime/` 是实际运行代码。不要从源码仓库或另一台电脑复制运行状态。常用命令形式为：
 
 ```powershell
-python runtime/scripts/jy_wrapper.py review-job-compile --snapshot-json <snapshot> --project-json <project> --output-dir <job-dir> --json
-python runtime/scripts/jy_wrapper.py revision-run --request-json <request> --doc-items-json <items> --workflow-mode lite --strict --package-zip <output.zip> --json
+$autoCutLiteRoot = Join-Path $env:USERPROFILE 'plugins\auto-cut-lite'
+$autoCutLitePython = Join-Path $autoCutLiteRoot '.runtime-venv\Scripts\python.exe'
+& $autoCutLitePython (Join-Path $autoCutLiteRoot 'runtime\scripts\jy_wrapper.py') review-job-compile --snapshot-json <snapshot> --project-json <project> --output-dir <job-dir> --json
+& $autoCutLitePython (Join-Path $autoCutLiteRoot 'runtime\scripts\jy_wrapper.py') revision-run --request-json <request> --doc-items-json <items> --workflow-mode lite --strict --package-zip <output.zip> --json
 ```
+
+若 `.runtime-venv` 不存在或部署报告不是 `deployment_status=installed`，停止剪辑并让用户在完整插件包目录重新运行 `deploy-to-codex.ps1`。不要回退到源码仓库、全量版目录或系统 Python。
 
 ## Feishu/Lark identity
 

@@ -20,7 +20,7 @@ from typing import Iterable
 
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 FORBIDDEN_MARKERS = (
     "高中历史",
@@ -156,11 +156,11 @@ def _write_text(path: Path, text: str) -> None:
 def _write_target_setup(stage: Path) -> None:
     _write_text(
         stage / "install.ps1",
-        """[CmdletBinding()]\nparam([switch]$WithAudio)\n$ErrorActionPreference = 'Stop'\nif (-not [Environment]::Is64BitOperatingSystem) { throw 'Auto-Cut requires 64-bit Windows.' }\n$python = Get-Command python -ErrorAction Stop\n$args = @('-m', 'pip', 'install', '--upgrade', '-r', (Join-Path $PSScriptRoot 'runtime\\requirements.txt'))\n& $python.Source @args\nif ($WithAudio) { & $python.Source '-m' 'pip' 'install' '--upgrade' '-r' (Join-Path $PSScriptRoot 'runtime\\requirements-audio.lock') }\nWrite-Output 'Generic Auto-Cut runtime installed. Configure JianYing, lark-cli user identity, and ASR credentials locally.'\n""",
+        """[CmdletBinding()]\nparam([switch]$WithAudio)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio\nexit $LASTEXITCODE\n""",
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\n1. Install 64-bit Python 3.10-3.12, JianYing/CapCut desktop and FFmpeg.\n2. In PowerShell run `./install.ps1`; use `./install.ps1 -WithAudio` when audio restoration dependencies are needed.\n3. Configure the current operator's Feishu user identity:\n\n```powershell\nlark-cli config default-as user\nlark-cli config strict-mode user\nlark-cli auth login --scope <document-read-scopes> --no-wait --json\n```\n\n4. Configure ASR credentials only on the target computer and verify them with the real alignment command. Do not put credentials in this package.\n5. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
+        """# Target setup\n\n1. Install 64-bit Python 3.10-3.12, Codex CLI, JianYing/CapCut desktop and FFmpeg/FFprobe.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`; add `-WithAudio` when audio restoration dependencies are needed.\n3. Start a new Codex thread after deployment.\n4. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n5. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n6. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -285,6 +285,11 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "feishu_identity": "target_user_only",
             "credentials_bundled": False,
             "private_subject_assets_bundled": False,
+            "one_command_deployer": "deploy-to-codex.ps1",
+            "personal_marketplace_registration": "atomic_structured_helper",
+            "runtime_dependency_installation": "isolated_venv_automatic",
+            "deployment_report": "%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json",
+            "readiness_model": "installed_can_require_user_configuration",
         }
         receipt_path = output.with_name(output.name + ".receipt.json")
         receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
