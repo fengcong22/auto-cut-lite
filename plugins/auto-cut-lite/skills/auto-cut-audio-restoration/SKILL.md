@@ -9,6 +9,8 @@ description: Use when spoken-word audio explicitly needs restoration for breathi
 
 Before executing this skill from the distributed plugin, read the [portable runtime contract](../auto-cut-lite/references/portable-runtime.md). Use the installed isolated runtime and `workflow_mode=lite`; do not fall back to a source checkout or another Auto-Cut installation.
 
+All `scripts/audio/` commands in this skill run with `runtime\.venv-audio\Scripts\python.exe`, not the main `.runtime-venv`. Require `components.audio_runtime.status=installed` in the deployment report before claiming audio restoration is available.
+
 
 这是 `auto-cut` 路由器下的音频修复子 skill。目标不是“跑一遍脚本就算完成”，而是用仓库内置音频引擎稳定交付已验证的中文口播成品。
 

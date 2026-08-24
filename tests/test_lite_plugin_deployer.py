@@ -17,13 +17,13 @@ HELPER_PATH = (
     / "plugins"
     / "auto-cut-lite"
     / "installer"
-    / "register_personal_marketplace.py"
+    / "manage_named_marketplace.py"
 )
 DEPLOYER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "deploy-to-codex.ps1"
 
 
 def _load_helper():
-    spec = importlib.util.spec_from_file_location("register_personal_marketplace", HELPER_PATH)
+    spec = importlib.util.spec_from_file_location("manage_named_marketplace", HELPER_PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -35,25 +35,26 @@ def _plugin(tmp_path: Path) -> Path:
     manifest = plugin / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.1.0"}), encoding="utf-8"
+        json.dumps({"name": "auto-cut-lite", "version": "1.2.1"}), encoding="utf-8"
     )
     return plugin
 
 
-def test_register_creates_personal_marketplace_with_required_contract(tmp_path: Path) -> None:
+def test_register_creates_named_marketplace_with_required_contract(tmp_path: Path) -> None:
     helper = _load_helper()
     plugin = _plugin(tmp_path)
     marketplace = tmp_path / ".agents" / "plugins" / "marketplace.json"
 
-    result = helper.register(plugin, marketplace)
+    result = helper.register_named(plugin, tmp_path)
 
     payload = json.loads(marketplace.read_text(encoding="utf-8"))
-    assert result["marketplace_name"] == "personal"
+    assert result["marketplace_name"] == "auto-cut-lite-marketplace"
+    assert result["marketplace_display_name"] == "Auto-Cut Lite"
     assert result["marketplace_created"] is True
     assert result["marketplace_backup_path"] is None
     assert payload == {
-        "name": "personal",
-        "interface": {"displayName": "Personal"},
+        "name": "auto-cut-lite-marketplace",
+        "interface": {"displayName": "Auto-Cut Lite"},
         "plugins": [
             {
                 "name": "auto-cut-lite",
@@ -73,12 +74,13 @@ def test_register_creates_personal_marketplace_with_required_contract(tmp_path: 
     assert not marketplace.exists()
 
 
-def test_register_preserves_marketplace_metadata_order_and_unrelated_entries(
+def test_register_preserves_named_marketplace_metadata_order_and_unrelated_entries(
     tmp_path: Path,
 ) -> None:
     helper = _load_helper()
     plugin = _plugin(tmp_path)
-    marketplace = tmp_path / "marketplace.json"
+    marketplace = tmp_path / ".agents" / "plugins" / "marketplace.json"
+    marketplace.parent.mkdir(parents=True)
     original_other = {
         "name": "other-plugin",
         "source": {"source": "local", "path": "./plugins/other-plugin"},
@@ -87,8 +89,8 @@ def test_register_preserves_marketplace_metadata_order_and_unrelated_entries(
         "custom": {"preserve": True},
     }
     payload = {
-        "name": "my-personal-market",
-        "interface": {"displayName": "My plugins", "custom": "kept"},
+        "name": "auto-cut-lite-marketplace",
+        "interface": {"displayName": "Old label", "custom": "kept"},
         "custom_root": [1, 2, 3],
         "plugins": [
             original_other,
@@ -98,12 +100,12 @@ def test_register_preserves_marketplace_metadata_order_and_unrelated_entries(
     }
     marketplace.write_text(json.dumps(payload), encoding="utf-8")
 
-    result = helper.register(plugin, marketplace)
+    result = helper.register_named(plugin, tmp_path)
 
     updated = json.loads(marketplace.read_text(encoding="utf-8"))
-    assert result["marketplace_name"] == "my-personal-market"
+    assert result["marketplace_name"] == "auto-cut-lite-marketplace"
     assert result["entry_action"] == "replaced"
-    assert updated["interface"] == payload["interface"]
+    assert updated["interface"] == {"displayName": "Auto-Cut Lite", "custom": "kept"}
     assert updated["custom_root"] == payload["custom_root"]
     assert updated["plugins"][0] == original_other
     assert updated["plugins"][2] == payload["plugins"][2]
@@ -114,31 +116,33 @@ def test_register_preserves_marketplace_metadata_order_and_unrelated_entries(
 def test_register_rejects_malformed_json_without_touching_it(tmp_path: Path) -> None:
     helper = _load_helper()
     plugin = _plugin(tmp_path)
-    marketplace = tmp_path / "marketplace.json"
+    marketplace = tmp_path / ".agents" / "plugins" / "marketplace.json"
+    marketplace.parent.mkdir(parents=True)
     malformed = b'{"name":"personal","plugins":['
     marketplace.write_bytes(malformed)
 
     with pytest.raises(ValueError, match="not valid UTF-8 JSON"):
-        helper.register(plugin, marketplace)
+        helper.register_named(plugin, tmp_path)
 
     assert marketplace.read_bytes() == malformed
-    assert list(tmp_path.glob("*.bak")) == []
-    assert list(tmp_path.glob("*.tmp")) == []
+    assert list(marketplace.parent.glob("*.bak")) == []
+    assert list(marketplace.parent.glob("*.tmp")) == []
 
 
 def test_register_backup_and_rollback_are_atomic(tmp_path: Path, monkeypatch) -> None:
     helper = _load_helper()
     plugin = _plugin(tmp_path)
-    marketplace = tmp_path / "marketplace.json"
+    marketplace = tmp_path / ".agents" / "plugins" / "marketplace.json"
+    marketplace.parent.mkdir(parents=True)
     original = {
-        "name": "personal-existing",
+        "name": "auto-cut-lite-marketplace",
         "interface": {"displayName": "Existing"},
         "plugins": [{"name": "kept"}],
     }
     original_bytes = (json.dumps(original, indent=2) + "\n").encode("utf-8")
     marketplace.write_bytes(original_bytes)
 
-    registration = helper.register(plugin, marketplace)
+    registration = helper.register_named(plugin, tmp_path)
     backup = Path(registration["marketplace_backup_path"])
     assert backup.read_bytes() == original_bytes
     assert marketplace.read_bytes() != original_bytes
@@ -157,9 +161,39 @@ def test_register_backup_and_rollback_are_atomic(tmp_path: Path, monkeypatch) ->
 
     monkeypatch.setattr(helper.os, "replace", fail_replace)
     with pytest.raises(OSError, match="simulated replace failure"):
-        helper.register(plugin, marketplace)
+        helper.register_named(plugin, tmp_path)
     assert marketplace.read_bytes() == original_bytes
-    assert not list(tmp_path.glob("*.tmp"))
+    assert not list(marketplace.parent.glob("*.tmp"))
+
+
+def test_remove_personal_entry_preserves_other_plugins_and_can_rollback(tmp_path: Path) -> None:
+    helper = _load_helper()
+    marketplace = tmp_path / "marketplace.json"
+    original = {
+        "name": "personal",
+        "interface": {"displayName": "Personal"},
+        "plugins": [
+            {"name": "kept", "source": {"source": "local", "path": "./plugins/kept"}},
+            {"name": "auto-cut-lite", "source": {"source": "local", "path": "./plugins/auto-cut-lite"}},
+        ],
+    }
+    original_bytes = (json.dumps(original, indent=2) + "\n").encode("utf-8")
+    marketplace.write_bytes(original_bytes)
+
+    result = helper.remove_personal_entry(marketplace)
+
+    updated = json.loads(marketplace.read_text(encoding="utf-8"))
+    assert result["changed"] is True
+    assert result["entry_action"] == "removed"
+    assert [entry["name"] for entry in updated["plugins"]] == ["kept"]
+    rollback = helper.rollback(
+        marketplace,
+        backup_path=Path(result["marketplace_backup_path"]),
+        created_new=False,
+        expected_current_sha256=result["marketplace_sha256"],
+    )
+    assert rollback["action"] == "restored_marketplace_backup"
+    assert marketplace.read_bytes() == original_bytes
 
 
 def test_deployer_has_valid_windows_powershell_syntax() -> None:
@@ -180,16 +214,32 @@ def test_deployer_has_valid_windows_powershell_syntax() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    assert "$marketplaceName = 'auto-cut-lite-marketplace'" in deployer
+    assert "$marketplaceDisplayName = 'Auto-Cut Lite'" in deployer
+    assert "'plugin', 'marketplace', 'add', $marketplaceRoot" in deployer
+    assert "$pluginName + '@' + $marketplaceName" in deployer
+    assert "'plugin', 'remove', $legacyReference" in deployer
+    assert "'remove-personal'" in deployer
+    assert "$audioRequested = -not $SkipAudio" in deployer
+    assert "$audioVenv = Join-Path $targetRoot 'runtime\\.venv-audio'" in deployer
+    assert "& $audioPython '-m' 'pip' 'install'" in deployer
+    assert "& $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\\requirements-audio.lock')" not in deployer
+
+
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "auto-cut-lite"
     files = {
         ".codex-plugin/plugin.json": json.dumps(
-            {"name": "auto-cut-lite", "version": "1.1.0"}
+            {"name": "auto-cut-lite", "version": "1.2.1"}
         ).encode(),
-        "installer/register_personal_marketplace.py": b"# validation fixture\n",
+        "installer/manage_named_marketplace.py": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
+        "runtime/requirements-audio.lock": b"# validation fixture\n",
     }
     for relative, data in files.items():
         target = package / relative
@@ -207,7 +257,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         for relative, data in sorted(files.items())
     ]
     (package / "PACKAGE-MANIFEST.json").write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.1.0", "files": manifest_rows}),
+        json.dumps({"name": "auto-cut-lite", "version": "1.2.1", "files": manifest_rows}),
         encoding="utf-8",
     )
 
@@ -238,9 +288,12 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "package_validation=pass" in result.stdout
     assert "environment_validation=pass" in result.stdout
-    assert "plugin_version=1.1.0" in result.stdout
+    assert "plugin_version=1.2.1" in result.stdout
     assert "python_version=3.11." in result.stdout
     assert "python_bits=64" in result.stdout
+    assert "audio_runtime=required_separate" in result.stdout
+    assert "marketplace_name=auto-cut-lite-marketplace" in result.stdout
+    assert "marketplace_display_name=Auto-Cut Lite" in result.stdout
     assert "codex_invocation=direct" in result.stdout
 
     (command_bin / "codex.cmd").write_text("@exit /b 1\n", encoding="ascii")
@@ -275,5 +328,5 @@ def test_plugin_and_builder_versions_match() -> None:
     builder = (REPO_ROOT / "scripts" / "release" / "build_lite_plugin.py").read_text(
         encoding="utf-8"
     )
-    assert plugin_manifest["version"] == "1.1.0"
-    assert 'PLUGIN_VERSION = "1.1.0"' in builder
+    assert plugin_manifest["version"] == "1.2.1"
+    assert 'PLUGIN_VERSION = "1.2.1"' in builder

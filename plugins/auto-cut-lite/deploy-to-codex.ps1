@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$WithAudio,
+    [switch]$SkipAudio,
     [switch]$ValidateOnly
 )
 
@@ -8,19 +9,28 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $pluginName = 'auto-cut-lite'
+$marketplaceName = 'auto-cut-lite-marketplace'
+$marketplaceDisplayName = 'Auto-Cut Lite'
 $codexNpmPackage = '@openai/codex@0.149.1'
 $startedAt = [DateTime]::UtcNow.ToString('o')
 $packageRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
 $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
 $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
-$targetParent = Join-Path $userProfile 'plugins'
-$targetRoot = Join-Path $targetParent $pluginName
-$marketplacePath = Join-Path $userProfile '.agents\plugins\marketplace.json'
 $stateRoot = Join-Path $localAppData 'Auto-Cut\auto-cut-lite'
+$marketplaceRoot = Join-Path $stateRoot 'marketplace'
+$targetParent = Join-Path $marketplaceRoot 'plugins'
+$targetRoot = Join-Path $targetParent $pluginName
+$marketplacePath = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
+$personalMarketplacePath = Join-Path $userProfile '.agents\plugins\marketplace.json'
+$legacyTargetRoot = Join-Path (Join-Path $userProfile 'plugins') $pluginName
 $reportPath = Join-Path $stateRoot 'deployment-report.json'
 $stagingRoot = Join-Path $targetParent ('.auto-cut-lite.staging.' + [Guid]::NewGuid().ToString('N'))
 $pluginBackup = $null
 $marketplaceRegistration = $null
+$personalMarketplaceCleanup = $null
+$codexEvidence = $null
+$marketplaceWasConfigured = $false
+$namedPluginWasInstalled = $false
 $targetActivated = $false
 $oldTargetBackedUp = $false
 $reportPathValidated = $false
@@ -43,7 +53,12 @@ $report = [ordered]@{
     plugin_backup_path = $null
     marketplace_path = $marketplacePath
     marketplace_name = $null
+    marketplace_display_name = $marketplaceDisplayName
     marketplace_backup_path = $null
+    legacy_personal_marketplace_path = $personalMarketplacePath
+    legacy_personal_plugin_path = $legacyTargetRoot
+    legacy_personal_plugin_backup_path = $null
+    legacy_personal_entry_action = $null
     components = [ordered]@{}
     pending_user_actions = @()
     error = $null
@@ -165,8 +180,9 @@ function Read-AndValidatePackageManifest {
     foreach ($required in @(
         '.codex-plugin/plugin.json',
         'deploy-to-codex.ps1',
-        'installer/register_personal_marketplace.py',
-        'runtime/requirements.txt'
+        'installer/manage_named_marketplace.py',
+        'runtime/requirements.txt',
+        'runtime/requirements-audio.lock'
     )) {
         if (-not $seen.ContainsKey($required.ToLowerInvariant())) {
             throw "Required package file is not inventoried: $required"
@@ -245,20 +261,71 @@ function Resolve-CodexCommand {
     }
 }
 
-function Invoke-CodexPluginAdd {
+function Invoke-CodexCommand {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Evidence,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    if ($Evidence.invocation -eq 'direct') {
+        & $Evidence.path @Arguments
+        return
+    }
+    if ($Evidence.invocation -eq 'official_npm_fallback') {
+        & $Evidence.path '--yes' $Evidence.npm_package @Arguments
+        return
+    }
+    throw 'No usable Codex CLI invocation is available.'
+}
+
+function Get-CodexMarketplaceRows {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Evidence)
+    $rows = @(Invoke-CodexCommand -Evidence $Evidence -Arguments @('plugin', 'marketplace', 'list') 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Codex could not list plugin marketplaces: $($rows -join ' ')"
+    }
+    return $rows
+}
+
+function Test-CodexMarketplaceConfigured {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Evidence,
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Root
+    )
+    $expectedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $marketplaceRows = @(Get-CodexMarketplaceRows -Evidence $Evidence)
+    foreach ($line in $marketplaceRows) {
+        $text = [string]$line
+        if ($text -match ('^\s*' + [regex]::Escape($Name) + '\s+(.+?)\s*$')) {
+            try {
+                return [string]::Equals(
+                    ([System.IO.Path]::GetFullPath($Matches[1])).TrimEnd('\'),
+                    $expectedRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+            catch { return $false }
+        }
+    }
+    return $false
+}
+
+function Test-CodexPluginInstalled {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$Evidence,
         [Parameter(Mandatory)][string]$PluginReference
     )
-    if ($Evidence.invocation -eq 'direct') {
-        & $Evidence.path 'plugin' 'add' $PluginReference
-        return
+    $rows = @(Invoke-CodexCommand -Evidence $Evidence -Arguments @('plugin', 'list') 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Codex could not list plugins: $($rows -join ' ')"
     }
-    if ($Evidence.invocation -eq 'official_npm_fallback') {
-        & $Evidence.path '--yes' $Evidence.npm_package 'plugin' 'add' $PluginReference
-        return
+    foreach ($line in $rows) {
+        $text = [string]$line
+        if ($text -match ('^\s*' + [regex]::Escape($PluginReference) + '\s+installed(?:,|\s)')) {
+            return $true
+        }
     }
-    throw 'No usable Codex CLI invocation is available.'
+    return $false
 }
 
 function Find-JianYing {
@@ -320,6 +387,10 @@ function Remove-ExactDeploymentDirectory {
 }
 
 try {
+    if ($WithAudio -and $SkipAudio) {
+        throw 'Use either -WithAudio or -SkipAudio, not both. Audio is installed by default.'
+    }
+    $audioRequested = -not $SkipAudio
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
         -not [Environment]::Is64BitOperatingSystem -or
         [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
@@ -330,8 +401,10 @@ try {
     }
 
     Assert-RegularTree -Root $packageRoot
-    Assert-NoReparseInExistingPath -Path $targetRoot -StopAt $userProfile
-    Assert-NoReparseInExistingPath -Path $marketplacePath -StopAt $userProfile
+    Assert-NoReparseInExistingPath -Path $targetRoot -StopAt $localAppData
+    Assert-NoReparseInExistingPath -Path $marketplacePath -StopAt $localAppData
+    Assert-NoReparseInExistingPath -Path $personalMarketplacePath -StopAt $userProfile
+    Assert-NoReparseInExistingPath -Path $legacyTargetRoot -StopAt $userProfile
     Assert-NoReparseInExistingPath -Path $reportPath -StopAt $localAppData
     $reportPathValidated = $true
     $packageManifest = Read-AndValidatePackageManifest
@@ -370,6 +443,9 @@ try {
     if ($pythonMajor -ne 3 -or $pythonMinor -lt 10 -or $pythonMinor -gt 12 -or $pythonBits -ne 64) {
         throw "Python must be 64-bit version 3.10-3.12; detected $pythonVersion ${pythonBits}-bit."
     }
+    if ($audioRequested -and $pythonMinor -ne 11) {
+        throw "Full Auto-Cut Lite deployment requires 64-bit Python 3.11 for the isolated audio runtime; detected $pythonVersion."
+    }
     $pythonEvidence.version = $pythonVersion
     $pythonEvidence.bits = $pythonBits
     $report.components.python = $pythonEvidence
@@ -379,6 +455,8 @@ try {
     if ($codexEvidence.status -ne 'detected') {
         throw 'No usable Codex CLI was found. Install Codex CLI, or install Node.js so the official npm CLI fallback can run.'
     }
+    $marketplaceWasConfigured = Test-CodexMarketplaceConfigured -Evidence $codexEvidence -Name $marketplaceName -Root $marketplaceRoot
+    $namedPluginWasInstalled = Test-CodexPluginInstalled -Evidence $codexEvidence -PluginReference ($pluginName + '@' + $marketplaceName)
     if ($ValidateOnly) {
         Write-Output "package_validation=pass"
         Write-Output "environment_validation=pass"
@@ -386,6 +464,9 @@ try {
         Write-Output "plugin_version=$($packageManifest.version)"
         Write-Output "python_version=$pythonVersion"
         Write-Output "python_bits=$pythonBits"
+        Write-Output "audio_runtime=$(if ($audioRequested) { 'required_separate' } else { 'skipped_by_request' })"
+        Write-Output "marketplace_name=$marketplaceName"
+        Write-Output "marketplace_display_name=$marketplaceDisplayName"
         Write-Output "codex_invocation=$($codexEvidence.invocation)"
         return
     }
@@ -419,19 +500,37 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw 'Failed to install the Auto-Cut runtime dependencies.'
     }
-    if ($WithAudio) {
-        & $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\requirements-audio.lock')
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to install the optional audio restoration dependencies.'
-        }
-    }
     & $runtimePython '-m' 'pip' 'check'
     if ($LASTEXITCODE -ne 0) {
         throw 'The isolated Auto-Cut Python environment failed pip check.'
     }
     $report.components.python.runtime_path = $runtimePython
     $report.components.python.dependencies = 'installed'
-    $report.components.python.audio_dependencies = $(if ($WithAudio) { 'installed' } else { 'not_requested' })
+
+    $audioVenv = Join-Path $targetRoot 'runtime\.venv-audio'
+    $audioPython = Join-Path $audioVenv 'Scripts\python.exe'
+    if ($audioRequested) {
+        if (-not (Test-Path -LiteralPath $audioPython -PathType Leaf)) {
+            & $pythonEvidence.path '-m' 'venv' $audioVenv
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Failed to create the isolated Auto-Cut audio environment.'
+            }
+        }
+        & $audioPython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\requirements-audio.lock')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Failed to install the isolated audio restoration dependencies.'
+        }
+        & $audioPython '-m' 'pip' 'check'
+        if ($LASTEXITCODE -ne 0) {
+            throw 'The isolated Auto-Cut audio environment failed pip check.'
+        }
+    }
+    $report.components.audio_runtime = [ordered]@{
+        status = $(if ($audioRequested) { 'installed' } else { 'skipped_by_request' })
+        runtime_path = $(if ($audioRequested) { $audioPython } else { $null })
+        environment = 'separate'
+        requirements = 'runtime/requirements-audio.lock'
+    }
 
     $larkEvidence = Get-CommandEvidence -Name 'lark-cli'
     $strictUserMode = $false
@@ -464,18 +563,64 @@ try {
     $report.components.ffmpeg = Get-CommandEvidence -Name 'ffmpeg'
     $report.components.ffprobe = Get-CommandEvidence -Name 'ffprobe'
 
-    $helper = Join-Path $targetRoot 'installer\register_personal_marketplace.py'
-    $registrationOutput = & $pythonEvidence.path $helper 'register' '--plugin-dir' $targetRoot '--marketplace-path' $marketplacePath '--json'
+    $helper = Join-Path $targetRoot 'installer\manage_named_marketplace.py'
+    $registrationOutput = & $pythonEvidence.path $helper 'register-named' '--plugin-dir' $targetRoot '--marketplace-root' $marketplaceRoot '--json'
     if ($LASTEXITCODE -ne 0) {
-        throw "Personal marketplace registration failed: $registrationOutput"
+        throw "Named marketplace registration failed: $registrationOutput"
     }
     $marketplaceRegistration = $registrationOutput | ConvertFrom-Json
     $report.marketplace_name = $marketplaceRegistration.marketplace_name
+    $report.marketplace_display_name = $marketplaceRegistration.marketplace_display_name
     $report.marketplace_backup_path = $marketplaceRegistration.marketplace_backup_path
 
-    Invoke-CodexPluginAdd -Evidence $codexEvidence -PluginReference ($pluginName + '@' + $marketplaceRegistration.marketplace_name)
+    if (-not (Test-CodexMarketplaceConfigured -Evidence $codexEvidence -Name $marketplaceName -Root $marketplaceRoot)) {
+        $marketplaceAddOutput = @(Invoke-CodexCommand -Evidence $codexEvidence -Arguments @('plugin', 'marketplace', 'add', $marketplaceRoot, '--json') 2>&1)
+        if ($LASTEXITCODE -ne 0 -and
+            -not (Test-CodexMarketplaceConfigured -Evidence $codexEvidence -Name $marketplaceName -Root $marketplaceRoot)) {
+            throw "Codex rejected the named marketplace: $($marketplaceAddOutput -join ' ')"
+        }
+    }
+    if (-not (Test-CodexMarketplaceConfigured -Evidence $codexEvidence -Name $marketplaceName -Root $marketplaceRoot)) {
+        throw 'Codex did not retain the Auto-Cut Lite marketplace registration.'
+    }
+
+    $pluginReference = $pluginName + '@' + $marketplaceName
+    Invoke-CodexCommand -Evidence $codexEvidence -Arguments @('plugin', 'add', $pluginReference, '--json')
     if ($LASTEXITCODE -ne 0) {
-        throw 'Codex rejected the plugin installation command.'
+        throw 'Codex rejected the Auto-Cut Lite plugin installation command.'
+    }
+    if (-not (Test-CodexPluginInstalled -Evidence $codexEvidence -PluginReference $pluginReference)) {
+        throw 'Codex did not report the named-marketplace plugin as installed.'
+    }
+
+    $legacyReference = $pluginName + '@personal'
+    if (Test-CodexPluginInstalled -Evidence $codexEvidence -PluginReference $legacyReference) {
+        $legacyRemoveOutput = @(Invoke-CodexCommand -Evidence $codexEvidence -Arguments @('plugin', 'remove', $legacyReference, '--json') 2>&1)
+        if ($LASTEXITCODE -ne 0 -or (Test-CodexPluginInstalled -Evidence $codexEvidence -PluginReference $legacyReference)) {
+            throw "Codex could not remove the legacy personal installation: $($legacyRemoveOutput -join ' ')"
+        }
+    }
+    $cleanupOutput = & $pythonEvidence.path $helper 'remove-personal' '--marketplace-path' $personalMarketplacePath '--json'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Legacy personal marketplace cleanup failed: $cleanupOutput"
+    }
+    $personalMarketplaceCleanup = $cleanupOutput | ConvertFrom-Json
+    $report.legacy_personal_entry_action = $personalMarketplaceCleanup.entry_action
+
+    if (Test-Path -LiteralPath $legacyTargetRoot -PathType Container) {
+        $legacyManifest = Join-Path $legacyTargetRoot '.codex-plugin\plugin.json'
+        if (-not (Test-Path -LiteralPath $legacyManifest -PathType Leaf)) {
+            throw "Refusing to move an unverified legacy plugin directory: $legacyTargetRoot"
+        }
+        $legacyIdentity = Get-Content -LiteralPath $legacyManifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($legacyIdentity.name -ne $pluginName) {
+            throw "Refusing to move a different legacy plugin directory: $legacyTargetRoot"
+        }
+        $legacyBackupRoot = Join-Path $stateRoot 'legacy-personal-backups'
+        New-Item -ItemType Directory -Path $legacyBackupRoot -Force | Out-Null
+        $legacyBackup = Join-Path $legacyBackupRoot ('auto-cut-lite.' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '.' + [Guid]::NewGuid().ToString('N'))
+        [System.IO.Directory]::Move($legacyTargetRoot, $legacyBackup)
+        $report.legacy_personal_plugin_backup_path = $legacyBackup
     }
 
     $pending = [System.Collections.Generic.List[string]]::new()
@@ -486,6 +631,7 @@ try {
     $pending.Add('Authorize Feishu document access as the current user when first prompted.')
     if (-not ($legacyAsr -or $apiKeyAsr)) { $pending.Add('Configure ASR credentials locally on this computer.') }
     elseif ($report.components.asr.validation -ne 'validated') { $pending.Add('Verify ASR credentials with a real alignment request.') }
+    if (-not $audioRequested) { $pending.Add('Re-run deployment without -SkipAudio to install the isolated audio runtime.') }
 
     $report.pending_user_actions = $pending.ToArray()
     $report.deployment_status = 'installed'
@@ -503,9 +649,37 @@ catch {
     $originalError = $_.Exception.Message
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
 
-    if ($null -ne $marketplaceRegistration) {
+    if ($null -ne $codexEvidence -and -not $namedPluginWasInstalled) {
         try {
-            $helperForRollback = Join-Path $packageRoot 'installer\register_personal_marketplace.py'
+            $namedReference = $pluginName + '@' + $marketplaceName
+            if (Test-CodexPluginInstalled -Evidence $codexEvidence -PluginReference $namedReference) {
+                Invoke-CodexCommand -Evidence $codexEvidence -Arguments @('plugin', 'remove', $namedReference, '--json') | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Codex plugin remove returned a failure code' }
+            }
+        }
+        catch { $rollbackErrors.Add("Codex plugin rollback failed: $($_.Exception.Message)") }
+    }
+
+    if ($null -ne $personalMarketplaceCleanup -and $personalMarketplaceCleanup.changed) {
+        try {
+            $helperForRollback = Join-Path $packageRoot 'installer\manage_named_marketplace.py'
+            $rollbackArguments = @(
+                $helperForRollback,
+                'rollback',
+                '--marketplace-path', $personalMarketplacePath,
+                '--expected-current-sha256', [string]$personalMarketplaceCleanup.marketplace_sha256,
+                '--backup-path', [string]$personalMarketplaceCleanup.marketplace_backup_path,
+                '--json'
+            )
+            & $pythonEvidence.path @rollbackArguments | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'personal marketplace rollback returned a failure code' }
+        }
+        catch { $rollbackErrors.Add("personal marketplace rollback failed: $($_.Exception.Message)") }
+    }
+
+    if ($null -ne $marketplaceRegistration -and $marketplaceRegistration.changed) {
+        try {
+            $helperForRollback = Join-Path $packageRoot 'installer\manage_named_marketplace.py'
             $rollbackArguments = @(
                 $helperForRollback,
                 'rollback',
@@ -525,6 +699,16 @@ catch {
         catch {
             $rollbackErrors.Add("marketplace rollback failed: $($_.Exception.Message)")
         }
+    }
+
+    if ($null -ne $codexEvidence -and -not $marketplaceWasConfigured) {
+        try {
+            if (Test-CodexMarketplaceConfigured -Evidence $codexEvidence -Name $marketplaceName -Root $marketplaceRoot) {
+                Invoke-CodexCommand -Evidence $codexEvidence -Arguments @('plugin', 'marketplace', 'remove', $marketplaceName, '--json') | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'Codex marketplace remove returned a failure code' }
+            }
+        }
+        catch { $rollbackErrors.Add("Codex marketplace rollback failed: $($_.Exception.Message)") }
     }
 
     if (-not $sourceIsTarget) {

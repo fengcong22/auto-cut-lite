@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "plugin_name": "auto-cut-lite",
+  "plugin_version": "1.2.1",
+  "marketplace": {
+    "name": "auto-cut-lite-marketplace",
+    "display_name": "Auto-Cut Lite"
+  },
+  "runtime_environments": {
+    "main": {
+      "path": ".runtime-venv/Scripts/python.exe",
+      "requirements": "runtime/requirements.txt",
+      "default": "installed"
+    },
+    "audio": {
+      "path": "runtime/.venv-audio/Scripts/python.exe",
+      "requirements": "runtime/requirements-audio.lock",
+      "default": "installed",
+      "isolation": "separate"
+    }
+  },
+  "capabilities": [
+    {
+      "id": "skill_surface",
+      "required_paths": [
+        "skills/auto-cut/SKILL.md",
+        "skills/auto-cut-lite/SKILL.md",
+        "skills/auto-cut-final-acceptance/SKILL.md"
+      ]
+    },
+    {
+      "id": "review_document_and_replacement_timebase",
+      "required_paths": [
+        "runtime/scripts/jy_wrapper.py",
+        "runtime/scripts/review_job.py",
+        "runtime/scripts/utils/replacement_timebase.py",
+        "runtime/scripts/utils/review_job_compiler.py",
+        "runtime/scripts/utils/review_job_pipeline.py"
+      ]
+    },
+    {
+      "id": "editable_jianying_revision",
+      "required_paths": [
+        "runtime/scripts/core/review_marker_ops.py",
+        "runtime/scripts/utils/lite_revision.py",
+        "runtime/scripts/utils/revision_evidence.py",
+        "runtime/scripts/utils/revision_runner.py",
+        "runtime/scripts/utils/revision_validation.py",
+        "runtime/scripts/vendor/pyJianYingDraft/__init__.py"
+      ]
+    },
+    {
+      "id": "asr_audio_precision",
+      "required_paths": [
+        "runtime/audio_sound/volc_asr.py",
+        "runtime/scripts/audio/volc_word_align.py",
+        "runtime/scripts/audio/remove_spoken_segments.py",
+        "runtime/scripts/portable/volc_setup.py",
+        "runtime/scripts/utils/volc_asr_onboarding.py"
+      ]
+    },
+    {
+      "id": "audio_restoration",
+      "required_paths": [
+        "runtime/audio_sound/cli.py",
+        "runtime/audio_sound/pipeline.py",
+        "runtime/audio_sound/skill_workflow.py",
+        "runtime/presets/audio_sound/final.json",
+        "runtime/scripts/audio/audio_cleanup.py",
+        "runtime/scripts/audio/audio_skill_workflow.py",
+        "runtime/requirements-audio.lock"
+      ]
+    },
+    {
+      "id": "animation_text_bgm_and_favorites",
+      "required_paths": [
+        "runtime/scripts/cloud_manager.py",
+        "runtime/scripts/sync_jy_assets.py",
+        "runtime/scripts/sync_jy_favorite_text_assets.py",
+        "runtime/scripts/utils/animation_validation.py",
+        "runtime/scripts/utils/oral_video_validator.py",
+        "runtime/data/cloud_music_library.csv",
+        "runtime/data/cloud_sound_effects.csv",
+        "runtime/data/cloud_text_styles.csv",
+        "runtime/data/text_animations.csv"
+      ]
+    },
+    {
+      "id": "pointer_profile_onboarding",
+      "required_paths": [
+        "skills/auto-cut-profile-onboarding/scripts/profile_registry.py",
+        "skills/auto-cut-profile-onboarding/scripts/project_bindings.py",
+        "skills/auto-cut-profile-onboarding/assets/pointer-material-reference.png",
+        "skills/auto-cut-profile-onboarding/assets/scale-reference-screenshot.png",
+        "runtime/scripts/utils/pointer_validation.py"
+      ]
+    },
+    {
+      "id": "portable_delivery_and_relink",
+      "required_paths": [
+        "runtime/scripts/portable_project_tool.py",
+        "runtime/scripts/portable_project/packager.py",
+        "runtime/scripts/portable_project/validator.py",
+        "runtime/scripts/utils/lite_package.py",
+        "runtime/tools/relink_tool/Auto-Cut剪映素材重链工具.exe"
+      ]
+    },
+    {
+      "id": "named_marketplace_deployment",
+      "required_paths": [
+        "deploy-to-codex.ps1",
+        "install.ps1",
+        "installer/manage_named_marketplace.py",
+        "runtime/requirements.txt",
+        "runtime/requirements-audio.lock"
+      ]
+    }
+  ]
+}

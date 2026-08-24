@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -48,6 +49,7 @@ def _skill_directories() -> dict[str, Path]:
 def test_plugin_exposes_the_complete_generic_skill_surface() -> None:
     skills = _skill_directories()
     assert set(skills) == EXPECTED_SKILLS
+    assert build_lite_plugin.EXPECTED_SKILLS == EXPECTED_SKILLS
 
     for name, directory in skills.items():
         skill_text = (directory / "SKILL.md").read_text(encoding="utf-8-sig")
@@ -123,3 +125,32 @@ def test_plugin_skill_text_has_no_private_or_source_checkout_markers() -> None:
         assert "../../examples/" not in text
         assert "tmp/c2597" not in text
     assert findings == []
+
+
+def test_portable_capability_contract_requires_named_marketplace_and_split_runtimes() -> None:
+    payload = json.loads(
+        (PLUGIN_ROOT / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8")
+    )
+
+    assert payload["plugin_name"] == "auto-cut-lite"
+    assert payload["plugin_version"] == "1.2.1"
+    assert payload["marketplace"] == {
+        "name": "auto-cut-lite-marketplace",
+        "display_name": "Auto-Cut Lite",
+    }
+    assert payload["runtime_environments"]["main"]["default"] == "installed"
+    audio = payload["runtime_environments"]["audio"]
+    assert audio["default"] == "installed"
+    assert audio["isolation"] == "separate"
+    capability_ids = {row["id"] for row in payload["capabilities"]}
+    assert capability_ids == {
+        "skill_surface",
+        "review_document_and_replacement_timebase",
+        "editable_jianying_revision",
+        "asr_audio_precision",
+        "audio_restoration",
+        "animation_text_bgm_and_favorites",
+        "pointer_profile_onboarding",
+        "portable_delivery_and_relink",
+        "named_marketplace_deployment",
+    }

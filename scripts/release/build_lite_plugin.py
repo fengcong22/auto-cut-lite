@@ -20,8 +20,27 @@ from typing import Iterable
 
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.1"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
+EXPECTED_SKILLS = {
+    "auto-cut",
+    "auto-cut-animation-timing-revision",
+    "auto-cut-audio-peak-target",
+    "auto-cut-audio-restoration",
+    "auto-cut-basic-oral-video",
+    "auto-cut-draft-retention",
+    "auto-cut-editable-ad-revision",
+    "auto-cut-favorite-text-assets",
+    "auto-cut-final-acceptance",
+    "auto-cut-lite",
+    "auto-cut-local-image-overlay-revision",
+    "auto-cut-music-library-bgm",
+    "auto-cut-pointer-targeting",
+    "auto-cut-profile-onboarding",
+    "auto-cut-review-audio-precision",
+    "auto-cut-revision-draft",
+    "auto-cut-text-safezone-animation-revision",
+}
 FORBIDDEN_MARKERS = (
     "高中历史",
     "high-school-history",
@@ -158,11 +177,11 @@ def _write_text(path: Path, text: str) -> None:
 def _write_target_setup(stage: Path) -> None:
     _write_text(
         stage / "install.ps1",
-        """[CmdletBinding()]\nparam([switch]$WithAudio)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio\nexit $LASTEXITCODE\n""",
+        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio\nexit $LASTEXITCODE\n""",
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\n1. Install 64-bit Python 3.10-3.12, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`; add `-WithAudio` when audio restoration dependencies are needed.\n3. Start a new Codex thread after deployment.\n4. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n5. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n6. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
+        """# Target setup\n\n1. Install 64-bit Python 3.11, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`. The full main and audio runtimes are installed by default in separate virtual environments. Use `-SkipAudio` only for an explicit reduced installation.\n3. The installer registers a dedicated marketplace named `auto-cut-lite-marketplace` with display name `Auto-Cut Lite`, migrates any old `auto-cut-lite@personal` installation, and asks Codex to install `auto-cut-lite@auto-cut-lite-marketplace`.\n4. Start a new Codex thread after deployment.\n5. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n6. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n7. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`. The ZIP is intentionally compact because pinned Python dependencies are installed on the target computer; after full deployment the isolated environments consume substantially more storage.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -197,6 +216,72 @@ def _tree_inventory(root: Path) -> list[dict[str, object]]:
         relative = _safe_relative(path.relative_to(root).as_posix())
         rows.append({"path": relative, "size": path.stat().st_size, "sha256": _sha256(path)})
     return rows
+
+
+def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
+    contract_path = stage / "PORTABLE-CAPABILITIES.json"
+    try:
+        payload = json.loads(contract_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"portable capability contract is invalid: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("portable capability contract root must be an object")
+    if payload.get("plugin_name") != PLUGIN_NAME or payload.get("plugin_version") != PLUGIN_VERSION:
+        raise ValueError("portable capability contract identity does not match the plugin")
+    marketplace = payload.get("marketplace")
+    if not isinstance(marketplace, dict) or marketplace.get("name") != "auto-cut-lite-marketplace" or marketplace.get("display_name") != "Auto-Cut Lite":
+        raise ValueError("portable capability contract marketplace identity is invalid")
+    environments = payload.get("runtime_environments")
+    if not isinstance(environments, dict):
+        raise ValueError("portable capability contract has no runtime environments")
+    main = environments.get("main")
+    audio = environments.get("audio")
+    if not isinstance(main, dict) or main.get("default") != "installed":
+        raise ValueError("main runtime must be installed by default")
+    if not isinstance(audio, dict) or audio.get("default") != "installed" or audio.get("isolation") != "separate":
+        raise ValueError("audio runtime must be installed by default in a separate environment")
+
+    skills_root = stage / "skills"
+    skill_names = {path.name for path in skills_root.iterdir() if path.is_dir()}
+    if skill_names != EXPECTED_SKILLS:
+        missing = sorted(EXPECTED_SKILLS - skill_names)
+        extra = sorted(skill_names - EXPECTED_SKILLS)
+        raise ValueError(f"portable skill surface mismatch: missing={missing}, extra={extra}")
+    for name in sorted(skill_names):
+        for relative in ("SKILL.md", "agents/openai.yaml"):
+            path = skills_root / name / relative
+            if not path.is_file() or _is_reparse(path):
+                raise ValueError(f"portable skill metadata is missing or unsafe: {name}/{relative}")
+
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list) or not capabilities:
+        raise ValueError("portable capability contract has no capabilities")
+    capability_ids: set[str] = set()
+    required_count = 0
+    for capability in capabilities:
+        if not isinstance(capability, dict) or not isinstance(capability.get("id"), str):
+            raise ValueError("portable capability contract contains an invalid capability")
+        capability_id = capability["id"]
+        if capability_id in capability_ids:
+            raise ValueError(f"duplicate portable capability id: {capability_id}")
+        capability_ids.add(capability_id)
+        required_paths = capability.get("required_paths")
+        if not isinstance(required_paths, list) or not required_paths:
+            raise ValueError(f"portable capability has no required paths: {capability_id}")
+        for raw_path in required_paths:
+            if not isinstance(raw_path, str):
+                raise ValueError(f"portable capability path is invalid: {capability_id}")
+            relative = _safe_relative(raw_path)
+            path = stage.joinpath(*PurePosixPath(relative).parts)
+            if not path.is_file() or _is_reparse(path):
+                raise ValueError(f"portable capability path is missing or unsafe: {capability_id}:{relative}")
+            required_count += 1
+    return {
+        "status": "pass",
+        "capability_count": len(capability_ids),
+        "required_path_count": required_count,
+        "skill_count": len(skill_names),
+    }
 
 
 def _privacy_scan(root: Path) -> list[str]:
@@ -256,6 +341,7 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
         _copy_tree(source_plugin, stage)
         _copy_runtime(repo, stage)
         _write_target_setup(stage)
+        capability_evidence = _validate_portable_capabilities(stage)
         findings = _privacy_scan(stage)
         if findings:
             raise ValueError("plugin privacy scan failed: " + "; ".join(findings[:20]))
@@ -281,6 +367,10 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "archive_entry_count": entry_count,
             "staged_tree_sha256": hashlib.sha256(json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
             "runtime_allowlist": True,
+            "portable_capability_closure": capability_evidence["status"],
+            "portable_capability_count": capability_evidence["capability_count"],
+            "portable_required_path_count": capability_evidence["required_path_count"],
+            "packaged_skill_count": capability_evidence["skill_count"],
             "privacy_scan": "pass",
             "zip_crc": "pass",
             "zip_path_safety": "pass",
@@ -288,8 +378,12 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "credentials_bundled": False,
             "private_subject_assets_bundled": False,
             "one_command_deployer": "deploy-to-codex.ps1",
-            "personal_marketplace_registration": "atomic_structured_helper",
-            "runtime_dependency_installation": "isolated_venv_automatic",
+            "marketplace_name": "auto-cut-lite-marketplace",
+            "marketplace_display_name": "Auto-Cut Lite",
+            "named_marketplace_registration": "atomic_structured_helper",
+            "legacy_personal_migration": "automatic",
+            "runtime_dependency_installation": "separate_main_and_audio_venvs_automatic",
+            "audio_runtime_default": "installed",
             "deployment_report": "%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json",
             "readiness_model": "installed_can_require_user_configuration",
             "codex_cli_fallback": "@openai/codex@0.149.1_via_npx",
