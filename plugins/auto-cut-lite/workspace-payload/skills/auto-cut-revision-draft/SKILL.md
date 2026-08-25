@@ -16,7 +16,7 @@ Use this skill for revision-driven JianYing draft work where the output must rem
 
 This skill is not a generic "make a fresh video" workflow. It is for modifying an existing draft or generating a reviewable replacement draft while preserving source visibility, edit history shape, and review labels.
 
-This rule set is repository-scoped. Keep it with this repository under `skills/auto-cut-revision-draft/`. It should travel with the repo and be reviewed as part of the repo, not installed as a machine-wide default rule.
+This rule set is repository-scoped. Deploy it under `.codex/skills/auto-cut-revision-draft/`. It should travel with the workspace and be reviewed as part of it, not installed as a machine-wide default rule.
 
 ## Iron Law
 

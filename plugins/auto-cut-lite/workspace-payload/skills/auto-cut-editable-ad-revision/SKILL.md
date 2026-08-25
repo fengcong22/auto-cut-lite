@@ -14,7 +14,7 @@ Before executing this skill from the distributed plugin, read the [portable runt
 
 Use this skill for recurring JianYing ad-draft revision work where the user wants the project to stay editable after BGM swaps, flower-text moves, subtitle moves, overlap fixes, and portrait color tuning.
 
-This rule set is repository-scoped. Keep it in this repository under `skills/auto-cut-editable-ad-revision/` so other users working in this repo inherit the same editing contract instead of relying on a machine-wide skill.
+This rule set is repository-scoped. Deploy it under `.codex/skills/auto-cut-editable-ad-revision/` so users working in this workspace inherit the same editing contract instead of relying on a machine-wide skill.
 
 ## Core Rules
 

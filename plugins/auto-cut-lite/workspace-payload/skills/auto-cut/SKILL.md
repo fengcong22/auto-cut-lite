@@ -96,7 +96,7 @@ For mixed tasks, route ordinary pointer work to `auto-cut-pointer-targeting` fir
 
 ## Plugin Contract
 
-- Treat this plugin's `skills/` as the skill source and its `runtime/` as the only execution source.
+- Treat this plugin's `workspace-payload/skills/` as the packaged skill source and its `runtime/` as the only execution source.
 - Keep `workflow_mode=lite` for every route, including direct focused-skill invocation.
 - Keep the total router small; put detailed domain rules in focused `auto-cut-*` subskills.
 - Do not duplicate conflicting rules across skills. Update the smallest responsible skill.

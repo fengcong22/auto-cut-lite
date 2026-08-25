@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -10,15 +10,10 @@ from pathlib import Path
 
 import pytest
 
+from scripts.release import build_lite_plugin
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HELPER_PATH = (
-    REPO_ROOT
-    / "plugins"
-    / "auto-cut-lite"
-    / "installer"
-    / "manage_named_marketplace.py"
-)
+HELPER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "manage_named_marketplace.py"
 DEPLOYER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "deploy-to-codex.ps1"
 
 
@@ -34,9 +29,7 @@ def _plugin(tmp_path: Path) -> Path:
     plugin = tmp_path / "plugins" / "auto-cut-lite"
     manifest = plugin / ".codex-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.2.1"}), encoding="utf-8"
-    )
+    manifest.write_text(json.dumps({"name": "auto-cut-lite", "version": "1.2.1"}), encoding="utf-8")
     return plugin
 
 
@@ -174,7 +167,10 @@ def test_remove_personal_entry_preserves_other_plugins_and_can_rollback(tmp_path
         "interface": {"displayName": "Personal"},
         "plugins": [
             {"name": "kept", "source": {"source": "local", "path": "./plugins/kept"}},
-            {"name": "auto-cut-lite", "source": {"source": "local", "path": "./plugins/auto-cut-lite"}},
+            {
+                "name": "auto-cut-lite",
+                "source": {"source": "local", "path": "./plugins/auto-cut-lite"},
+            },
         ],
     }
     original_bytes = (json.dumps(original, indent=2) + "\n").encode("utf-8")
@@ -223,10 +219,29 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
     assert "$pluginName + '@' + $marketplaceName" in deployer
     assert "'plugin', 'remove', $legacyReference" in deployer
     assert "'remove-personal'" in deployer
+    assert "[string]$WorkspaceRoot" in deployer
+    assert (
+        "$defaultWorkspaceRoot = Join-Path $userProfile 'Documents\\Codex\\Auto-cut-lite'"
+        in deployer
+    )
+    assert "$workspaceRootSource = 'existing_receipt'" in deployer
+    assert "WorkspaceRoot must be an absolute path" in deployer
+    assert "WorkspaceRoot folder name must be exactly" in deployer
+    assert "'installer/manage_workspace.py'" in deployer
+    assert "workspace_scope=repo" in deployer
+    assert "Plugin manifest must not expose user-scoped skills" in deployer
+    assert "plugin_manifest_path = $pluginManifestInstalledPath" in deployer
+    assert "runtime_root = $runtimeRoot" in deployer
+    assert deployer.index("$workspaceRollbackNeeded = $true") < deployer.index(
+        "$workspaceInstall = $workspaceOutput | ConvertFrom-Json"
+    )
     assert "$audioRequested = -not $SkipAudio" in deployer
     assert "$audioVenv = Join-Path $targetRoot 'runtime\\.venv-audio'" in deployer
     assert "& $audioPython '-m' 'pip' 'install'" in deployer
-    assert "& $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\\requirements-audio.lock')" not in deployer
+    assert (
+        "& $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\\requirements-audio.lock')"
+        not in deployer
+    )
 
 
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
@@ -235,12 +250,19 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     package = tmp_path / "auto-cut-lite"
     files = {
         ".codex-plugin/plugin.json": json.dumps(
-            {"name": "auto-cut-lite", "version": "1.2.1"}
+            {"name": "auto-cut-lite", "version": "1.3.0"}
         ).encode(),
+        "AGENTS.md": b"# Portable workspace rules\n",
         "installer/manage_named_marketplace.py": b"# validation fixture\n",
+        "installer/manage_workspace.py": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
         "runtime/requirements-audio.lock": b"# validation fixture\n",
     }
+    for skill_name in sorted(build_lite_plugin.EXPECTED_SKILLS):
+        files[f"workspace-payload/skills/{skill_name}/SKILL.md"] = (
+            f"---\nname: {skill_name}\ndescription: fixture\n---\n"
+        ).encode()
+        files[f"workspace-payload/skills/{skill_name}/agents/openai.yaml"] = b"interface: {}\n"
     for relative, data in files.items():
         target = package / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -257,7 +279,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         for relative, data in sorted(files.items())
     ]
     (package / "PACKAGE-MANIFEST.json").write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.2.1", "files": manifest_rows}),
+        json.dumps({"name": "auto-cut-lite", "version": "1.3.0", "files": manifest_rows}),
         encoding="utf-8",
     )
 
@@ -267,6 +289,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     process_environment = os.environ.copy()
     process_environment["PATH"] = str(command_bin) + os.pathsep + process_environment["PATH"]
 
+    custom_workspace = tmp_path / "OtherWorkspaceParent" / "Auto-cut-lite"
     result = subprocess.run(
         [
             "powershell",
@@ -276,6 +299,8 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
             "-File",
             str(deployer),
             "-ValidateOnly",
+            "-WorkspaceRoot",
+            str(custom_workspace),
         ],
         capture_output=True,
         text=True,
@@ -288,13 +313,43 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "package_validation=pass" in result.stdout
     assert "environment_validation=pass" in result.stdout
-    assert "plugin_version=1.2.1" in result.stdout
+    assert "plugin_version=1.3.0" in result.stdout
     assert "python_version=3.11." in result.stdout
     assert "python_bits=64" in result.stdout
     assert "audio_runtime=required_separate" in result.stdout
     assert "marketplace_name=auto-cut-lite-marketplace" in result.stdout
     assert "marketplace_display_name=Auto-Cut Lite" in result.stdout
+    assert f"workspace_root={custom_workspace}" in result.stdout
+    assert "workspace_root_source=parameter" in result.stdout
+    assert "workspace_root_customizable=true" in result.stdout
+    assert "workspace_label=Auto-cut-lite" in result.stdout
+    assert "workspace_scope=repo" in result.stdout
+    assert "workspace_skill_count=17" in result.stdout
+    assert "workspace_skill_payload=workspace-payload/skills" in result.stdout
+    assert "plugin_top_level_skills_present=false" in result.stdout
     assert "codex_invocation=direct" in result.stdout
+
+    invalid_workspace = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-ValidateOnly",
+            "-WorkspaceRoot",
+            str(tmp_path / "wrong-name"),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=process_environment,
+        check=False,
+    )
+    assert invalid_workspace.returncode != 0
+    assert "folder name must be exactly" in (invalid_workspace.stdout + invalid_workspace.stderr)
 
     (command_bin / "codex.cmd").write_text("@exit /b 1\n", encoding="ascii")
     (command_bin / "npx.cmd").write_text("@exit /b 0\n", encoding="ascii")
@@ -328,5 +383,10 @@ def test_plugin_and_builder_versions_match() -> None:
     builder = (REPO_ROOT / "scripts" / "release" / "build_lite_plugin.py").read_text(
         encoding="utf-8"
     )
-    assert plugin_manifest["version"] == "1.2.1"
-    assert 'PLUGIN_VERSION = "1.2.1"' in builder
+    capabilities = json.loads(
+        (REPO_ROOT / "plugins" / "auto-cut-lite" / "PORTABLE-CAPABILITIES.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert f'PLUGIN_VERSION = "{plugin_manifest["version"]}"' in builder
+    assert capabilities["plugin_version"] == plugin_manifest["version"]

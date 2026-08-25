@@ -40,7 +40,7 @@ Classify the explicit command before asking for identity. `identity_policy` is a
   "list-all": {
     "example": "查看当前有哪些学科指向物素材库",
     "identity_policy": "none",
-    "command": "python skills/auto-cut-profile-onboarding/scripts/profile_registry.py list --root <registry-root> --json"
+    "command": "python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py list --root <registry-root> --json"
   },
   "create": {
     "example": "建立阶段A类别A指向物素材库",
@@ -80,7 +80,7 @@ Pointer requests such as `这里加一个小手` or `奥地利这里加个指向
 Generate internal IDs only from the explicit names:
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py identity --stage-name <stage_name> --subject-name <subject_name> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py identity --stage-name <stage_name> --subject-name <subject_name> --json
 ```
 
 Store one display-name alias and one compatibility evidence row:
@@ -103,7 +103,7 @@ These compatibility fields are audit metadata only and must never select a profi
 ## 2. Check the Exact Profile
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py check --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py check --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
 ```
 
 The lookup key is the exact lowercase ASCII `<stage_id>-<subject_id>` pair. 学段或学科不同 means a different profile; no nearest-subject, same-stage, or cross-stage fallback exists.
@@ -121,7 +121,7 @@ A scale reference qualifies only when it is a confirmed full 16:9 frame with les
 When an explicit update/check finds a legacy `hand` asset whose only missing requirement is `media_contract`, migrate from the already stored evidence before requesting any original intake file:
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py migrate-hand-media --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py migrate-hand-media --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
 ```
 
 Migration is valid only when every stored evidence path remains inside the exact profile, every current file matches its stored SHA-256, and the hand decodes as an RGBA PNG. A migration failure leaves the profile and catalogs unchanged; report the invalid stored evidence instead of silently dropping it.
@@ -135,10 +135,10 @@ Use 增量 intake 合并 for an existing readable exact profile. Preserve valid 
 ## 4. Register and Validate
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py register --input <intake.json> --root <registry-root> --json
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py check --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py list --root <registry-root> --json
-python skills/auto-cut-profile-onboarding/scripts/profile_registry.py validate --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py register --input <intake.json> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py check --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py list --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py validate --root <registry-root> --json
 ```
 
 Continue only after the exact check returns `status=ready` and every copied evidence file still matches its stored SHA-256.
@@ -160,7 +160,7 @@ This question is the explicit binding confirmation for a new binding and keeps `
 Resolve `<project_key>` from `project.project_key` in the current revision request, or use the repository's existing `infer_project_family` helper on the current draft name. Use the absolute current draft directory as `<project_path>` and its configured drafts root as `<project_root>`. If this current-project context is unavailable, create/update the profile only and do not guess a binding from course content.
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/project_bindings.py bind --project-key <project_key> --project-path <project_path> --project-root <project_root> --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/project_bindings.py bind --project-key <project_key> --project-path <project_path> --project-root <project_root> --stage-id <stage_id> --subject-id <subject_id> --root <registry-root> --json
 ```
 
 For an explicitly confirmed rebind, repeat the same command with `--rebind`; the function-level equivalent is `allow_rebind=True`. A plain `建立...配置档案` command without current-project binding wording creates the profile only. Project bindings are stored under the target-local profile root in `project-bindings.json`.

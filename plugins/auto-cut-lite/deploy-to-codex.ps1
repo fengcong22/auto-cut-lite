@@ -2,7 +2,8 @@
 param(
     [switch]$WithAudio,
     [switch]$SkipAudio,
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [string]$WorkspaceRoot
 )
 
 Set-StrictMode -Version Latest
@@ -11,6 +12,8 @@ $ErrorActionPreference = 'Stop'
 $pluginName = 'auto-cut-lite'
 $marketplaceName = 'auto-cut-lite-marketplace'
 $marketplaceDisplayName = 'Auto-Cut Lite'
+$workspaceLabel = 'Auto-cut-lite'
+$expectedWorkspaceSkillCount = 17
 $codexNpmPackage = '@openai/codex@0.149.1'
 $startedAt = [DateTime]::UtcNow.ToString('o')
 $packageRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
@@ -23,17 +26,27 @@ $targetRoot = Join-Path $targetParent $pluginName
 $marketplacePath = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
 $personalMarketplacePath = Join-Path $userProfile '.agents\plugins\marketplace.json'
 $legacyTargetRoot = Join-Path (Join-Path $userProfile 'plugins') $pluginName
+$defaultWorkspaceRoot = Join-Path $userProfile 'Documents\Codex\Auto-cut-lite'
+$resolvedWorkspaceRoot = $defaultWorkspaceRoot
+$workspaceRootSource = 'default'
+$workspaceSkillsRoot = Join-Path $resolvedWorkspaceRoot '.codex\skills'
+$workspaceAgentsPath = Join-Path $resolvedWorkspaceRoot 'AGENTS.md'
+$workspaceReceiptPath = Join-Path $stateRoot 'workspace-install-receipt.json'
 $reportPath = Join-Path $stateRoot 'deployment-report.json'
+$pluginManifestInstalledPath = Join-Path $targetRoot '.codex-plugin\plugin.json'
+$runtimeRoot = Join-Path $targetRoot 'runtime'
 $stagingRoot = Join-Path $targetParent ('.auto-cut-lite.staging.' + [Guid]::NewGuid().ToString('N'))
 $pluginBackup = $null
 $marketplaceRegistration = $null
 $personalMarketplaceCleanup = $null
+$workspaceInstall = $null
 $codexEvidence = $null
 $marketplaceWasConfigured = $false
 $namedPluginWasInstalled = $false
 $targetActivated = $false
 $oldTargetBackedUp = $false
 $reportPathValidated = $false
+$workspaceRollbackNeeded = $false
 $sourceIsTarget = [string]::Equals(
     $packageRoot.TrimEnd('\'),
     ([System.IO.Path]::GetFullPath($targetRoot)).TrimEnd('\'),
@@ -41,7 +54,7 @@ $sourceIsTarget = [string]::Equals(
 )
 
 $report = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     plugin_name = $pluginName
     plugin_version = $null
     deployment_status = 'failed'
@@ -50,6 +63,8 @@ $report = [ordered]@{
     finished_at_utc = $null
     package_root = $packageRoot
     target_root = $targetRoot
+    plugin_manifest_path = $pluginManifestInstalledPath
+    runtime_root = $runtimeRoot
     plugin_backup_path = $null
     marketplace_path = $marketplacePath
     marketplace_name = $null
@@ -59,6 +74,22 @@ $report = [ordered]@{
     legacy_personal_plugin_path = $legacyTargetRoot
     legacy_personal_plugin_backup_path = $null
     legacy_personal_entry_action = $null
+    workspace_root = $resolvedWorkspaceRoot
+    workspace_root_source = $workspaceRootSource
+    workspace_root_customizable = $true
+    workspace_root_parameter = 'WorkspaceRoot'
+    workspace_action = $null
+    workspace_relocated_from = $null
+    workspace_label = $workspaceLabel
+    workspace_scope = 'repo'
+    workspace_skills_root = $workspaceSkillsRoot
+    workspace_agents_path = $workspaceAgentsPath
+    workspace_skill_count = 0
+    workspace_skill_payload = 'workspace-payload/skills'
+    plugin_top_level_skills_present = $false
+    workspace_backup_path = $null
+    workspace_receipt_path = $workspaceReceiptPath
+    workspace_open_required = $true
     components = [ordered]@{}
     pending_user_actions = @()
     error = $null
@@ -103,7 +134,7 @@ function Assert-NoReparseInExistingPath {
     $boundary = [System.IO.Path]::GetFullPath($StopAt).TrimEnd('\')
     if (-not $candidate.StartsWith($boundary + '\', [StringComparison]::OrdinalIgnoreCase) -and
         -not [string]::Equals($candidate.TrimEnd('\'), $boundary, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Path escapes the expected user directory: $candidate"
+        throw "Path escapes the expected boundary: $candidate"
     }
     while ($candidate.StartsWith($boundary, [StringComparison]::OrdinalIgnoreCase)) {
         if (Test-Path -LiteralPath $candidate) {
@@ -179,8 +210,11 @@ function Read-AndValidatePackageManifest {
     }
     foreach ($required in @(
         '.codex-plugin/plugin.json',
+        'AGENTS.md',
         'deploy-to-codex.ps1',
         'installer/manage_named_marketplace.py',
+        'installer/manage_workspace.py',
+        'workspace-payload/skills/auto-cut/SKILL.md',
         'runtime/requirements.txt',
         'runtime/requirements-audio.lock'
     )) {
@@ -206,6 +240,22 @@ function Copy-InventoriedPackage {
         Copy-Item -LiteralPath $source -Destination $target
     }
     Copy-Item -LiteralPath (Join-Path $packageRoot 'PACKAGE-MANIFEST.json') -Destination (Join-Path $Destination 'PACKAGE-MANIFEST.json')
+}
+
+function Get-PackagedWorkspaceSkills {
+    $skillsRoot = Join-Path $packageRoot 'workspace-payload\skills'
+    if (-not (Test-Path -LiteralPath $skillsRoot -PathType Container)) {
+        throw 'The package has no workspace skill payload.'
+    }
+    $skills = @(Get-ChildItem -LiteralPath $skillsRoot -Directory -Force | Where-Object {
+        ($_.Name -eq 'auto-cut' -or $_.Name.StartsWith('auto-cut-', [StringComparison]::Ordinal)) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'agents\openai.yaml') -PathType Leaf)
+    })
+    if ($skills.Count -ne $expectedWorkspaceSkillCount) {
+        throw "Workspace skill payload must contain exactly $expectedWorkspaceSkillCount skills; found $($skills.Count)."
+    }
+    return $skills
 }
 
 function Get-CommandEvidence {
@@ -400,11 +450,62 @@ try {
         throw 'Windows user profile paths could not be resolved.'
     }
 
+    $previousWorkspaceReceipt = $null
+    if (Test-Path -LiteralPath $workspaceReceiptPath -PathType Leaf) {
+        try {
+            $previousWorkspaceReceipt = Get-Content -LiteralPath $workspaceReceiptPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
+        catch {
+            throw "Existing workspace receipt is invalid: $($_.Exception.Message)"
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
+        if (-not [System.IO.Path]::IsPathRooted($WorkspaceRoot)) {
+            throw 'WorkspaceRoot must be an absolute path.'
+        }
+        $resolvedWorkspaceRoot = [System.IO.Path]::GetFullPath($WorkspaceRoot)
+        $workspaceRootSource = 'parameter'
+    }
+    elseif ($null -ne $previousWorkspaceReceipt) {
+        if ($previousWorkspaceReceipt.status -eq 'installed' -and
+            -not [string]::IsNullOrWhiteSpace([string]$previousWorkspaceReceipt.workspace_root)) {
+            $previousWorkspaceRoot = [string]$previousWorkspaceReceipt.workspace_root
+            if (-not [System.IO.Path]::IsPathRooted($previousWorkspaceRoot)) {
+                throw 'Existing workspace receipt contains a non-absolute workspace root.'
+            }
+            $resolvedWorkspaceRoot = [System.IO.Path]::GetFullPath($previousWorkspaceRoot)
+            $workspaceRootSource = 'existing_receipt'
+        }
+    }
+    $workspaceLeaf = Split-Path -Leaf $resolvedWorkspaceRoot.TrimEnd('\', '/')
+    if (-not [string]::Equals($workspaceLeaf, $workspaceLabel, [StringComparison]::Ordinal)) {
+        throw "WorkspaceRoot folder name must be exactly: $workspaceLabel"
+    }
+    $workspaceAnchor = [System.IO.Path]::GetPathRoot($resolvedWorkspaceRoot)
+    if ([string]::IsNullOrWhiteSpace($workspaceAnchor)) {
+        throw 'WorkspaceRoot has no filesystem anchor.'
+    }
+    $workspaceComparable = $resolvedWorkspaceRoot.TrimEnd('\')
+    $stateComparable = $stateRoot.TrimEnd('\')
+    if ([string]::Equals($workspaceComparable, $stateComparable, [StringComparison]::OrdinalIgnoreCase) -or
+        $workspaceComparable.StartsWith($stateComparable + '\', [StringComparison]::OrdinalIgnoreCase) -or
+        $stateComparable.StartsWith($workspaceComparable + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'WorkspaceRoot cannot overlap the Auto-Cut runtime state root.'
+    }
+    $workspaceSkillsRoot = Join-Path $resolvedWorkspaceRoot '.codex\skills'
+    $workspaceAgentsPath = Join-Path $resolvedWorkspaceRoot 'AGENTS.md'
+    $report.workspace_root = $resolvedWorkspaceRoot
+    $report.workspace_root_source = $workspaceRootSource
+    $report.workspace_skills_root = $workspaceSkillsRoot
+    $report.workspace_agents_path = $workspaceAgentsPath
+
     Assert-RegularTree -Root $packageRoot
     Assert-NoReparseInExistingPath -Path $targetRoot -StopAt $localAppData
     Assert-NoReparseInExistingPath -Path $marketplacePath -StopAt $localAppData
     Assert-NoReparseInExistingPath -Path $personalMarketplacePath -StopAt $userProfile
     Assert-NoReparseInExistingPath -Path $legacyTargetRoot -StopAt $userProfile
+    Assert-NoReparseInExistingPath -Path $resolvedWorkspaceRoot -StopAt $workspaceAnchor
+    Assert-NoReparseInExistingPath -Path $workspaceReceiptPath -StopAt $localAppData
     Assert-NoReparseInExistingPath -Path $reportPath -StopAt $localAppData
     $reportPathValidated = $true
     $packageManifest = Read-AndValidatePackageManifest
@@ -415,6 +516,13 @@ try {
     if ($pluginManifest.name -ne $pluginName -or $pluginManifest.version -ne $packageManifest.version) {
         throw 'Plugin manifest identity does not match the package manifest.'
     }
+    if (@($pluginManifest.PSObject.Properties.Name) -contains 'skills') {
+        throw 'Plugin manifest must not expose user-scoped skills; use the workspace skill payload.'
+    }
+    if (Test-Path -LiteralPath (Join-Path $packageRoot 'skills')) {
+        throw 'Plugin package must not contain a top-level skills directory.'
+    }
+    $packagedWorkspaceSkills = @(Get-PackagedWorkspaceSkills)
     $pythonEvidence = Get-CommandEvidence -Name 'python'
     if ($pythonEvidence.status -ne 'detected') {
         throw 'Python 3.10-3.12 was not found on PATH.'
@@ -467,6 +575,14 @@ try {
         Write-Output "audio_runtime=$(if ($audioRequested) { 'required_separate' } else { 'skipped_by_request' })"
         Write-Output "marketplace_name=$marketplaceName"
         Write-Output "marketplace_display_name=$marketplaceDisplayName"
+        Write-Output "workspace_root=$resolvedWorkspaceRoot"
+        Write-Output "workspace_root_source=$workspaceRootSource"
+        Write-Output "workspace_root_customizable=true"
+        Write-Output "workspace_label=$workspaceLabel"
+        Write-Output "workspace_scope=repo"
+        Write-Output "workspace_skill_count=$($packagedWorkspaceSkills.Count)"
+        Write-Output "workspace_skill_payload=workspace-payload/skills"
+        Write-Output "plugin_top_level_skills_present=false"
         Write-Output "codex_invocation=$($codexEvidence.invocation)"
         return
     }
@@ -623,6 +739,35 @@ try {
         $report.legacy_personal_plugin_backup_path = $legacyBackup
     }
 
+    $workspaceHelper = Join-Path $targetRoot 'installer\manage_workspace.py'
+    $workspaceOutput = & $pythonEvidence.path $workspaceHelper 'install' `
+        '--plugin-root' $targetRoot `
+        '--workspace-root' $resolvedWorkspaceRoot `
+        '--state-root' $stateRoot `
+        '--receipt-path' $workspaceReceiptPath `
+        '--json'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Workspace skill installation failed: $workspaceOutput"
+    }
+    $workspaceRollbackNeeded = $true
+    $workspaceInstall = $workspaceOutput | ConvertFrom-Json
+    if ($workspaceInstall.status -ne 'installed' -or
+        $workspaceInstall.workspace_scope -ne 'repo' -or
+        $workspaceInstall.workspace_label -ne $workspaceLabel -or
+        [int]$workspaceInstall.workspace_skill_count -ne $expectedWorkspaceSkillCount -or
+        $workspaceInstall.plugin_manifest_exposes_skills -ne $false -or
+        $workspaceInstall.plugin_top_level_skills_present -ne $false -or
+        $workspaceInstall.workspace_skill_payload -ne 'workspace-payload/skills') {
+        throw 'Workspace skill installation receipt failed validation.'
+    }
+    $report.workspace_skill_count = [int]$workspaceInstall.workspace_skill_count
+    $report.workspace_backup_path = [string]$workspaceInstall.backup_root
+    $report.workspace_action = [string]$workspaceInstall.workspace_action
+    if (@($workspaceInstall.PSObject.Properties.Name) -contains 'relocated_from_workspace_root' -and
+        -not [string]::IsNullOrWhiteSpace([string]$workspaceInstall.relocated_from_workspace_root)) {
+        $report.workspace_relocated_from = [string]$workspaceInstall.relocated_from_workspace_root
+    }
+
     $pending = [System.Collections.Generic.List[string]]::new()
     if ($report.components.jianying.status -ne 'detected') { $pending.Add('Install JianYing/CapCut desktop and open it once.') }
     if ($report.components.ffmpeg.status -ne 'detected' -or $report.components.ffprobe.status -ne 'detected') { $pending.Add('Install FFmpeg and FFprobe on PATH.') }
@@ -632,6 +777,7 @@ try {
     if (-not ($legacyAsr -or $apiKeyAsr)) { $pending.Add('Configure ASR credentials locally on this computer.') }
     elseif ($report.components.asr.validation -ne 'validated') { $pending.Add('Verify ASR credentials with a real alignment request.') }
     if (-not $audioRequested) { $pending.Add('Re-run deployment without -SkipAudio to install the isolated audio runtime.') }
+    $pending.Add("Open the Auto-Cut Lite workspace in Codex and start a new thread: $resolvedWorkspaceRoot")
 
     $report.pending_user_actions = $pending.ToArray()
     $report.deployment_status = 'installed'
@@ -642,12 +788,29 @@ try {
     Write-Host "Auto-Cut Lite $($report.plugin_version) has been installed in Codex."
     Write-Host "deployment_status=$($report.deployment_status)"
     Write-Host "readiness=$($report.readiness)"
+    Write-Host "workspace_root=$resolvedWorkspaceRoot"
+    Write-Host "workspace_root_source=$workspaceRootSource"
+    Write-Host "workspace_scope=repo"
+    Write-Host "workspace_label=$workspaceLabel"
+    Write-Host "workspace_skill_count=$($report.workspace_skill_count)"
     Write-Host "Deployment report: $reportPath"
-    Write-Host 'Start a new Codex thread before using the plugin.'
+    Write-Host "Open this folder in Codex, then start a new thread: $resolvedWorkspaceRoot"
 }
 catch {
     $originalError = $_.Exception.Message
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+
+    if ($workspaceRollbackNeeded -and $null -ne $pythonEvidence) {
+        try {
+            $workspaceHelperForRollback = Join-Path $packageRoot 'installer\manage_workspace.py'
+            & $pythonEvidence.path $workspaceHelperForRollback 'rollback' `
+                '--receipt-path' $workspaceReceiptPath `
+                '--json' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'workspace rollback returned a failure code' }
+            $workspaceRollbackNeeded = $false
+        }
+        catch { $rollbackErrors.Add("workspace rollback failed: $($_.Exception.Message)") }
+    }
 
     if ($null -ne $codexEvidence -and -not $namedPluginWasInstalled) {
         try {

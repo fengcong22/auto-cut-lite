@@ -33,7 +33,7 @@ Every ordinary pointer job resolves the current project-family binding before ta
 Use `project.project_key` from the current revision request when present. Otherwise call the repository's existing `infer_project_family` helper on the current draft name. If neither a current job nor draft family exists, ask for the project context; never derive `project_key` from the course subject or content.
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/project_bindings.py get --project-key <project_key> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/project_bindings.py get --project-key <project_key> --root <registry-root> --json
 ```
 
 Read `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\pointer-profiles.local/project-bindings.json`; never infer the subject from course content. The binding must provide the exact `project_key`, stored project_path, `stage_id + subject_id`, and `profile_key`. Then run a fresh registry `check` against `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\pointer-profiles.local/` and accept the profile only when all of these conditions hold:

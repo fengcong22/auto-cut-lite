@@ -10,17 +10,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import shutil
-import stat
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
-from typing import Iterable
-
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.2.1"
+PLUGIN_VERSION = "1.3.0+codex.20260825093950"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -60,7 +56,15 @@ ROOT_FILES = (
     "VERSION",
 )
 RUNTIME_DIRS = ("audio_sound", "presets")
-RUNTIME_SCRIPT_DIRS = ("scripts/audio", "scripts/cli", "scripts/core", "scripts/portable", "scripts/portable_project", "scripts/utils", "scripts/vendor")
+RUNTIME_SCRIPT_DIRS = (
+    "scripts/audio",
+    "scripts/cli",
+    "scripts/core",
+    "scripts/portable",
+    "scripts/portable_project",
+    "scripts/utils",
+    "scripts/vendor",
+)
 RUNTIME_TOP_LEVEL_SCRIPTS = (
     "api_validator.py",
     "asset_search.py",
@@ -133,7 +137,11 @@ def _sha256(path: Path) -> str:
 
 def _safe_relative(path: str) -> str:
     candidate = PurePosixPath(path)
-    if candidate.is_absolute() or not candidate.parts or any(part in {"", ".", ".."} for part in candidate.parts):
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
         raise ValueError(f"unsafe archive path: {path}")
     if any("\\" in part or any(char in '<>:"|?*' for char in part) for part in candidate.parts):
         raise ValueError(f"unsafe archive path: {path}")
@@ -158,7 +166,11 @@ def _copy_tree(source: Path, target: Path, *, exclude_names: set[str] | None = N
         raise ValueError(f"runtime source is not a regular directory: {source}")
     exclude_names = exclude_names or set()
     for entry in sorted(source.iterdir(), key=lambda item: (item.name.casefold(), item.name)):
-        if entry.name in exclude_names or entry.name in {"__pycache__", ".pytest_cache", ".ruff_cache"}:
+        if entry.name in exclude_names or entry.name in {
+            "__pycache__",
+            ".pytest_cache",
+            ".ruff_cache",
+        }:
             continue
         if _is_reparse(entry):
             raise ValueError(f"runtime source contains a reparse point: {entry}")
@@ -177,11 +189,11 @@ def _write_text(path: Path, text: str) -> None:
 def _write_target_setup(stage: Path) -> None:
     _write_text(
         stage / "install.ps1",
-        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio\nexit $LASTEXITCODE\n""",
+        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio, [string]$WorkspaceRoot)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio -WorkspaceRoot $WorkspaceRoot\nexit $LASTEXITCODE\n""",
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\n1. Install 64-bit Python 3.11, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`. The full main and audio runtimes are installed by default in separate virtual environments. Use `-SkipAudio` only for an explicit reduced installation.\n3. The installer registers a dedicated marketplace named `auto-cut-lite-marketplace` with display name `Auto-Cut Lite`, migrates any old `auto-cut-lite@personal` installation, and asks Codex to install `auto-cut-lite@auto-cut-lite-marketplace`.\n4. Start a new Codex thread after deployment.\n5. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n6. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n7. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`. The ZIP is intentionally compact because pinned Python dependencies are installed on the target computer; after full deployment the isolated environments consume substantially more storage.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
+        """# Target setup\n\n1. Install 64-bit Python 3.11, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`. To choose another workspace parent, add `-WorkspaceRoot \"D:\\CodexWorkspaces\\Auto-cut-lite\"`; the path must be absolute and its final folder name must be `Auto-cut-lite`. The full main and audio runtimes are installed by default in separate virtual environments. Use `-SkipAudio` only for an explicit reduced installation.\n3. The installer registers a dedicated marketplace named `auto-cut-lite-marketplace` with display name `Auto-Cut Lite`, migrates any old `auto-cut-lite@personal` installation, and asks Codex to install `auto-cut-lite@auto-cut-lite-marketplace`. The plugin manifest intentionally exposes no user-scoped skills.\n4. The installer refreshes all Auto-Cut skills and `AGENTS.md` under the selected workspace. When `-WorkspaceRoot` is omitted, upgrades reuse the previous receipt path and first installs use `%USERPROFILE%\\Documents\\Codex\\Auto-cut-lite`. Passing a different explicit path verifies and relocates the previously managed workspace with rollback coverage. Open the reported `workspace_root` in Codex and start a new thread so the skills are discovered with repository scope and the `Auto-cut-lite` label.\n5. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n6. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n7. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness and the exact `workspace_root`. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`. The ZIP is intentionally compact because pinned Python dependencies are installed on the target computer; after full deployment the isolated environments consume substantially more storage.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -204,15 +216,24 @@ def _copy_runtime(repo: Path, stage: Path) -> None:
         _copy_file(repo / "scripts" / name, runtime / "scripts" / name)
     for name in PUBLIC_DATA_FILES:
         _copy_file(repo / "data" / name, runtime / "data" / name)
-    _copy_tree(repo / "schemas", runtime / "schemas", exclude_names={"private-subject-assets-manifest.schema.json"})
+    _copy_tree(
+        repo / "schemas",
+        runtime / "schemas",
+        exclude_names={"private-subject-assets-manifest.schema.json"},
+    )
     relink = repo / "tools" / "relink_tool" / "Auto-Cut剪映素材重链工具.exe"
     if relink.is_file():
-        _copy_file(relink, stage / "runtime" / "tools" / "relink_tool" / relink.name, sanitize_text=False)
+        _copy_file(
+            relink, stage / "runtime" / "tools" / "relink_tool" / relink.name, sanitize_text=False
+        )
 
 
 def _tree_inventory(root: Path) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for path in sorted((item for item in root.rglob("*") if item.is_file()), key=lambda item: item.relative_to(root).as_posix()):
+    for path in sorted(
+        (item for item in root.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(root).as_posix(),
+    ):
         relative = _safe_relative(path.relative_to(root).as_posix())
         rows.append({"path": relative, "size": path.stat().st_size, "sha256": _sha256(path)})
     return rows
@@ -228,8 +249,24 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
         raise ValueError("portable capability contract root must be an object")
     if payload.get("plugin_name") != PLUGIN_NAME or payload.get("plugin_version") != PLUGIN_VERSION:
         raise ValueError("portable capability contract identity does not match the plugin")
+    plugin_manifest = json.loads(
+        (stage / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
+    )
+    if (
+        plugin_manifest.get("name") != PLUGIN_NAME
+        or plugin_manifest.get("version") != PLUGIN_VERSION
+    ):
+        raise ValueError("plugin manifest identity does not match the portable contract")
+    if "skills" in plugin_manifest:
+        raise ValueError("plugin manifest must not expose user-scoped skills")
+    if (stage / "skills").exists():
+        raise ValueError("plugin package must not contain a top-level skills directory")
     marketplace = payload.get("marketplace")
-    if not isinstance(marketplace, dict) or marketplace.get("name") != "auto-cut-lite-marketplace" or marketplace.get("display_name") != "Auto-Cut Lite":
+    if (
+        not isinstance(marketplace, dict)
+        or marketplace.get("name") != "auto-cut-lite-marketplace"
+        or marketplace.get("display_name") != "Auto-Cut Lite"
+    ):
         raise ValueError("portable capability contract marketplace identity is invalid")
     environments = payload.get("runtime_environments")
     if not isinstance(environments, dict):
@@ -238,10 +275,31 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
     audio = environments.get("audio")
     if not isinstance(main, dict) or main.get("default") != "installed":
         raise ValueError("main runtime must be installed by default")
-    if not isinstance(audio, dict) or audio.get("default") != "installed" or audio.get("isolation") != "separate":
+    if (
+        not isinstance(audio, dict)
+        or audio.get("default") != "installed"
+        or audio.get("isolation") != "separate"
+    ):
         raise ValueError("audio runtime must be installed by default in a separate environment")
+    workspace = payload.get("workspace_installation")
+    if not isinstance(workspace, dict) or workspace != {
+        "default_root": "%USERPROFILE%/Documents/Codex/Auto-cut-lite",
+        "custom_root_supported": True,
+        "custom_root_parameter": "WorkspaceRoot",
+        "required_leaf_name": "Auto-cut-lite",
+        "upgrade_root_precedence": "parameter_then_existing_receipt_then_default",
+        "explicit_path_upgrade": "verified_relocation_with_rollback",
+        "payload_skills_path": "workspace-payload/skills",
+        "skills_path": ".codex/skills",
+        "agents_path": "AGENTS.md",
+        "scope": "repo",
+        "label": "Auto-cut-lite",
+        "plugin_manifest_exposes_skills": False,
+        "plugin_top_level_skills_present": False,
+    }:
+        raise ValueError("workspace installation contract is invalid")
 
-    skills_root = stage / "skills"
+    skills_root = stage / "workspace-payload" / "skills"
     skill_names = {path.name for path in skills_root.iterdir() if path.is_dir()}
     if skill_names != EXPECTED_SKILLS:
         missing = sorted(EXPECTED_SKILLS - skill_names)
@@ -274,13 +332,17 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
             relative = _safe_relative(raw_path)
             path = stage.joinpath(*PurePosixPath(relative).parts)
             if not path.is_file() or _is_reparse(path):
-                raise ValueError(f"portable capability path is missing or unsafe: {capability_id}:{relative}")
+                raise ValueError(
+                    f"portable capability path is missing or unsafe: {capability_id}:{relative}"
+                )
             required_count += 1
     return {
         "status": "pass",
         "capability_count": len(capability_ids),
         "required_path_count": required_count,
         "skill_count": len(skill_names),
+        "workspace_scope": workspace["scope"],
+        "workspace_label": workspace["label"],
     }
 
 
@@ -312,7 +374,10 @@ def _zip_name(path: str) -> str:
 
 def _make_zip(stage_parent: Path, output: Path) -> tuple[str, int]:
     entries: list[tuple[Path, str]] = []
-    for path in sorted((item for item in stage_parent.rglob("*") if item.is_file()), key=lambda item: item.relative_to(stage_parent).as_posix()):
+    for path in sorted(
+        (item for item in stage_parent.rglob("*") if item.is_file()),
+        key=lambda item: item.relative_to(stage_parent).as_posix(),
+    ):
         entries.append((path, _zip_name(path.relative_to(stage_parent).as_posix())))
     names = [name.casefold() for _, name in entries]
     if len(names) != len(set(names)):
@@ -332,7 +397,9 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="auto-cut-lite-plugin-", dir=output.parent) as temporary:
+    with tempfile.TemporaryDirectory(
+        prefix="auto-cut-lite-plugin-", dir=output.parent
+    ) as temporary:
         parent = Path(temporary)
         stage = parent / PLUGIN_NAME
         source_plugin = repo / "plugins" / PLUGIN_NAME
@@ -346,7 +413,15 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
         if findings:
             raise ValueError("plugin privacy scan failed: " + "; ".join(findings[:20]))
         inventory = _tree_inventory(stage)
-        _write_text(stage / "PACKAGE-MANIFEST.json", json.dumps({"name": PLUGIN_NAME, "version": PLUGIN_VERSION, "files": inventory}, ensure_ascii=False, indent=2) + "\n")
+        _write_text(
+            stage / "PACKAGE-MANIFEST.json",
+            json.dumps(
+                {"name": PLUGIN_NAME, "version": PLUGIN_VERSION, "files": inventory},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+        )
         # Recompute after the manifest itself is part of the package.
         inventory = _tree_inventory(stage)
         zip_sha256, entry_count = _make_zip(parent, output)
@@ -365,12 +440,25 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "archive_sha256": zip_sha256,
             "archive_byte_size": output.stat().st_size,
             "archive_entry_count": entry_count,
-            "staged_tree_sha256": hashlib.sha256(json.dumps(inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest(),
+            "staged_tree_sha256": hashlib.sha256(
+                json.dumps(
+                    inventory, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest(),
             "runtime_allowlist": True,
             "portable_capability_closure": capability_evidence["status"],
             "portable_capability_count": capability_evidence["capability_count"],
             "portable_required_path_count": capability_evidence["required_path_count"],
             "packaged_skill_count": capability_evidence["skill_count"],
+            "workspace_root_default": "%USERPROFILE%\\Documents\\Codex\\Auto-cut-lite",
+            "workspace_root_customizable": True,
+            "workspace_root_parameter": "WorkspaceRoot",
+            "workspace_explicit_path_upgrade": "verified_relocation_with_rollback",
+            "workspace_skill_payload": "workspace-payload/skills",
+            "workspace_skill_scope": capability_evidence["workspace_scope"],
+            "workspace_skill_label": capability_evidence["workspace_label"],
+            "plugin_manifest_exposes_skills": False,
+            "plugin_top_level_skills_present": False,
             "privacy_scan": "pass",
             "zip_crc": "pass",
             "zip_path_safety": "pass",
@@ -389,7 +477,9 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "codex_cli_fallback": "@openai/codex@0.149.1_via_npx",
         }
         receipt_path = output.with_name(output.name + ".receipt.json")
-        receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        receipt_path.write_text(
+            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
         receipt["receipt_path"] = str(receipt_path)
         return receipt
 

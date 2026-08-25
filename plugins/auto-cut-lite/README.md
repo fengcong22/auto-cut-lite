@@ -8,7 +8,23 @@
 powershell -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1
 ```
 
+如需把工作区技能部署到其他父目录，请传入绝对路径，并保持末级文件夹名为
+`Auto-cut-lite`，例如：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1 `
+  -WorkspaceRoot "D:\Codex工作区\Auto-cut-lite"
+```
+
+不传 `-WorkspaceRoot` 时，升级会优先沿用上次安装回执中的工作区；首次安装则默认使用
+`%USERPROFILE%\Documents\Codex\Auto-cut-lite`。如果已有旧工作区并显式传入另一个路径，
+部署器会在校验旧技能未被修改后迁移到新路径，并保留可恢复的旧工作区回执和备份。
+
 脚本会校验包内容，分别安装主 Python 与音频 Python 运行环境，把插件注册到显示名为 `Auto-Cut Lite` 的独立市场，并写出 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\deployment-report.json`。若机器上存在旧的 `auto-cut-lite@personal`，部署器会迁移安装来源并保留可恢复备份；安装完成后请新建 Codex 对话再使用。
+
+工作区技能在包内保存于 `workspace-payload\skills`，部署时复制到工作区的
+`.codex\skills`。插件根目录和安装缓存不会包含顶层 `skills` 目录，因此 Codex 不会再把
+同一批技能自动注册成 `Personal`。
 
 插件不包含剪映软件、飞书登录状态、用户 token、ASR 密钥、用户收藏素材或任何本机项目绑定。首次使用时，操作者应在自己的电脑上配置飞书用户身份：
 

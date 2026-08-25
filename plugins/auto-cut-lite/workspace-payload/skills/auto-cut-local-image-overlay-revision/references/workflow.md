@@ -27,7 +27,7 @@ Download the original document media without recompression. Keep the original fi
 Inspect each image:
 
 ```powershell
-python skills/auto-cut-local-image-overlay-revision/scripts/inspect_image_asset.py "<image-path>"
+python workspace-payload/skills/auto-cut-local-image-overlay-revision/scripts/inspect_image_asset.py "<image-path>"
 ```
 
 Reject undecodable files, non-PNG/JPG bytes, and fully transparent PNGs. Copy the inspector receipt's `visible_bbox` into the overlay evidence's `asset_visible_bbox`; for JPG/JPEG this is the complete canvas. Copy its `sha256` into the source receipt's `original_sha256`. If crop, background removal, or another derived asset is required, preserve the original and record the transformation plus both hashes.

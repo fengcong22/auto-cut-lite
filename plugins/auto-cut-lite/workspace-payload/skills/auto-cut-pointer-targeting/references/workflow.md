@@ -77,7 +77,7 @@ If the review comment is vague, combine the comment text with the frame content 
 Resolve the manual project binding first:
 
 ```powershell
-python skills/auto-cut-profile-onboarding/scripts/project_bindings.py get --project-key <project_key> --root <registry-root> --json
+python workspace-payload/skills/auto-cut-profile-onboarding/scripts/project_bindings.py get --project-key <project_key> --root <registry-root> --json
 ```
 
 The result must match `project-bindings.json` and provide the current `project_key`, stored `project_path`, and bound `profile_key`. Do not infer a subject from the review document. Then start asset calibration with a fresh registry `check` for the binding's exact `stage_id + subject_id`. Validate the receipt against the current registry files and continue only when all of these conditions hold:

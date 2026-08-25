@@ -6,10 +6,9 @@ from pathlib import Path
 
 from scripts.release import build_lite_plugin
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "auto-cut-lite"
-SKILLS_ROOT = PLUGIN_ROOT / "skills"
+SKILLS_ROOT = PLUGIN_ROOT / "workspace-payload" / "skills"
 
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -46,7 +45,7 @@ def _skill_directories() -> dict[str, Path]:
     return {path.name: path for path in SKILLS_ROOT.iterdir() if path.is_dir()}
 
 
-def test_plugin_exposes_the_complete_generic_skill_surface() -> None:
+def test_package_contains_the_complete_workspace_skill_surface() -> None:
     skills = _skill_directories()
     assert set(skills) == EXPECTED_SKILLS
     assert build_lite_plugin.EXPECTED_SKILLS == EXPECTED_SKILLS
@@ -64,6 +63,12 @@ def test_plugin_exposes_the_complete_generic_skill_surface() -> None:
         assert re.search(r'(?m)^\s*short_description:\s*"[^"\r\n]+"\s*$', metadata)
         prompt = re.search(r'(?m)^\s*default_prompt:\s*"([^"\r\n]+)"\s*$', metadata)
         assert prompt is not None and f"${name}" in prompt.group(1)
+
+    manifest = json.loads(
+        (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
+    )
+    assert "skills" not in manifest
+    assert not (PLUGIN_ROOT / "skills").exists()
 
 
 def test_all_packaged_skill_relative_links_resolve() -> None:
@@ -113,7 +118,13 @@ def test_documented_python_entrypoints_are_bundled() -> None:
 def test_plugin_skill_text_has_no_private_or_source_checkout_markers() -> None:
     findings: list[str] = []
     for path in SKILLS_ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in {".md", ".py", ".json", ".yaml", ".yml"}:
+        if not path.is_file() or path.suffix.lower() not in {
+            ".md",
+            ".py",
+            ".json",
+            ".yaml",
+            ".yml",
+        }:
             continue
         text = path.read_text(encoding="utf-8-sig", errors="replace").casefold()
         for marker in FORBIDDEN_MARKERS:
@@ -128,12 +139,13 @@ def test_plugin_skill_text_has_no_private_or_source_checkout_markers() -> None:
 
 
 def test_portable_capability_contract_requires_named_marketplace_and_split_runtimes() -> None:
-    payload = json.loads(
-        (PLUGIN_ROOT / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8")
-    )
+    payload = json.loads((PLUGIN_ROOT / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8"))
 
     assert payload["plugin_name"] == "auto-cut-lite"
-    assert payload["plugin_version"] == "1.2.1"
+    manifest = json.loads(
+        (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
+    )
+    assert payload["plugin_version"] == manifest["version"]
     assert payload["marketplace"] == {
         "name": "auto-cut-lite-marketplace",
         "display_name": "Auto-Cut Lite",
@@ -142,9 +154,24 @@ def test_portable_capability_contract_requires_named_marketplace_and_split_runti
     audio = payload["runtime_environments"]["audio"]
     assert audio["default"] == "installed"
     assert audio["isolation"] == "separate"
+    assert payload["workspace_installation"] == {
+        "default_root": "%USERPROFILE%/Documents/Codex/Auto-cut-lite",
+        "custom_root_supported": True,
+        "custom_root_parameter": "WorkspaceRoot",
+        "required_leaf_name": "Auto-cut-lite",
+        "upgrade_root_precedence": "parameter_then_existing_receipt_then_default",
+        "explicit_path_upgrade": "verified_relocation_with_rollback",
+        "payload_skills_path": "workspace-payload/skills",
+        "skills_path": ".codex/skills",
+        "agents_path": "AGENTS.md",
+        "scope": "repo",
+        "label": "Auto-cut-lite",
+        "plugin_manifest_exposes_skills": False,
+        "plugin_top_level_skills_present": False,
+    }
     capability_ids = {row["id"] for row in payload["capabilities"]}
     assert capability_ids == {
-        "skill_surface",
+        "workspace_skill_surface",
         "review_document_and_replacement_timebase",
         "editable_jianying_revision",
         "asr_audio_precision",

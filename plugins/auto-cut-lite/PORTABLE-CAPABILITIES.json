@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.2.1",
+  "plugin_version": "1.3.0+codex.20260825093950",
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"
@@ -19,13 +19,31 @@
       "isolation": "separate"
     }
   },
+  "workspace_installation": {
+    "default_root": "%USERPROFILE%/Documents/Codex/Auto-cut-lite",
+    "custom_root_supported": true,
+    "custom_root_parameter": "WorkspaceRoot",
+    "required_leaf_name": "Auto-cut-lite",
+    "upgrade_root_precedence": "parameter_then_existing_receipt_then_default",
+    "explicit_path_upgrade": "verified_relocation_with_rollback",
+    "payload_skills_path": "workspace-payload/skills",
+    "skills_path": ".codex/skills",
+    "agents_path": "AGENTS.md",
+    "scope": "repo",
+    "label": "Auto-cut-lite",
+    "plugin_manifest_exposes_skills": false,
+    "plugin_top_level_skills_present": false
+  },
   "capabilities": [
     {
-      "id": "skill_surface",
+      "id": "workspace_skill_surface",
       "required_paths": [
-        "skills/auto-cut/SKILL.md",
-        "skills/auto-cut-lite/SKILL.md",
-        "skills/auto-cut-final-acceptance/SKILL.md"
+        "AGENTS.md",
+        "installer/manage_workspace.py",
+        "WORKSPACE_SETUP.md",
+        "workspace-payload/skills/auto-cut/SKILL.md",
+        "workspace-payload/skills/auto-cut-lite/SKILL.md",
+        "workspace-payload/skills/auto-cut-final-acceptance/SKILL.md"
       ]
     },
     {
@@ -88,10 +106,10 @@
     {
       "id": "pointer_profile_onboarding",
       "required_paths": [
-        "skills/auto-cut-profile-onboarding/scripts/profile_registry.py",
-        "skills/auto-cut-profile-onboarding/scripts/project_bindings.py",
-        "skills/auto-cut-profile-onboarding/assets/pointer-material-reference.png",
-        "skills/auto-cut-profile-onboarding/assets/scale-reference-screenshot.png",
+        "workspace-payload/skills/auto-cut-profile-onboarding/scripts/profile_registry.py",
+        "workspace-payload/skills/auto-cut-profile-onboarding/scripts/project_bindings.py",
+        "workspace-payload/skills/auto-cut-profile-onboarding/assets/pointer-material-reference.png",
+        "workspace-payload/skills/auto-cut-profile-onboarding/assets/scale-reference-screenshot.png",
         "runtime/scripts/utils/pointer_validation.py"
       ]
     },
@@ -108,9 +126,11 @@
     {
       "id": "named_marketplace_deployment",
       "required_paths": [
+        "AGENTS.md",
         "deploy-to-codex.ps1",
         "install.ps1",
         "installer/manage_named_marketplace.py",
+        "installer/manage_workspace.py",
         "runtime/requirements.txt",
         "runtime/requirements-audio.lock"
       ]
