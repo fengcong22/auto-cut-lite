@@ -40,9 +40,10 @@ reuse task intermediates produced by a mistaken full-version run.
   clean-cover/cleanup layers, subject-pointer binding receipts, or opened-state
   screenshots. Strict mode and explicit full-workflow visual flags do not turn
   these checks back on for `workflow_mode=lite`.
-- Spoken-word deletion still uses the lite workflow's ASR-resolved boundary and
-  reverse-audio checks when that edit type is requested. Review labels and the
-  editable cut structure remain required.
+- Every issue locatable through speech or audio uses the Lite workflow's authoritative
+  word/character ASR boundary and reverse-audio checks where applicable. This includes spoken
+  deletion, semantic pauses, pronunciation, breath, mouth noise, and speech timing. Review
+  labels and the editable cut structure remain required.
 
 ## Lite Draft Contract
 
@@ -66,6 +67,15 @@ reuse task intermediates produced by a mistaken full-version run.
   `must_keep` phrases and strategy, then run reverse validation. Start that review item's label
   at the final ASR-resolved cut start rather than the rough review timestamp. Lite draft generation fails
   closed when that boundary receipt is absent or does not match the saved cut.
+- Apply the same timing-source rule to every other audio-identifiable problem. For a semantic
+  pause, resolve the real adjacent utterance gap from source ASR and use that boundary for both
+  the pause and its label. For pronunciation, breath, mouth noise, or other speech/audio timing,
+  use the matching ASR word/character window or point. Never execute or label these items from
+  the review timestamp alone.
+- Only completely non-speech review items use the timestamp written in the review comment. Parse
+  the requested target when the text contains both a current time and a move target: for example,
+  `07:14 ... 提前到 07:12` labels at `07:12`. A point timestamp does not require a fabricated
+  end time. Missing or unresolved timing must fail before writing, never fall back to `0:00`.
 - For source ASR, use the same local path as the full workflow: extract audio from the local source
   video when no separate source audio is present, then submit it through the bundled
   `volc.bigasr.auc` adapter. Do not ask the user to create TOS storage, a bucket, a signed URL,
@@ -108,6 +118,10 @@ reuse task intermediates produced by a mistaken full-version run.
   even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`
   layout's optional audio copies. A2 deleted-source clips keep normal volume (`1.0`) for manual
   review; do not silently mute them because their segmented-audio role is `reference`.
+- One A2 track may contain many clips, but it must contain exactly one independent clip for each
+  merged ASR delete window. Its source start, timeline start, and duration must equal the matching
+  V2 delete window. Reject a full-length/continuous A2 segment and reject a pending or empty
+  segmented plan before opening or writing the draft.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim, the start must equal the edit start, and the duration is `2s` except
   when clamped at the unchanged source-video end.
@@ -127,6 +141,8 @@ Before delivery, validate the saved root and active timeline variants:
   in copy layout, A2 follows the legacy `reuse_audio` rule;
 - root and active-timeline content both save `config.maintrack_adsorb=false`, and every A2
   deleted-source segment has normal volume;
+- root and active-timeline A2 segment count and windows exactly equal the merged ASR delete
+  windows; no A2 segment spans the full source or merges unrelated delete windows;
 - copied source and target ranges stay inside the unchanged project duration;
 - review labels are verbatim, start-aligned, top-safe, and no longer than `2s`;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.

@@ -5,7 +5,8 @@ This document defines the repository-scoped input format for review-driven JianY
 For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.md) is
 authoritative and overrides every full-workflow example or field described below. In particular,
 animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
-default geometry, and spoken-delete labels use the ASR-resolved edit start.
+default geometry, every audio-identifiable item uses its ASR-resolved boundary for execution and
+label placement, and only completely non-speech items use review timestamps.
 
 Use this format when the task is:
 
@@ -200,16 +201,26 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
-- Lite review labels use source text verbatim, start at the edit time, remain in the top safe band,
-  and last `2s` unless clamped by the unchanged project end. For spoken deletion, edit time means
-  the final ASR-resolved cut start, never the rough review timestamp.
-- Lite mode does not weaken spoken-delete evidence. Review-document timestamps are
+- Lite review labels use source text verbatim, start at the authoritative item time, remain in the
+  top safe band, and last `2s` unless clamped by the unchanged project end. For every issue
+  locatable through speech or audio, authoritative time means the final ASR-resolved window or
+  point, never the rough review timestamp. Only completely non-speech items use review timestamps;
+  a requested target after `提前到`/`推迟到`/`移到`/`调到` wins over an earlier current time.
+  A non-speech point timestamp is valid without an end. Unresolved timing never maps to `0:00`.
+- Lite mode does not weaken audio timing evidence. Audio-related review-document timestamps are
   `search_hint` values only. A spoken delete must carry a passing word/character `asr_alignment`
   receipt whose `resolved_cut_window` equals the edit start/end, together with `delete`, explicit
   `must_keep`, and `strategy`. The receipt must bind the source-audio SHA-256, provider plus
   model/resource identity, adapter version, ordered positive-duration matched word/character
   rows, and `authoritative_cut_boundary=true`. Candidate transcripts, prompted local ASR, or a
   rough-time match must keep `authoritative_cut_boundary=false` and cannot be written as a cut.
+  Semantic pauses, pronunciation, breath, mouth noise, and other speech/audio timing must carry
+  the equivalent authoritative source-ASR identity and a resolved point/window matching the
+  saved edit and label.
+- In Lite `split_gap`, `Separated Source Audio` contains the kept windows and `Lite Reused Audio`
+  contains exactly one independent source-aligned clip per merged ASR/V2 delete window. Reject
+  pending or empty segmented plans, full-length/continuous A2 clips, extra clips, and mismatched
+  source/timeline starts or durations before draft writing.
   A supplied pointer row remains execution-required but uses default geometry and start-only
   acceptance. Cleanup-only pointer rows are label-only. Lite never enables binding, lifecycle,
   placement, hotspot, opened-editor, or full visual/animation acceptance gates.

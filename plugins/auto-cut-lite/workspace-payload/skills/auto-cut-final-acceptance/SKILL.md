@@ -15,9 +15,15 @@ pointer, and animation acceptance.
 - the saved draft and declared active timeline exist and agree;
 - source media, editable tracks, split-gap cut structure, separated/reused audio, and unchanged
   project duration satisfy the Lite draft contract;
-- every source review item has one start-aligned verbatim marker; a spoken-delete marker is
-  aligned to the final ASR-resolved cut start, not the rough review timestamp;
+- every source review item has one start-aligned verbatim marker; every audio-identifiable item
+  is aligned to its final ASR-resolved window or point, not the rough review timestamp; only a
+  completely non-speech item may use the review timestamp or requested target;
+- no unresolved item falls back to `0:00`;
 - spoken deletions retain ASR boundary, delete/must-keep, reverse-ASR, and semantic-join evidence;
+- semantic pauses and other audio-identifiable timing retain authoritative source-ASR identity
+  and boundary evidence;
+- A2 contains exactly one independent source-aligned clip per merged ASR/V2 delete window, with
+  no pending/empty plan and no full-length or continuous A2 segment;
 - supplied pointer/image items have a saved local material and editable segment at the requested
   start, with default geometry and no keyframes;
 - animation/picture-timing, text-position/animation, and cleanup-only pointer items are

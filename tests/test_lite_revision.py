@@ -20,6 +20,7 @@ from utils.lite_revision import (
     _spoken_cut_alignment_problems,
 )
 from utils.review_job_compiler import compile_review_job
+from utils.revision_markers import build_marker_plan
 from utils.revision_models import _classify_review_text
 from utils.revision_runner import execute_revision_request, load_revision_request
 from utils.revision_evidence import audio_delivery_plan_sha256
@@ -330,6 +331,126 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(request_payload["audio_delivery_plan"]["mode"], "segmented")
         self.assertTrue(request_payload["acceptance"]["require_audio_validation"])
         self.assertEqual(request_payload["review_items"][0]["review_timestamp_role"], "search_hint")
+
+    def test_lite_compiler_uses_target_timestamp_only_for_non_speech_item(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "pause-1",
+                            "kind": "semantic_pause_adjustment",
+                            "source_text": "01：48，音频需要停顿一秒，留出ppt切换的时间",
+                        },
+                        {
+                            "id": "animation-1",
+                            "kind": "animation_timing",
+                            "source_text": "07：14，刷色动画提前到07：12",
+                        },
+                    ]
+                },
+                {
+                    "draft_name": "LiteTimingSources",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                payload = json.load(source_file)
+
+        items = {item["id"]: item for item in payload["review_items"]}
+        pause = items["pause-1"]
+        animation = items["animation-1"]
+        self.assertNotIn("start", pause)
+        self.assertEqual(pause["evidence"]["timing_source"], "asr")
+        self.assertEqual(pause["evidence"]["review_search_hint_seconds"], 108.0)
+        self.assertEqual(pause["timebase"]["status"], "pending_asr")
+        self.assertEqual(animation["start"], 432.0)
+        self.assertNotIn("end", animation)
+        self.assertEqual(animation["timebase"]["status"], "resolved_point")
+        self.assertEqual(
+            animation["evidence"]["review_timestamp_role"],
+            "authoritative_non_speech",
+        )
+        self.assertNotIn("animation-1", payload["unresolved_timebase_item_ids"])
+
+    def test_lite_audio_marker_requires_asr_instead_of_zero_or_review_time(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteNoAsrPause",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 500.0,
+                },
+                "review_items": [
+                    {
+                        "id": "pause-1",
+                        "kind": "semantic_pause_adjustment",
+                        "source_text": "01：48，音频需要停顿一秒",
+                        "start": 108.0,
+                    }
+                ],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "ASR-resolved edit or pause boundary"):
+            build_marker_plan(request)
+
+    def test_lite_semantic_pause_marker_uses_asr_resolved_boundary(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteAsrPauseMarker",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 500.0,
+                },
+                "pause_adjustments": [
+                    {
+                        "item_id": "pause-1",
+                        "requested_source_time": 108.0,
+                        "source_time": 109.375,
+                        "duration": 1.0,
+                        "frame_path": "C:/media/pause.png",
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "pause-1",
+                        "kind": "semantic_pause_adjustment",
+                        "source_text": "01：48，音频需要停顿一秒",
+                        "start": 108.0,
+                    }
+                ],
+            }
+        )
+
+        marker = build_marker_plan(request)[0]
+        self.assertEqual(marker.start, 109.375)
+        self.assertNotEqual(marker.start, 108.0)
+
+    def test_lite_pending_segmented_audio_fails_before_draft_write(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePendingAudio",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "audio_delivery_plan": {
+                    "mode": "segmented",
+                    "pending": True,
+                    "segments": [],
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "empty plan cannot write A1/A2"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(os.path.exists(os.path.join(drafts_root, "LitePendingAudio")))
 
     def test_lite_compiler_applies_label_only_animation_and_pointer_cleanup_contract(self):
         rows = [
@@ -688,7 +809,10 @@ class LiteRevisionTests(unittest.TestCase):
                 request_payload = json.load(request_file)
 
         self.assertTrue(request_payload["review_items"][0]["execution_required"])
-        self.assertEqual(request_payload["review_items"][0]["review_timestamp_role"], "search_hint")
+        self.assertEqual(
+            request_payload["review_items"][0]["review_timestamp_role"],
+            "authoritative_non_speech",
+        )
         self.assertFalse(request_payload["acceptance"]["require_visual_evidence"])
         self.assertFalse(request_payload["acceptance"]["require_subject_pointer_binding"])
         self.assertFalse(request_payload["acceptance"]["require_pointer_lifecycle_evidence"])
@@ -1261,6 +1385,93 @@ class LiteRevisionTests(unittest.TestCase):
             {a1["segments"][0]["material_id"]},
         )
         self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_split_gap_rejects_full_length_a2_in_segmented_plan(self):
+        source_audio = "C:/media/source.wav"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "split_gap",
+                "project": {
+                    "draft_name": "LiteInvalidFullA2",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": source_audio,
+                    "media_duration_seconds": 10.0,
+                },
+                "audio_delivery_plan": {
+                    "mode": "segmented",
+                    "forbid_full_length_segments": True,
+                    "segments": [
+                        {
+                            "id": "a1-001",
+                            "role": "source",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["source_audio"],
+                            "source_start": 0.0,
+                            "timeline_start": 0.0,
+                            "duration": 2.0,
+                        },
+                        {
+                            "id": "a1-002",
+                            "role": "source",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["source_audio"],
+                            "source_start": 4.0,
+                            "timeline_start": 4.0,
+                            "duration": 6.0,
+                        },
+                        {
+                            "id": "a2-full",
+                            "role": "reference",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["reused_audio"],
+                            "source_start": 0.0,
+                            "timeline_start": 0.0,
+                            "duration": 10.0,
+                        },
+                    ],
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "spoken_delete",
+                        "start": 2.0,
+                        "end": 4.0,
+                        "doc_item_id": "item-1",
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "delete": "summary",
+                            "must_keep": ["before", "after"],
+                            "strategy": "precision_first",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "word",
+                                "input_sha256": "e" * 64,
+                                "authoritative_cut_boundary": True,
+                                "words": [{"text": "summary", "start": 2.0, "end": 4.0}],
+                                "resolved_cut_window": [2.0, 4.0],
+                            },
+                        },
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "item-1",
+                        "kind": "spoken_delete",
+                        "source_text": "00:02 delete summary",
+                        "start": 2.0,
+                        "end": 4.0,
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "independent clip per merged ASR delete"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
 
     def test_lite_reuses_one_material_for_repeated_pointer_png(self):
         pointer_path = "C:/media/shared-pointer.png"

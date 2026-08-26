@@ -9,15 +9,22 @@ Use this checklist together with the
 - Root and active timeline drafts exist and agree.
 - Project duration equals source duration.
 - Required editable video/audio/marker tracks and split-gap cut boundaries exist.
-- One start-aligned, at-most-two-second verbatim label exists per source item.
+- One start-aligned, at-most-two-second verbatim label exists per source item. Completely
+  non-speech point timestamps are valid; target wording such as `07:14 ... 提前到 07:12`
+  resolves to `07:12`, and unresolved timing never falls back to `0:00`.
 
 ## Audio
 
-- Spoken cuts use word/character ASR boundaries, not review timestamps.
-- Spoken-delete labels start at the same ASR-resolved cut start as the saved edit, even when the
-  review-document timestamp differs.
+- Every issue locatable through speech or audio uses word/character ASR boundaries, not review
+  timestamps. This includes spoken cuts, semantic pauses, pronunciation, breath, mouth noise,
+  and speech timing.
+- Audio-related labels start at the same ASR-resolved window or point as the saved edit/pause,
+  even when the review-document timestamp differs.
 - Delete and `must_keep` contracts match the physical cut windows.
 - Reverse-ASR, candidate decode, segmented-audio, and semantic-join checks pass when required.
+- A1 equals the complement of merged ASR delete windows. A2 has exactly one independent clip per
+  merged ASR/V2 delete window with matching source start, timeline start, and duration. Pending,
+  empty, full-length, continuous, extra, or differently merged A2 delivery fails.
 
 ## Lite Visual Behavior
 

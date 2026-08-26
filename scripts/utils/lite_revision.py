@@ -24,6 +24,7 @@ from utils.revision_models import (
     RevisionRequest,
     RevisionReviewItem,
     _visual_plan_segments,
+    lite_timing_source,
 )
 
 
@@ -560,6 +561,191 @@ def _validate_spoken_cut_alignment(
         )
 
 
+def _generic_asr_timing_problems(
+    edit: RevisionEdit,
+    review_item: Optional[RevisionReviewItem],
+) -> List[str]:
+    item_id = edit.doc_item_id or "unattributed_audio_item"
+    evidence: Dict[str, Any] = {}
+    if review_item is not None and isinstance(review_item.evidence, dict):
+        evidence.update(review_item.evidence)
+    if isinstance(edit.evidence, dict):
+        evidence.update(edit.evidence)
+    alignment = evidence.get("asr_alignment")
+    if not isinstance(alignment, dict):
+        return [f"Lite audio timing {item_id}: asr_alignment receipt is missing."]
+
+    problems: List[str] = []
+    if str(alignment.get("status") or "").strip().casefold() not in _ALIGNMENT_PASS_STATUSES:
+        problems.append("asr_alignment.status is not pass")
+    if str(alignment.get("granularity") or "").strip().casefold() not in _ASR_GRANULARITIES:
+        problems.append("asr_alignment.granularity must be word or character")
+    if not str(alignment.get("provider") or "").strip():
+        problems.append("asr_alignment.provider is missing")
+    if not str(alignment.get("model") or alignment.get("resource_id") or "").strip():
+        problems.append("asr_alignment model/resource_id is missing")
+    if not str(alignment.get("adapter_version") or "").strip():
+        problems.append("asr_alignment.adapter_version is missing")
+    if not _is_sha256(alignment.get("input_sha256") or alignment.get("source_audio_sha256")):
+        problems.append("asr_alignment source audio SHA-256 is missing or invalid")
+    matches = alignment.get("matches") or alignment.get("words")
+    if not isinstance(matches, list) or not matches:
+        problems.append("asr_alignment word/character matches are missing")
+
+    resolved = alignment.get("resolved_cut_window") or evidence.get("resolved_cut_window")
+    resolved_time = alignment.get("resolved_time", evidence.get("resolved_time"))
+    if isinstance(resolved, (list, tuple)) and len(resolved) == 2:
+        try:
+            resolved_start, resolved_end = float(resolved[0]), float(resolved[1])
+        except (TypeError, ValueError):
+            problems.append("ASR-resolved window is not numeric")
+        else:
+            if abs(resolved_start - edit.start) > 0.01 or abs(resolved_end - edit.end) > 0.01:
+                problems.append("edit start/end do not match the ASR-resolved window")
+    elif resolved_time is not None:
+        try:
+            point = float(resolved_time)
+        except (TypeError, ValueError):
+            problems.append("ASR-resolved point is not numeric")
+        else:
+            if min(abs(point - edit.start), abs(point - edit.end)) > 0.01:
+                problems.append("edit boundary does not match the ASR-resolved point")
+    else:
+        problems.append("ASR-resolved window or point is missing")
+    return [f"Lite audio timing {item_id}: {problem}." for problem in problems]
+
+
+def _semantic_pause_asr_problems(
+    request: RevisionRequest,
+    item: RevisionReviewItem,
+) -> List[str]:
+    normalized_id = item.item_id.strip().casefold()
+    pauses = [
+        pause
+        for pause in request.pause_adjustments
+        if pause.item_id.strip().casefold() == normalized_id
+    ]
+    if not pauses:
+        return [
+            f"Lite audio timing {item.item_id}: semantic pause has no ASR-resolved pause boundary."
+        ]
+
+    problems: List[str] = []
+    alignment = request.pause_alignment if isinstance(request.pause_alignment, dict) else {}
+    if not str(alignment.get("source_asr_path") or "").strip():
+        problems.append("pause_alignment.source_asr_path is missing")
+    if not _is_sha256(alignment.get("source_asr_sha256")):
+        problems.append("pause_alignment.source_asr_sha256 is missing or invalid")
+    identity = alignment.get("source_asr_identity")
+    if not isinstance(identity, dict):
+        identity = {}
+    if not str(identity.get("provider") or "").strip():
+        problems.append("pause_alignment ASR provider is missing")
+    if not str(identity.get("model") or identity.get("resource_id") or "").strip():
+        problems.append("pause_alignment ASR model/resource_id is missing")
+    if not str(identity.get("adapter_version") or "").strip():
+        problems.append("pause_alignment ASR adapter_version is missing")
+    for pause in pauses:
+        evidence = pause.boundary_evidence if isinstance(pause.boundary_evidence, dict) else {}
+        if str(evidence.get("status") or "").strip().casefold() not in _ALIGNMENT_PASS_STATUSES:
+            problems.append("pause boundary_evidence.status is not pass")
+        try:
+            resolved_time = float(evidence.get("resolved_time"))
+        except (TypeError, ValueError):
+            problems.append("pause boundary_evidence.resolved_time is missing")
+        else:
+            if abs(resolved_time - pause.source_time) > 0.001:
+                problems.append("pause source_time does not match the ASR-resolved boundary")
+        if not _is_sha256(evidence.get("source_asr_sha256")):
+            problems.append("pause boundary evidence source ASR SHA-256 is missing or invalid")
+    return [f"Lite audio timing {item.item_id}: {problem}." for problem in problems]
+
+
+def _validate_lite_audio_timing_sources(
+    request: RevisionRequest,
+    doc_items: Optional[List[RevisionReviewItem]],
+) -> None:
+    authoritative = doc_items if doc_items is not None else request.review_items
+    edit_by_id: Dict[str, List[RevisionEdit]] = {}
+    for edit in request.edits:
+        edit_by_id.setdefault(edit.doc_item_id.strip().casefold(), []).append(edit)
+
+    problems: List[str] = []
+    for item in authoritative:
+        if lite_timing_source(item.kind, item.source_text) != "asr":
+            continue
+        normalized_id = item.item_id.strip().casefold()
+        if str(item.kind or "").strip().casefold() == "semantic_pause_adjustment":
+            problems.extend(_semantic_pause_asr_problems(request, item))
+            continue
+        edits = edit_by_id.get(normalized_id, [])
+        if not edits:
+            problems.append(
+                f"Lite audio timing {item.item_id}: no ASR-resolved edit is bound to this item."
+            )
+            continue
+        for edit in edits:
+            kind = str(edit.source_kind or item.kind or "").strip().casefold()
+            if _edit_kind(edit) == "cut" and kind in _SPOKEN_CUT_KINDS:
+                problems.extend(_spoken_cut_alignment_problems(edit, item))
+            else:
+                problems.extend(_generic_asr_timing_problems(edit, item))
+    if problems:
+        raise ValueError(
+            "Lite audio-related edits and labels require authoritative word/character ASR; "
+            "review timestamps are search hints only. " + " ".join(problems)
+        )
+
+
+def _validate_lite_segmented_split_gap_plan(
+    request: RevisionRequest,
+    delete_windows: List[Tuple[float, float]],
+    total_duration: float,
+) -> None:
+    plan = request.audio_delivery_plan
+    if plan.mode != "segmented" or _lite_layout(request) != "split_gap":
+        return
+
+    expected = {
+        LITE_TRACKS["source_audio"]: _complement_windows(delete_windows, total_duration),
+        LITE_TRACKS["reused_audio"]: list(delete_windows),
+    }
+    problems: List[str] = []
+    for track_name, expected_windows in expected.items():
+        actual = sorted(
+            (
+                (segment.timeline_start, segment.source_start, segment.duration)
+                for segment in plan.segments
+                if segment.track_name == track_name
+            ),
+            key=lambda row: (row[0], row[1], row[2]),
+        )
+        if len(actual) != len(expected_windows):
+            problems.append(
+                f"{track_name} segment count must equal {len(expected_windows)}, found {len(actual)}"
+            )
+            continue
+        for index, ((timeline_start, source_start, duration), (start, end)) in enumerate(
+            zip(actual, expected_windows),
+            start=1,
+        ):
+            if (
+                abs(timeline_start - start) > 0.01
+                or abs(source_start - start) > 0.01
+                or abs(duration - (end - start)) > 0.01
+            ):
+                problems.append(
+                    f"{track_name} segment {index} must be an independent source-aligned "
+                    f"window {start:.3f}-{end:.3f}"
+                )
+    if problems:
+        raise ValueError(
+            "Lite split-gap segmented audio must keep A1 as kept windows and A2 as one "
+            "independent clip per merged ASR delete window; full-length or merged A2 audio "
+            "is forbidden. " + "; ".join(problems) + "."
+        )
+
+
 def _spec_float(spec: Dict[str, Any], *keys: str, default: float) -> float:
     for key in keys:
         if key not in spec or spec.get(key) in (None, ""):
@@ -1078,7 +1264,6 @@ def _validate_lite_content(
     layout: str = "split_gap",
     delete_windows: Optional[List[Tuple[float, float]]] = None,
     audio_duration: Optional[float] = None,
-    planned_audio_segments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
@@ -1154,37 +1339,16 @@ def _validate_lite_content(
         cut_track = by_name.get(LITE_TRACKS["cut_segments"])
         if cut_track is not None:
             _expect_windows(LITE_TRACKS["cut_segments"], merged_deletes, "V2")
-        if planned_audio_segments:
-            def _planned_windows(track_name: str) -> List[Tuple[float, float]]:
-                windows = []
-                for planned in planned_audio_segments:
-                    if str(planned.get("track_name") or "") != track_name:
-                        continue
-                    start = float(planned.get("timeline_start", 0.0))
-                    duration = float(planned.get("duration", 0.0))
-                    source_start = float(planned.get("source_start", 0.0))
-                    windows.append((start, start + duration, source_start))
-                return windows
-
-            _expect_windows(
-                LITE_TRACKS["source_audio"],
-                _planned_windows(LITE_TRACKS["source_audio"]),
-                "A1",
-            )
-            planned_reused = _planned_windows(LITE_TRACKS["reused_audio"])
-            if planned_reused:
-                _expect_windows(LITE_TRACKS["reused_audio"], planned_reused, "A2")
-        else:
-            audio_total = min(total_duration, float(audio_duration or total_duration))
-            audio_deletes = _merge_windows(
-                (start, min(end, audio_total))
-                for start, end in merged_deletes
-                if start < audio_total
-            )
-            keep_audio = _complement_windows(audio_deletes, audio_total)
-            _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
-            if audio_deletes:
-                _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+        audio_total = min(total_duration, float(audio_duration or total_duration))
+        audio_deletes = _merge_windows(
+            (start, min(end, audio_total))
+            for start, end in merged_deletes
+            if start < audio_total
+        )
+        keep_audio = _complement_windows(audio_deletes, audio_total)
+        _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
+        if audio_deletes:
+            _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
         if by_name.get(LITE_TRACKS["reused_audio"]) is not None:
             a2 = by_name.get(LITE_TRACKS["reused_audio"])
             if a2 is not None:
@@ -1295,6 +1459,14 @@ def execute_lite_revision_request(
 ) -> Dict[str, Any]:
     if acceptance_repair_callback is not None:
         raise ValueError("Lite mode does not support destructive acceptance repair callbacks.")
+    if request.audio_delivery_plan.mode == "segmented" and (
+        request.audio_delivery_plan.pending or not request.audio_delivery_plan.segments
+    ):
+        raise ValueError(
+            "Lite segmented audio delivery is pending; an empty plan cannot write A1/A2. "
+            "Resolve ASR timing and compile explicit kept A1 windows plus independent A2 "
+            "delete clips before opening or writing a JianYing draft."
+        )
 
     # Keep the lite timeline contract, but do not silently bypass the full
     # workflow's evidence/preflight gates when a compiled job asks for them.
@@ -1310,6 +1482,8 @@ def execute_lite_revision_request(
         request = normalize_pause_adjustments(request)
         _validate_revision_execution_preflight(request, doc_items)
         _validate_visual_overlay_volumes(request)
+
+    _validate_lite_audio_timing_sources(request, doc_items)
 
     draft, marker_type, mock_audio, mock_video, _jy_project = _runtime_components()
     project, write_info = _open_project(request, drafts_root)
@@ -1348,6 +1522,7 @@ def execute_lite_revision_request(
             for edit in request.edits
             if _edit_kind(edit) == "cut"
         )
+        _validate_lite_segmented_split_gap_plan(request, delete_windows, total_duration)
         segmented_audio_delivery = request.audio_delivery_plan.mode == "segmented"
         segment_receipts: List[Dict[str, Any]] = []
         visual_material_cache: Dict[str, Any] = {}
@@ -1725,15 +1900,6 @@ def execute_lite_revision_request(
                 layout=layout,
                 delete_windows=delete_windows,
                 audio_duration=source_audio_duration,
-                planned_audio_segments=[
-                    {
-                        "track_name": segment.track_name,
-                        "source_start": segment.source_start,
-                        "timeline_start": segment.timeline_start,
-                        "duration": segment.duration,
-                    }
-                    for segment in request.audio_delivery_plan.segments
-                ],
             )
             validations.append((variant_name, variant_validation))
         primary_name, primary_validation = validations[0]

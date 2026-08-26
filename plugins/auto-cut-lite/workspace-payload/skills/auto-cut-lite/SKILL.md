@@ -14,15 +14,22 @@ executing, or validating a review item. Read
 - Keep `workflow_mode=lite` and default `lite_cut_layout=split_gap`.
 - Preserve the unchanged project duration and editable source/cut/audio structure.
 - Keep exactly one verbatim two-second review label per source item, clamped at project end.
-- Execute spoken deletion only with ASR-resolved boundaries, declared delete/must-keep phrases,
-  and reverse validation. Place its verbatim label at the final ASR-resolved cut start; the
-  review-document timestamp is only a search hint.
+- Every issue locatable through speech or audio must use authoritative word/character ASR before
+  execution or label placement. This includes spoken deletion, semantic pauses, pronunciation,
+  breath, mouth noise, and speech timing. Place its verbatim label at the final ASR-resolved
+  window or point; the review-document timestamp is only a search hint. Missing ASR fails closed.
+- Only completely non-speech items use the review timestamp. If the comment says
+  `07:14 ... 提前到 07:12`, use the target `07:12`. Accept a point timestamp for the label and
+  never fall back to `0:00` for unresolved timing.
 - Insert supplied pointer or picture files on `Lite Visual Assets` at the requested start using
   JianYing default geometry and no keyframes.
 - Keep animation/picture-timing, text-position/animation, and existing-hand cleanup requests
   label-only.
 - Keep `Lite Timing Adjusted` empty. Ignore clean-cover/cleanup asset specs.
 - Do not require profile binding, target landing, lifecycle, opened-editor, or screenshot evidence.
+- In `split_gap`, A1 contains the kept windows and A2 contains exactly one independent,
+  source-aligned clip per merged ASR delete window. Reject pending/empty segmented plans,
+  full-length A2 clips, and any A2 window that differs from V2.
 
 ## Execution
 

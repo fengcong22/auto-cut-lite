@@ -91,11 +91,20 @@ If the review document contains blue or red deletion text, inspect the document 
 
 ## Cutting Rules
 
+- In Lite mode, use source word/character ASR as the authoritative time source for every issue
+  locatable through speech or audio, not only deletion. Semantic pauses, pronunciation, breath,
+  mouth noise, and speech timing use the resolved ASR window or adjacent-utterance point for both
+  execution and their verbatim label. The review timestamp remains a search hint. Fail before
+  draft writing when the ASR identity or boundary evidence is missing.
+
 - Use physical segment removal for spoken-word deletion, not denoise or hard mute, unless the target is pure breath/noise.
 - When a reviewer marks a whole sentence/range for deletion, automatically include tightly adjacent oral fillers and discourse particles that belong to that removed range even if the written note did not spell them out. Examples include `啊`, `嗯`, `呃`, `呢`, `哈`, `这个`, `就是`, `然后`, `那`, `对吧`, and short phrases such as `坦率地讲哈` when they sit between the deleted sentence anchors. Record these as `auto_absorbed_fillers` in evidence.
 - Detached filler absorption is narrow. Only absorb oral residue that is not part of the kept sentence, such as an isolated `a/en/e/dui-ba` tail or a half-word left directly against the deleted range. Do not absorb normal neighboring content words such as `na`, `ye`, `da`, `ta`, `jin`, `tong`, `shang`, or `hou-mu` unless the user explicitly accepts that tradeoff.
 - Treat normal words on both sides of a cut as hard `must_keep` boundary words. If a wider physical cut would swallow a kept onset or tail, back the cut away and use a short post-splice exact duck/mute cleanup only for the proven residue.
 - Short delete items must keep independent windows. Do not let a one-word or particle delete inherit a longer merged sentence window from an adjacent review item.
+- In Lite `split_gap`, write one independent A2 clip per merged authoritative delete window.
+  Never replace these clips with one full-length/continuous A2 segment, and never accept a
+  pending or empty segmented plan as a writable draft.
 - Keep cut windows narrow. Add only the buffer allowed by strategy:
   - `precision_first`: usually no extra buffer, or 0 to 60 ms if it does not touch `must_keep`.
   - `hybrid`: about 80 to 200 ms around ASR boundaries when it improves the join.

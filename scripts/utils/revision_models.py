@@ -243,6 +243,36 @@ _AUDIO_KINDS = {
     "audio_repair",
     "replace_audio",
 }
+_LITE_ASR_TIMING_KINDS = _AUDIO_KINDS | {
+    "breath_cleanup",
+    "mouth_noise_cleanup",
+    "noise_cleanup",
+    "pause_timing_review",
+    "pronunciation_repair",
+    "semantic_pause_adjustment",
+    "speech_repair",
+}
+_LITE_AUDIO_TIMING_TEXT_HINTS = (
+    "audio",
+    "breath",
+    "mouth noise",
+    "pause",
+    "pronunciation",
+    "speech",
+    "voice",
+    "口误",
+    "呼吸",
+    "咬字",
+    "喷麦",
+    "嘴音",
+    "噪音",
+    "停顿",
+    "爆音",
+    "语音",
+    "语速",
+    "读音",
+    "音频",
+)
 _VISUAL_KINDS = {
     "pointer_overlay",
     "animation_timing",
@@ -327,6 +357,18 @@ def lite_execution_required(
     if cleanup_only and not insert_requested:
         return False
     return bool(requested)
+
+
+def lite_timing_source(kind: str, source_text: str = "") -> str:
+    """Choose the authoritative Lite timing source for one review item."""
+
+    normalized_kind = str(kind or "").strip().casefold()
+    if normalized_kind in _LITE_ASR_TIMING_KINDS:
+        return "asr"
+    folded = str(source_text or "").casefold()
+    if any(hint.casefold() in folded for hint in _LITE_AUDIO_TIMING_TEXT_HINTS):
+        return "asr"
+    return "review_timestamp"
 
 
 _VISUAL_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}

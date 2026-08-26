@@ -117,6 +117,29 @@ def test_visual_skills_share_one_authoritative_lite_execution_contract() -> None
         assert "lite-execution-contract.md" in skill_text, skill_name
 
 
+def test_lite_audio_timing_and_a2_acceptance_contract_is_packaged() -> None:
+    contract = (
+        SKILLS_ROOT / "auto-cut-lite" / "references" / "lite-execution-contract.md"
+    ).read_text(encoding="utf-8-sig")
+    router = (SKILLS_ROOT / "auto-cut" / "SKILL.md").read_text(encoding="utf-8-sig")
+    audio = (
+        SKILLS_ROOT / "auto-cut-review-audio-precision" / "SKILL.md"
+    ).read_text(encoding="utf-8-sig")
+    acceptance = (
+        SKILLS_ROOT / "auto-cut-final-acceptance" / "references" / "checklist.md"
+    ).read_text(encoding="utf-8-sig")
+    agents = (PLUGIN_ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
+
+    combined = "\n".join((contract, router, audio, acceptance, agents))
+    assert "completely non-speech" in combined
+    assert "review timestamp" in combined
+    assert "0:00" in combined
+    assert "one independent" in combined
+    assert "merged ASR" in combined
+    assert "full-length" in combined
+    assert "pending" in combined
+
+
 def test_active_lite_visual_prompts_do_not_reenable_full_visual_execution() -> None:
     active_files = [
         SKILLS_ROOT / "auto-cut" / "SKILL.md",

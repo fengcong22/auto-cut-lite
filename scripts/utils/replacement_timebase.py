@@ -1,10 +1,10 @@
 """Resolve main-video versus replacement-video clocks in review documents.
 
-Document timestamps are only search hints.  This module gives each row an
+Audio-related document timestamps are search hints. Completely non-speech Lite
+items may use their review timestamp directly. This module gives each row an
 explicit source clock and, when the mapping is provable, a global timeline
-range.  It deliberately fails closed for an unanchored or ambiguous
-replacement section instead of treating a local timestamp as a main-video
-timestamp.
+range or point. It fails closed for an unanchored or ambiguous replacement
+section instead of treating a local timestamp as a main-video timestamp.
 """
 
 from __future__ import annotations
@@ -236,9 +236,11 @@ def resolve_review_timebases(
         if anchor is None and role == "replacement_video":
             requested_anchor = str(row.get("replacement_anchor_id") or "")
             anchor = anchor_by_id.get(requested_anchor)
-        resolved = start is not None and end is not None
+        has_range = start is not None and end is not None
+        has_point = start is not None and end is None
+        resolved = has_range or has_point
         timeline_range: list[float] | None = None
-        status = "resolved"
+        status = "resolved_point" if has_point else "resolved"
         if start is not None and end is not None:
             row["source_time_range"] = [start, end]
         if role == "replacement_video":
@@ -251,8 +253,10 @@ def resolve_review_timebases(
                 timeline_range = [anchor["timeline_start"] + start, handoff]
                 end = anchor.get("duration_seconds") or end or start
                 resolved = True
-            elif resolved:
+            elif has_range:
                 timeline_range = [anchor["timeline_start"] + start, anchor["timeline_start"] + end]
+            elif has_point:
+                timeline_range = [anchor["timeline_start"] + start, anchor["timeline_start"] + start]
             else:
                 status = "unresolved_missing_local_range"
             if anchor and anchor.get("duration_seconds") is not None and end is not None:
@@ -265,21 +269,26 @@ def resolve_review_timebases(
             if resolved and timeline_range is None:
                 resolved = False
         else:
-            if resolved:
+            if has_range:
                 timeline_range = [start, end]
-            elif start is not None and end is None:
-                status = "unresolved_missing_end"
+            elif has_point:
+                timeline_range = [start, start]
+                status = "resolved_point"
             else:
                 status = "unresolved_missing_main_range"
 
         if resolved and timeline_range:
-            row["source_time_range"] = [start, end]
+            row["source_time_range"] = [start, end if end is not None else start]
             row["timeline_time_range"] = [round(timeline_range[0], 6), round(timeline_range[1], 6)]
-            row["start"], row["end"] = row["timeline_time_range"]
+            row["start"] = row["timeline_time_range"][0]
+            if end is not None:
+                row["end"] = row["timeline_time_range"][1]
+            else:
+                row.pop("end", None)
             row["timebase"] = {
                 "kind": "replacement_local" if role == "replacement_video" else "main_global",
                 "offset_seconds": round((anchor or {}).get("timeline_start", 0.0) if role == "replacement_video" else 0.0, 6),
-                "status": "resolved",
+                "status": status,
             }
             evidence = row.get("evidence") if isinstance(row.get("evidence"), Mapping) else {}
             evidence = copy.deepcopy(dict(evidence))
@@ -287,13 +296,22 @@ def resolve_review_timebases(
             evidence["source_role"] = role
             evidence["source_time_range"] = list(row["source_time_range"])
             evidence["timeline_time_range"] = list(row["timeline_time_range"])
-            evidence["review_timestamp_role"] = "search_hint"
+            evidence["review_timestamp_role"] = str(
+                evidence.get("review_timestamp_role")
+                or row.get("review_timestamp_role")
+                or "search_hint"
+            )
             row["evidence"] = evidence
             row["source_role"] = role
             if anchor:
                 row["replacement_anchor_id"] = str(anchor["id"])
         else:
             row["source_role"] = role
+            if (
+                str((row.get("evidence") or {}).get("timing_source") or "") == "asr"
+                and status in {"unresolved_missing_end", "unresolved_missing_main_range"}
+            ):
+                status = "pending_asr"
             row["timebase"] = {
                 "kind": "replacement_local" if role == "replacement_video" else "main_global",
                 "offset_seconds": round((anchor or {}).get("timeline_start", 0.0) if role == "replacement_video" else 0.0, 6),

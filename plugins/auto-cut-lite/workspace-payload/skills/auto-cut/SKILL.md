@@ -50,5 +50,12 @@ simple supplied-asset insertion, verbatim labels, saved-draft validation, and re
 Never route a Lite visual item into full animation retiming, pointer targeting/calibration,
 safe-zone movement, cleanup layers, or opened-editor evidence.
 
+Route timing by evidence source before execution: anything locatable through speech or audio
+requires authoritative word/character ASR and uses the resolved boundary for both the edit and
+label. Only completely non-speech items use the review timestamp; when the comment names a target
+after `提前到`/`推迟到`/`移到`/`调到`, use that target. Never fall back to `0:00`.
+For split-gap audio, require A2 to contain one independent clip per merged ASR delete window,
+never a full-length continuous segment.
+
 Use only the installed runtime from `deployment-report.json`. Never fall back to a source
 checkout, another Auto-Cut installation, or system Python.

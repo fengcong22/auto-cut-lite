@@ -4,28 +4,18 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from utils.revision_models import RevisionRequest, RevisionReviewItem, _collect_delete_windows
+from utils.revision_models import (
+    RevisionRequest,
+    RevisionReviewItem,
+    _collect_delete_windows,
+    lite_timing_source,
+)
 
 _REVIEW_ID_PATTERN = re.compile(r"(修改|校对)\s*0*(\d+)", re.IGNORECASE)
 _UNVERIFIED_SOURCE = "unverified_source_unavailable"
 _UNVERIFIED_TIMING = "unverified_timing_unavailable"
 _SAVED_START_TOLERANCE_US = 500
 _INTERNAL_LEGACY_SOURCES = {"legacy_marker", "legacy_edit"}
-_LITE_ASR_ALIGNED_MARKER_KINDS = {
-    "audio_delete",
-    "colored_span_delete",
-    "ellipsis_range_delete",
-    "gap_delete",
-    "pause_delete",
-    "phrase_delete",
-    "range_delete",
-    "speech_delete",
-    "spoken_delete",
-    "tail_cleanup",
-    "tail_particle_delete",
-}
-
-
 @dataclass(frozen=True)
 class MarkerPlanItem:
     item_id: str
@@ -696,6 +686,9 @@ def build_marker_plan(
 
     action_index = _build_action_index(request)
     edit_action_index = _build_edit_action_index(request)
+    pause_index: Dict[str, List[Any]] = {}
+    for pause in request.pause_adjustments:
+        pause_index.setdefault(_normalize_item_id(pause.item_id), []).append(pause)
     plan: List[MarkerPlanItem] = []
     seen_item_ids: set[str] = set()
     for index, source_item in enumerate(source_items):
@@ -708,19 +701,39 @@ def build_marker_plan(
 
         actions = action_index.get(normalized_item_id, [])
         source_kind = str(source_item.kind or "").strip().casefold()
-        asr_aligned_lite_marker = (
-            request.workflow_mode == "lite"
-            and source_kind in _LITE_ASR_ALIGNED_MARKER_KINDS
-            and bool(edit_action_index.get(normalized_item_id))
+        asr_aligned_lite_marker = request.workflow_mode == "lite" and (
+            lite_timing_source(source_kind, source_item.source_text) == "asr"
         )
-        timing_actions = (
-            edit_action_index[normalized_item_id] if asr_aligned_lite_marker else actions
-        )
-        start, end, _timing_unverified = _resolve_marker_window(
-            source_item,
-            timing_actions,
-            prefer_action_window=asr_aligned_lite_marker,
-        )
+        pauses = pause_index.get(normalized_item_id, [])
+        if asr_aligned_lite_marker and pauses:
+            pause_start = min(float(pause.source_time) for pause in pauses)
+            start, end = pause_start, pause_start + 0.8
+        else:
+            if asr_aligned_lite_marker and not edit_action_index.get(normalized_item_id):
+                raise ValueError(
+                    f"Lite audio-related review item {item_id} has no ASR-resolved "
+                    "edit or pause boundary."
+                )
+            timing_actions = (
+                edit_action_index[normalized_item_id] if asr_aligned_lite_marker else actions
+            )
+            action_start, action_end = _action_window(timing_actions)
+            if (
+                request.workflow_mode == "lite"
+                and source_item.start is None
+                and source_item.end is None
+                and action_start is None
+                and action_end is None
+            ):
+                raise ValueError(
+                    f"Lite review item {item_id} has no resolved timing source; "
+                    "refusing to place its label at 0:00."
+                )
+            start, end, _timing_unverified = _resolve_marker_window(
+                source_item,
+                timing_actions,
+                prefer_action_window=asr_aligned_lite_marker,
+            )
         normalized_start, normalized_end = _normalize_window(start, end)
         start, end = normalized_start, normalized_end
 

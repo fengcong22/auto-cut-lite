@@ -38,9 +38,17 @@
   label-only. Do not create cleanup media or layers.
 - Do not start pointer-profile onboarding or require bindings, target geometry, lifecycle,
   hotspot, opened-editor, or screenshot evidence for a Lite editing request.
-- Spoken-word and audio rules retain their ASR, must-keep, reverse-validation, and editable-cut
-  requirements. Review timestamps are search hints only; spoken-delete labels start at the final
-  word/character ASR-resolved cut start, not the review timestamp.
+- Every issue that can be located through speech or audio retains ASR, must-keep where applicable,
+  reverse-validation, and editable-cut requirements. This includes spoken deletion, semantic
+  pauses, pronunciation, breath, mouth noise, and speech timing. Review timestamps are search
+  hints only; both execution and the label use the final word/character ASR-resolved boundary.
+  Missing authoritative ASR fails before the draft is opened or written.
+- Only completely non-speech items use review-comment timestamps. When a comment names an old
+  time and a requested target such as `07:14 ... 提前到 07:12`, place the label at `07:12`.
+  Point timestamps are valid label starts; unresolved timing must never fall back to `0:00`.
+- In `split_gap`, A2 is one track containing one independent source-aligned clip per merged ASR
+  delete window. Reject pending/empty plans, full-length A2 clips, and A2 windows that differ from
+  the V2 delete windows.
 
 ## Local Data
 

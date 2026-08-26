@@ -87,10 +87,25 @@ When returning a revision result, report:
 
 - For Feishu/Lark review documents that ask for spoken-word deletion or audio repair, use `skills/auto-cut-review-audio-precision/SKILL.md` before cutting.
 - Convert every review comment into `clip_id`, `source`, `rough_time`, `delete`, `must_keep`, `strategy`, `accepted_tradeoffs`, and `validation`.
-- Prefer configured Chinese word/character ASR alignment before choosing cut windows; rough timestamps are only search hints.
+- In Lite mode, every issue that can be located from speech or audio must use configured Chinese
+  word/character ASR before either execution or label placement. This includes spoken deletion,
+  semantic pause insertion/adjustment, pronunciation, breath, mouth noise, and speech timing.
+  The review timestamp is only a search hint; the final edit and label start use the ASR-resolved
+  boundary. Missing authoritative ASR fails before any draft is opened or written.
+- Only a completely non-speech review item may use the timestamp written in the review comment.
+  For target wording such as `07:14 ... 提前到 07:12`, use the requested target `07:12`.
+  A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
 - Protect `must_keep` phrases explicitly. Do not remove adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
 - Validate the output by confirming deleted phrases are gone and must-keep phrases remain audible.
 - When returning results to a document, append label then file, label then file, strictly serially so attachments stay in the intended order.
+
+## Lite A1/A2 Audio Layout
+
+- In Lite `split_gap`, A1 contains exactly the complement of the merged ASR delete windows.
+- A2 contains exactly one independent, source-aligned clip per merged ASR delete window on one
+  `Lite Reused Audio` track. A full-length, continuous, or differently merged A2 segment is invalid.
+- A pending or empty segmented audio plan must fail before draft creation; it must never bypass
+  split-gap construction or be treated as a successful audio delivery.
 
 ## Resumable Review Pipeline
 

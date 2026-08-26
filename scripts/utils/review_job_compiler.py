@@ -25,6 +25,7 @@ from utils.revision_models import (
     _looks_execution_required,
     _normalize_review_id,
     lite_execution_required,
+    lite_timing_source,
 )
 from utils.revision_validation import derive_acceptance_profile
 
@@ -56,6 +57,13 @@ _DOCUMENT_FIELDS = (
 )
 _REVIEW_ONLY_HINTS = ("校对", "核对", "检查", "确认", "review", "check", "verify")
 _RANGE_SEPARATOR = re.compile(r"\s*(?:-|–|—|~|至|\bto\b)\s*", re.IGNORECASE)
+_REVIEW_CLOCK_PATTERN = re.compile(
+    r"(?<!\d)(?P<first>\d{1,2})\s*[:\uff1a]\s*(?P<second>\d{1,2})"
+    r"(?:\s*[:\uff1a]\s*(?P<third>\d{1,2}(?:\.\d+)?))?(?!\d)"
+)
+_TARGET_TIME_CUE_PATTERN = re.compile(
+    r"(?:提前|推迟|延后|移到|挪到|调整到|改到|调到|放到|贴到|开始于|结束于)\s*"
+)
 
 
 _COLORED_NOTE_HINTS = (
@@ -382,6 +390,39 @@ def _rough_time_range(value: Any) -> tuple[float | None, float | None]:
     return _clock_seconds(parts[0]), _clock_seconds(parts[1])
 
 
+def _review_text_times(text: str) -> list[tuple[float, int, int]]:
+    values: list[tuple[float, int, int]] = []
+    for match in _REVIEW_CLOCK_PATTERN.finditer(str(text or "")):
+        third = match.group("third")
+        if third is None:
+            value = _clock_seconds(f"{match.group('first')}:{match.group('second')}")
+        else:
+            value = _clock_seconds(
+                f"{match.group('first')}:{match.group('second')}:{third}"
+            )
+        if value is not None:
+            values.append((value, match.start(), match.end()))
+    return values
+
+
+def _review_text_target_range(text: str) -> tuple[float | None, float | None, str]:
+    values = _review_text_times(text)
+    if not values:
+        return None, None, "missing"
+
+    for cue in _TARGET_TIME_CUE_PATTERN.finditer(str(text or "")):
+        following = next((row for row in values if row[1] >= cue.end()), None)
+        if following is not None:
+            return following[0], None, "target_after_cue"
+
+    if len(values) >= 2:
+        first, second = values[0], values[1]
+        between = str(text or "")[first[2] : second[1]]
+        if _RANGE_SEPARATOR.fullmatch(between) and second[0] > first[0]:
+            return first[0], second[0], "range"
+    return values[0][0], None, "point"
+
+
 def _normalized_times(
     row: Mapping[str, Any], item_id: str, warnings: list[str]
 ) -> tuple[float | None, float | None]:
@@ -611,6 +652,32 @@ def _canonical_review_items(
             explicit_source if explicit_source else (f"feishu_block:{block_id}" if block_id else "")
         )
         start, end = _normalized_times(source_row, item_id, warnings)
+        parsed_start, parsed_end, parsed_method = _review_text_target_range(source_text)
+        timing_source = lite_timing_source(kind, source_text) if workflow_mode == "lite" else ""
+        evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+        evidence = copy.deepcopy(evidence)
+        if workflow_mode == "lite":
+            evidence["timing_source"] = timing_source
+            if timing_source == "asr":
+                evidence["review_timestamp_role"] = "search_hint"
+                if parsed_start is not None:
+                    evidence["review_search_hint_seconds"] = parsed_start
+                    evidence["review_timestamp_parse"] = parsed_method
+                # Text-extracted clocks are hints for audio issues, never final
+                # edit or marker boundaries.
+                if not ("start" in source_row or "end" in source_row or "rough_time" in source_row):
+                    start = None
+                    end = None
+            else:
+                evidence["review_timestamp_role"] = "authoritative_non_speech"
+                if parsed_start is not None:
+                    if parsed_method == "target_after_cue" or start is None:
+                        start = parsed_start
+                        end = parsed_end
+                    evidence["review_timestamp_parse"] = parsed_method
+                    evidence["resolved_review_timestamp_seconds"] = start
+        if evidence:
+            row["evidence"] = evidence
 
         row["id"] = item_id
         row["source_text"] = source_text
@@ -634,6 +701,8 @@ def _canonical_review_items(
             "pointer_overlay",
         }:
             row["review_timestamp_role"] = "search_hint"
+        if workflow_mode == "lite":
+            row["review_timestamp_role"] = str(evidence.get("review_timestamp_role") or "")
         row["verbatim_status"] = verbatim_status
         row.pop("start", None)
         row.pop("end", None)
