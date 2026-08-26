@@ -1,9 +1,13 @@
 # ruff: noqa: E402,I001
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
+import wave
+from dataclasses import replace
+from unittest.mock import patch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -15,15 +19,26 @@ if SCRIPTS_PATH not in sys.path:
 from utils.lite_revision import (
     LITE_TRACKS,
     _asset_specs,
+    _collect_lite_delete_windows,
     _localize_lite_request_materials,
+    _lite_layout,
     _lite_visual_results,
     _spoken_cut_alignment_problems,
 )
 from utils.review_job_compiler import compile_review_job
 from utils.revision_markers import build_marker_plan
 from utils.revision_models import _classify_review_text
-from utils.revision_runner import execute_revision_request, load_revision_request
-from utils.revision_evidence import audio_delivery_plan_sha256
+from utils.revision_runner import (
+    execute_revision_request,
+    load_revision_request,
+    load_review_items_json,
+)
+from utils.revision_evidence import (
+    audio_delivery_plan_sha256,
+    bind_audio_delivery_plan_to_report,
+    normalize_pause_adjustments,
+)
+from utils.revision_validation import derive_acceptance_profile
 from core.review_marker_ops import ReviewMarkerOpsMixin
 
 
@@ -39,7 +54,117 @@ def _track(content, name):
     return next(track for track in content["tracks"] if track["name"] == name)
 
 
+def _spoken_delete_edit(item_id, start, end, *, label=None):
+    phrase = label or item_id
+    return {
+        "type": "delete",
+        "source_kind": "spoken_delete",
+        "start": start,
+        "end": end,
+        "label": phrase,
+        "doc_item_id": item_id,
+        "evidence": {
+            "review_timestamp_role": "search_hint",
+            "delete": phrase,
+            "must_keep": [f"before-{item_id}", f"after-{item_id}"],
+            "strategy": "precision_first",
+            "asr_alignment": {
+                "status": "pass",
+                "provider": "test-asr",
+                "model": "test-model",
+                "adapter_version": "1",
+                "granularity": "word",
+                "input_sha256": "a" * 64,
+                "authoritative_cut_boundary": True,
+                "words": [{"text": phrase, "start": start, "end": end}],
+                "resolved_cut_window": [start, end],
+            },
+        },
+    }
+
+
 class LiteRevisionTests(unittest.TestCase):
+    def test_lite_delete_windows_keep_adjacent_source_items_separate(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "AdjacentLiteCuts",
+                    "source_video": "source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {"type": "delete", "start": 2.0, "end": 3.0, "doc_item_id": "a"},
+                    {"type": "delete", "start": 3.0, "end": 4.0, "doc_item_id": "b"},
+                ],
+            }
+        )
+
+        windows = _collect_lite_delete_windows(request, 10.0)
+
+        self.assertEqual(
+            [(row.item_id, row.start, row.end) for row in windows],
+            [("a", 2.0, 3.0), ("b", 3.0, 4.0)],
+        )
+
+    def test_lite_delete_windows_merge_only_within_same_source_item(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "SameItemLiteCuts",
+                    "source_video": "source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {"type": "delete", "start": 2.0, "end": 3.0, "doc_item_id": "a"},
+                    {"type": "delete", "start": 2.5, "end": 4.0, "doc_item_id": "a"},
+                ],
+            }
+        )
+
+        windows = _collect_lite_delete_windows(request, 10.0)
+
+        self.assertEqual(
+            [(row.item_id, row.start, row.end) for row in windows],
+            [("a", 2.0, 4.0)],
+        )
+
+    def test_lite_delete_windows_reject_overlapping_different_source_items(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "OverlappingLiteCuts",
+                    "source_video": "source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {"type": "delete", "start": 2.0, "end": 3.5, "doc_item_id": "a"},
+                    {"type": "delete", "start": 3.0, "end": 4.0, "doc_item_id": "b"},
+                ],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "different review items overlap"):
+            _collect_lite_delete_windows(request, 10.0)
+
+    def test_lite_copy_layout_is_rejected_before_draft_execution(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "copy",
+                "project": {
+                    "draft_name": "CopyLiteCuts",
+                    "source_video": "source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "overlaps V2/A2 delete clips"):
+            _lite_layout(request)
+
     def test_lite_package_materials_are_localized_before_import(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             media_dir = os.path.join(tmpdir, "media")
@@ -1125,6 +1250,830 @@ class LiteRevisionTests(unittest.TestCase):
             for segment in marker_segments
         }
         self.assertGreaterEqual(len(marker_colors), 3)
+
+    def test_lite_keeps_adjacent_different_item_cuts_and_a2_clips_independent(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteAdjacentCuts",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": "C:/media/source.wav",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    _spoken_delete_edit("item-a", 2.0, 3.0),
+                    _spoken_delete_edit("item-b", 3.0, 4.0),
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteAdjacentCuts", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        v2 = _track(content, LITE_TRACKS["cut_segments"])["segments"]
+        a2 = _track(content, LITE_TRACKS["reused_audio"])["segments"]
+        self.assertEqual(len(v2), 2)
+        self.assertEqual(len(a2), 2)
+        self.assertEqual(
+            [(row["target_timerange"]["start"], row["target_timerange"]["duration"]) for row in v2],
+            [(2_000_000, 1_000_000), (3_000_000, 1_000_000)],
+        )
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_merges_overlapping_windows_only_within_one_item(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteSameItemMerge",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    _spoken_delete_edit("item-a", 2.0, 3.0, label="first"),
+                    _spoken_delete_edit("item-a", 2.5, 4.0, label="second"),
+                ],
+                "review_items": [
+                    {
+                        "id": "item-a",
+                        "kind": "spoken_delete",
+                        "source_text": "02:00-04:00 delete the resolved phrase",
+                        "start": 2.0,
+                        "end": 4.0,
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteSameItemMerge", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertEqual(len(_track(content, LITE_TRACKS["cut_segments"])["segments"]), 1)
+        self.assertEqual(len(_track(content, LITE_TRACKS["reused_audio"])["segments"]), 1)
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_rejects_overlapping_windows_from_different_items_before_draft_open(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteCrossItemOverlap",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    _spoken_delete_edit("item-a", 2.0, 4.0),
+                    _spoken_delete_edit("item-b", 3.0, 5.0),
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "different review items overlap"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(os.path.exists(os.path.join(drafts_root, "LiteCrossItemOverlap")))
+
+    def test_lite_zero_start_delete_uses_v2_as_the_zero_aligned_main_track(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteZeroStartCut",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [_spoken_delete_edit("item-zero", 0.0, 1.0)],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteZeroStartCut", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        v1 = _track(content, LITE_TRACKS["original_video"])["segments"]
+        v2 = _track(content, LITE_TRACKS["cut_segments"])["segments"]
+        self.assertEqual(v1[0]["target_timerange"]["start"], 1_000_000)
+        self.assertGreater(v1[0]["render_index"], v2[0]["render_index"])
+        self.assertEqual(v2[0]["target_timerange"]["start"], 0)
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_added_pause_extends_timeline_and_shifts_later_tracks_and_labels(self):
+        source_asr_path = "C:/evidence/source-asr.json"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteAddedPause",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": "C:/media/source.wav",
+                    "media_duration_seconds": 10.0,
+                },
+                "pause_alignment": {
+                    "source_asr_path": source_asr_path,
+                    "source_asr_sha256": "b" * 64,
+                    "source_asr_identity": {
+                        "provider": "test-asr",
+                        "model": "test-model",
+                        "adapter_version": "1",
+                    },
+                },
+                "pause_adjustments": [
+                    {
+                        "item_id": "pause-1",
+                        "requested_source_time": 5.0,
+                        "source_time": 5.0,
+                        "duration": 1.0,
+                        "frame_path": "C:/media/pause.png",
+                        "frame_sha256": "c" * 64,
+                        "boundary_evidence": {
+                            "status": "pass",
+                            "resolved_time": 5.0,
+                            "source_asr_sha256": "b" * 64,
+                        },
+                    }
+                ],
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "visual_overlay",
+                        "start": 6.0,
+                        "end": 7.0,
+                        "doc_item_id": "visual-1",
+                        "asset_paths": ["C:/media/pointer.png"],
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "pause-1",
+                        "kind": "semantic_pause_adjustment",
+                        "source_text": "05:00 add one more second to the existing pause",
+                        "start": 5.0,
+                    },
+                    {
+                        "id": "visual-1",
+                        "kind": "visual_overlay",
+                        "source_text": "06:00 place the supplied pointer",
+                        "start": 6.0,
+                        "end": 7.0,
+                    },
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteAddedPause", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertEqual(content["duration"], 11_000_000)
+        self.assertEqual(result["added_pause_duration_seconds"], 1.0)
+        v1 = _track(content, LITE_TRACKS["original_video"])["segments"]
+        self.assertEqual(
+            [(row["target_timerange"]["start"], row["target_timerange"]["duration"]) for row in v1],
+            [(0, 5_000_000), (5_000_000, 1_000_000), (6_000_000, 5_000_000)],
+        )
+        visual = _track(content, LITE_TRACKS["visual_assets"])["segments"][0]
+        self.assertEqual(visual["target_timerange"]["start"], 7_000_000)
+        marker_starts = sorted(
+            segment["target_timerange"]["start"]
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        self.assertEqual(marker_starts, [5_000_000, 7_000_000])
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_strict_source_document_pause_maps_segmented_a1_a2_without_cut_compression(
+        self,
+    ):
+        import cv2
+        import numpy as np
+
+        def write_silence(path, duration_seconds):
+            with wave.open(path, "wb") as audio_file:
+                audio_file.setnchannels(1)
+                audio_file.setsampwidth(2)
+                audio_file.setframerate(8_000)
+                audio_file.writeframes(b"\0\0" * round(8_000 * duration_seconds))
+
+        def file_sha256(path):
+            with open(path, "rb") as source_file:
+                return hashlib.sha256(source_file.read()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_video = os.path.join(tmpdir, "source.avi")
+            writer = cv2.VideoWriter(
+                source_video,
+                cv2.VideoWriter_fourcc(*"MJPG"),
+                2.0,
+                (16, 16),
+            )
+            self.assertTrue(writer.isOpened())
+            for index in range(20):
+                writer.write(np.full((16, 16, 3), index * 10, dtype=np.uint8))
+            writer.release()
+
+            pause_frame = os.path.join(tmpdir, "pause-at-5s.png")
+            capture = cv2.VideoCapture(source_video)
+            capture.set(cv2.CAP_PROP_POS_MSEC, 5_000)
+            frame_ok, frame = capture.read()
+            capture.release()
+            self.assertTrue(frame_ok)
+            self.assertTrue(cv2.imwrite(pause_frame, frame))
+
+            source_audio = os.path.join(tmpdir, "source.wav")
+            candidate_audio = os.path.join(tmpdir, "candidate.wav")
+            write_silence(source_audio, 10.0)
+            write_silence(candidate_audio, 11.0)
+
+            source_asr = os.path.join(tmpdir, "source-asr.json")
+            with open(source_asr, "w", encoding="utf-8") as asr_file:
+                json.dump(
+                    {
+                        "utterances": [
+                            {"text": "remove before", "start": 2.0, "end": 3.0},
+                            {"text": "before", "start": 3.5, "end": 4.5},
+                            {"text": "after", "start": 5.5, "end": 6.5},
+                            {"text": "remove after", "start": 7.0, "end": 8.0},
+                        ],
+                        "words": [
+                            {"text": "remove-before", "start": 2.0, "end": 3.0},
+                            {"text": "before", "start": 3.5, "end": 4.5},
+                            {"text": "after", "start": 5.5, "end": 6.5},
+                            {"text": "remove-after", "start": 7.0, "end": 8.0},
+                        ],
+                    },
+                    asr_file,
+                )
+
+            source_audio_hash = file_sha256(source_audio)
+            candidate_hash = file_sha256(candidate_audio)
+            source_asr_hash = file_sha256(source_asr)
+            source_video_hash = file_sha256(source_video)
+            pause_frame_hash = file_sha256(pause_frame)
+
+            delete_specs = (
+                (
+                    "delete-before",
+                    2.0,
+                    3.0,
+                    "remove-before",
+                    ["leftone", "rightone"],
+                ),
+                (
+                    "delete-after",
+                    7.0,
+                    8.0,
+                    "remove-after",
+                    ["lefttwo", "righttwo"],
+                ),
+            )
+            delete_edits = []
+            delete_review_items = []
+            for item_id, start, end, phrase, must_keep in delete_specs:
+                evidence = {
+                    "status": "executed",
+                    "executed": True,
+                    "review_timestamp_role": "search_hint",
+                    "cut_window": [start, end],
+                    "delete": phrase,
+                    "must_keep": must_keep,
+                    "strategy": "precision_first",
+                    "asr_alignment": {
+                        "status": "pass",
+                        "provider": "test-asr",
+                        "model": "test-model",
+                        "adapter_version": "1",
+                        "granularity": "word",
+                        "input_sha256": source_audio_hash,
+                        "authoritative_cut_boundary": True,
+                        "words": [{"text": phrase, "start": start, "end": end}],
+                        "resolved_cut_window": [start, end],
+                    },
+                }
+                delete_edits.append(
+                    {
+                        "type": "delete",
+                        "source_kind": "spoken_delete",
+                        "start": start,
+                        "end": end,
+                        "doc_item_id": item_id,
+                        "evidence": evidence,
+                    }
+                )
+                delete_review_items.append(
+                    {
+                        "id": item_id,
+                        "kind": "spoken_delete",
+                        "source_text": f"{start:.0f}.0-{end:.0f}.0 delete {phrase}",
+                        "start": start,
+                        "end": end,
+                        "execution_required": True,
+                        "evidence": evidence,
+                        "validation": {"status": "pass"},
+                    }
+                )
+
+            pause_source_text = "5.0 add one second to the existing semantic pause"
+            review_items = [
+                delete_review_items[0],
+                {
+                    "id": "pause-one-second",
+                    "kind": "semantic_pause_adjustment",
+                    "source_text": pause_source_text,
+                    "start": 5.0,
+                    "execution_required": True,
+                },
+                delete_review_items[1],
+            ]
+            audio_segments = [
+                {
+                    "id": "a1-001",
+                    "role": "source",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["source_audio"],
+                    "source_start": 0.0,
+                    "timeline_start": 0.0,
+                    "duration": 2.0,
+                },
+                {
+                    "id": "a1-002",
+                    "role": "source",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["source_audio"],
+                    "source_start": 3.0,
+                    "timeline_start": 3.0,
+                    "duration": 2.0,
+                },
+                {
+                    "id": "a1-003",
+                    "role": "source",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["source_audio"],
+                    "source_start": 5.0,
+                    "timeline_start": 6.0,
+                    "duration": 2.0,
+                },
+                {
+                    "id": "a1-004",
+                    "role": "source",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["source_audio"],
+                    "source_start": 8.0,
+                    "timeline_start": 9.0,
+                    "duration": 2.0,
+                },
+                {
+                    "id": "a2-delete-before",
+                    "role": "reference",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["reused_audio"],
+                    "source_start": 2.0,
+                    "timeline_start": 2.0,
+                    "duration": 1.0,
+                    "volume": 0.0,
+                    "doc_item_id": "delete-before",
+                },
+                {
+                    "id": "a2-delete-after",
+                    "role": "reference",
+                    "asset_path": source_audio,
+                    "track_name": LITE_TRACKS["reused_audio"],
+                    "source_start": 7.0,
+                    "timeline_start": 8.0,
+                    "duration": 1.0,
+                    "volume": 0.0,
+                    "doc_item_id": "delete-after",
+                },
+            ]
+            report_path = os.path.join(tmpdir, "reverse-asr.json")
+            report = {
+                "candidate_audio_sha256": candidate_hash,
+                "asr_identity": {
+                    "provider": "test-provider",
+                    "model": "test-model",
+                    "adapter_version": "1",
+                },
+                "status_counts": {"pass": 3},
+                "rows": [
+                    {
+                        "id": "delete-before",
+                        "status": "pass",
+                        "strategy": "precision_first",
+                        "source_cut_windows": [[2.0, 3.0]],
+                        "mapped_join_times": [2.0],
+                        "local_joined_text": "leftone rightone",
+                        "delete": "remove-before",
+                        "must_keep": ["leftone", "rightone"],
+                        "delete_hits": [],
+                        "keep_hits": {"leftone": True, "rightone": True},
+                        "semantic_join_validation": {"status": "pass"},
+                    },
+                    {
+                        "id": "pause-one-second",
+                        "kind": "semantic_pause_adjustment",
+                        "status": "pass",
+                        "reverse_asr_evidence": {
+                            "candidate_audio_sha256": candidate_hash,
+                            "full_candidate_reverse_asr_status": "success",
+                            "previous_utterance_match": {"text": "before"},
+                            "next_utterance_match": {"text": "after"},
+                            "previous_utterance_preserved": True,
+                            "next_utterance_preserved": True,
+                            "surrounding_utterance_order_valid": True,
+                            "no_asr_word_overlaps_hold": True,
+                            "reverse_asr_word_overlaps_hold": [],
+                            "previous_protected_trailing_anchor": "re",
+                            "previous_protected_trailing_anchor_present": True,
+                            "next_protected_leading_anchor": "af",
+                            "next_protected_leading_anchor_present": True,
+                        },
+                    },
+                    {
+                        "id": "delete-after",
+                        "status": "pass",
+                        "strategy": "precision_first",
+                        "source_cut_windows": [[7.0, 8.0]],
+                        "mapped_join_times": [8.0],
+                        "local_joined_text": "lefttwo righttwo",
+                        "delete": "remove-after",
+                        "must_keep": ["lefttwo", "righttwo"],
+                        "delete_hits": [],
+                        "keep_hits": {"lefttwo": True, "righttwo": True},
+                        "semantic_join_validation": {"status": "pass"},
+                    },
+                ],
+            }
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                json.dump(report, report_file)
+
+            request = _load_request(
+                {
+                    "workflow_mode": "lite",
+                    "lite_cut_layout": "split_gap",
+                    "project": {
+                        "draft_name": "LiteStrictSourceDocumentPause",
+                        "source_video": source_video,
+                        "source_audio": source_audio,
+                        "media_duration_seconds": 10.0,
+                    },
+                    "edits": [
+                        delete_edits[0],
+                        {
+                            "type": "semantic_pause_adjustment",
+                            "source_kind": "semantic_pause_adjustment",
+                            "start": 5.0,
+                            "end": 5.0,
+                            "doc_item_id": "pause-one-second",
+                        },
+                        delete_edits[1],
+                    ],
+                    "review_items": review_items,
+                    "pause_adjustments": [
+                        {
+                            "item_id": "pause-one-second",
+                            "requested_source_time": 5.0,
+                            "source_time": 5.0,
+                            "frame_source_time": 5.0,
+                            "duration": 1.0,
+                            "frame_path": pause_frame,
+                            "frame_sha256": pause_frame_hash,
+                        }
+                    ],
+                    "pause_alignment": {
+                        "source_asr_path": source_asr,
+                        "source_asr_sha256": source_asr_hash,
+                        "source_video_sha256": source_video_hash,
+                        "source_audio_sha256": source_audio_hash,
+                        "alignment_audio_path": source_audio,
+                        "alignment_audio_sha256": source_audio_hash,
+                        "source_asr_identity": {
+                            "provider": "test-provider",
+                            "model": "test-model",
+                            "adapter_version": "test-adapter-v1",
+                            "preprocessing": "none",
+                        },
+                        "semantic_gap_seconds": 0.8,
+                        "search_window_seconds": 3.0,
+                    },
+                    "audio_delivery_plan": {
+                        "mode": "segmented",
+                        "forbid_full_length_segments": True,
+                        "validation_only_audio_paths": [candidate_audio],
+                        "segments": audio_segments,
+                    },
+                    "processed_audio": {
+                        "output_wav": candidate_audio,
+                        "validation_summary": report_path,
+                    },
+                    "acceptance": {
+                        "require_review_items": True,
+                        "expected_review_item_count": 3,
+                        "expected_review_item_ids": [
+                            "delete-before",
+                            "pause-one-second",
+                            "delete-after",
+                        ],
+                        "require_pause_validation": True,
+                    },
+                }
+            )
+            doc_items_path = os.path.join(tmpdir, "doc_items.json")
+            with open(doc_items_path, "w", encoding="utf-8") as doc_items_file:
+                json.dump({"review_items": review_items}, doc_items_file, ensure_ascii=False)
+            source_doc_items = load_review_items_json(doc_items_path)
+            request = normalize_pause_adjustments(request)
+            with open(report_path, "w", encoding="utf-8") as report_file:
+                json.dump(bind_audio_delivery_plan_to_report(request, report), report_file)
+
+            with patch(
+                "utils.runtime_integrity.validate_current_lite_runtime",
+                return_value={"ok": True, "source": "test-runtime"},
+            ):
+                result = execute_revision_request(
+                    request,
+                    drafts_root=tmpdir,
+                    mock_media=False,
+                    strict=True,
+                    doc_items=source_doc_items,
+                )
+            with open(
+                os.path.join(
+                    tmpdir,
+                    "LiteStrictSourceDocumentPause",
+                    "draft_content.json",
+                ),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertTrue(
+            result["acceptance_validation"]["ok"],
+            result["acceptance_validation"]["errors"],
+        )
+        self.assertIn(
+            "pause_fit",
+            result["acceptance_validation"]["metrics"]["enabled_gates"],
+        )
+        self.assertEqual(content["duration"], 11_000_000)
+        self.assertEqual(result["added_pause_duration_seconds"], 1.0)
+
+        def saved_windows(track_name):
+            return [
+                (
+                    segment["target_timerange"]["start"],
+                    segment["target_timerange"]["duration"],
+                    segment["source_timerange"]["start"],
+                )
+                for segment in _track(content, track_name)["segments"]
+            ]
+
+        self.assertEqual(
+            saved_windows(LITE_TRACKS["source_audio"]),
+            [
+                (0, 2_000_000, 0),
+                (3_000_000, 2_000_000, 3_000_000),
+                (6_000_000, 2_000_000, 5_000_000),
+                (9_000_000, 2_000_000, 8_000_000),
+            ],
+        )
+        self.assertEqual(
+            saved_windows(LITE_TRACKS["reused_audio"]),
+            [
+                (2_000_000, 1_000_000, 2_000_000),
+                (8_000_000, 1_000_000, 7_000_000),
+            ],
+        )
+        a2_receipts = [
+            receipt
+            for receipt in result["segment_receipts"]
+            if receipt.get("track_name") == LITE_TRACKS["reused_audio"]
+        ]
+        self.assertEqual(
+            [receipt["doc_item_id"] for receipt in a2_receipts],
+            ["delete-before", "delete-after"],
+        )
+        self.assertEqual(len({receipt["segment_id"] for receipt in a2_receipts}), 2)
+
+        text_by_material = {
+            material["id"]: json.loads(material["content"])["text"]
+            for material in content["materials"]["texts"]
+        }
+        marker_rows = sorted(
+            (
+                segment["target_timerange"]["start"],
+                text_by_material[segment["material_id"]],
+            )
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        self.assertEqual(
+            marker_rows,
+            [
+                (2_000_000, delete_review_items[0]["source_text"]),
+                (5_000_000, pause_source_text),
+                (8_000_000, delete_review_items[1]["source_text"]),
+            ],
+        )
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_copy_layout_is_rejected_before_draft_open(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "copy",
+                "project": {
+                    "draft_name": "LiteCopyRejected",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+            }
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "copy.*no longer executable"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(os.path.exists(os.path.join(drafts_root, "LiteCopyRejected")))
+
+    def test_lite_label_only_unresolved_status_never_changes_visible_marker_text(self):
+        source_text = "02:00 new issue; keep this exact review comment"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteUnresolvedLabel",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "new-issue",
+                        "kind": "review_only",
+                        "source_text": source_text,
+                        "start": 2.0,
+                        "execution_required": True,
+                        "execution_status": "label_only_unresolved",
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteUnresolvedLabel", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        marker_segment = next(
+            segment
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        text_material = next(
+            material
+            for material in content["materials"]["texts"]
+            if material["id"] == marker_segment["material_id"]
+        )
+        self.assertEqual(json.loads(text_material["content"])["text"], source_text)
+        self.assertNotIn("label_only_unresolved", json.loads(text_material["content"])["text"])
+        self.assertEqual(
+            result["review_marker_receipts"][0]["execution_status"],
+            "label_only_unresolved",
+        )
+
+    def test_lite_label_only_unresolved_edit_is_not_executed(self):
+        source_text = "02:00 新问题暂时只记录原文标签"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteUnresolvedEditSkipped",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "new-issue",
+                        "kind": "visual_overlay",
+                        "source_text": source_text,
+                        "start": 2.0,
+                        "end": 4.0,
+                        "execution_required": True,
+                        "execution_status": "label_only_unresolved",
+                    }
+                ],
+                "edits": [
+                    {
+                        "type": "add",
+                        "op_type": "add",
+                        "source_kind": "visual_overlay",
+                        "label": source_text,
+                        "detail": source_text,
+                        "start": 2.0,
+                        "end": 4.0,
+                        "doc_item_id": "new-issue",
+                        "asset_paths": ["C:/media/unresolved-overlay.png"],
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(drafts_root, "LiteUnresolvedEditSkipped", "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        visual_track = _track(content, LITE_TRACKS["visual_assets"])
+        assert not visual_track["segments"]
+        assert result["label_only_unresolved_item_ids"] == ["new-issue"]
+        assert result["review_marker_count"] == 1
+
+    def test_lite_acceptance_downgrades_stale_doc_item_execution_status(self):
+        """A stale external doc item cannot promote a marker-only issue to execution."""
+
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteStaleDocStatus",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "unresolved",
+                        "kind": "visual_overlay",
+                        "source_text": "02:00 新问题只记录原文",
+                        "start": 2.0,
+                        "execution_required": True,
+                    }
+                ],
+            }
+        )
+        request_item = replace(
+            request.review_items[0],
+            execution_required=True,
+            execution_status="label_only_unresolved",
+        )
+        external_doc_item = replace(request_item)
+        stale_request = replace(request, review_items=[request_item])
+
+        profile = derive_acceptance_profile(stale_request, doc_items=[external_doc_item])
+
+        self.assertEqual(len(profile["items"]), 1)
+        self.assertFalse(profile["items"][0]["execution_required"])
+        self.assertEqual(profile["items"][0]["gates"], [])
+        self.assertFalse(profile["routing_failures"])
+
+    def test_lite_rejects_asr_window_that_is_wider_than_authoritative_matches(self):
+        edit = _spoken_delete_edit("wide-window", 0.0, 4.0)
+        edit["evidence"]["asr_alignment"]["words"] = [
+            {"text": "actual", "start": 2.0, "end": 3.0}
+        ]
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteWideAsrWindow",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [edit],
+            }
+        )
+        problems = _spoken_cut_alignment_problems(request.edits[0], None)
+        self.assertTrue(any("first/last authoritative ASR match" in row for row in problems))
 
     def test_lite_mode_writes_a2_for_cut_even_when_audio_reuse_is_false(self):
         request = _load_request(

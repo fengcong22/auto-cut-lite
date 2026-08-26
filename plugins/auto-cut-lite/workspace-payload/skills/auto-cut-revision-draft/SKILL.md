@@ -21,8 +21,9 @@ focused visual skill. It overrides full-workflow visual instructions and accepta
    geometry and no keyframes.
 5. Keep animation/picture-timing, text-position/animation, and existing-hand cleanup items
    label-only.
-6. Save the editable split-gap draft with the unchanged source duration and isolated marker
-   families.
+6. Save the editable split-gap draft with source duration unchanged when no pause is added; an
+   explicit `+Ns` pause extends the project by `N` seconds and shifts every later track, asset,
+   and label by the cumulative added time. Keep isolated marker families.
 7. Validate root and active timeline content, source coverage, audio evidence, asset start
    alignment, default visual geometry, forbidden Lite outputs, and package integrity when
    delivery was requested.

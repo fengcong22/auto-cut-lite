@@ -670,6 +670,7 @@ def _merge_visual_results_into_items(
                 evidence=evidence,
                 validation=validation,
                 verbatim_status=item.verbatim_status,
+                execution_status=item.execution_status,
             )
         )
     return updated
@@ -721,6 +722,7 @@ def _merge_pause_results_into_items(
                 evidence=evidence,
                 validation=validation,
                 verbatim_status=item.verbatim_status,
+                execution_status=item.execution_status,
             )
         )
     return updated
@@ -749,6 +751,7 @@ def _build_review_marker_item(
     source_text: str = "",
     verbatim_status: str = "legacy",
     kind: str = "review_only",
+    execution_status: str = "",
 ):
     return ReviewMarkerItem(
         label=label,
@@ -759,6 +762,7 @@ def _build_review_marker_item(
         source_text=source_text,
         verbatim_status=verbatim_status,
         kind=kind,
+        execution_status=execution_status,
     )
 
 
@@ -885,6 +889,7 @@ def _validate_revision_execution_preflight(
     if request.audio_delivery_plan.mode == "segmented" and request.pause_alignment:
         stale_segment_ids: set[str] = set()
         delete_windows = _collect_delete_windows(request)
+        mapping_delete_windows = [] if request.workflow_mode == "lite" else delete_windows
         pause_offset_by_source: Dict[float, float] = {}
         for pause in request.pause_adjustments:
             evidence = pause.boundary_evidence or {}
@@ -895,7 +900,7 @@ def _validate_revision_execution_preflight(
                 )
             pause_timeline_start = _map_source_time_to_timeline(
                 pause.source_time,
-                delete_windows,
+                mapping_delete_windows,
                 request.pause_adjustments,
             )
             pause_key = round(pause.source_time, 6)
@@ -903,7 +908,7 @@ def _validate_revision_execution_preflight(
             pause_timeline_end = pause_timeline_start + pause.duration
             pause_offset_by_source[pause_key] = pause_timeline_end - _map_source_time_to_timeline(
                 pause.source_time,
-                delete_windows,
+                mapping_delete_windows,
                 request.pause_adjustments,
             )
             for segment in request.audio_delivery_plan.segments:
@@ -917,7 +922,7 @@ def _validate_revision_execution_preflight(
                 if segment.role in {"source", "reference"}:
                     expected_timeline_start = _map_source_time_to_timeline(
                         segment.source_start,
-                        delete_windows,
+                        mapping_delete_windows,
                         request.pause_adjustments,
                         include_pauses_at_point=True,
                     )
@@ -928,6 +933,9 @@ def _validate_revision_execution_preflight(
                         - max(segment.source_start, delete_start)
                         > 1e-6
                         for delete_start, delete_end in delete_windows
+                    ) and not (
+                        request.workflow_mode == "lite"
+                        and segment.track_name == "Lite Reused Audio"
                     ):
                         stale_segment_ids.add(segment.segment_id)
                 segment_timeline_end = segment.timeline_start + segment.duration
@@ -978,7 +986,7 @@ def _validate_revision_execution_preflight(
                 ),
                 key=lambda segment: (segment.source_start, segment.segment_id),
             )
-            if (
+            if request.workflow_mode != "lite" and (
                 len({segment.track_name for segment in reference_segments}) != 1
                 or len(reference_segments) != len(expected_windows)
                 or any(
@@ -996,13 +1004,13 @@ def _validate_revision_execution_preflight(
                 (
                     _map_source_time_to_timeline(
                         window_start,
-                        delete_windows,
+                        mapping_delete_windows,
                         request.pause_adjustments,
                         include_pauses_at_point=True,
                     ),
                     _map_source_time_to_timeline(
                         window_start,
-                        delete_windows,
+                        mapping_delete_windows,
                         request.pause_adjustments,
                         include_pauses_at_point=True,
                     )
@@ -1146,9 +1154,14 @@ def execute_revision_request(
     localize_materials: bool = False,
 ) -> Dict[str, Any]:
     if request.workflow_mode == "lite":
+        runtime_integrity = None
+        if not mock_media:
+            from utils.runtime_integrity import validate_current_lite_runtime
+
+            runtime_integrity = validate_current_lite_runtime()
         from utils.lite_revision import execute_lite_revision_request
 
-        return execute_lite_revision_request(
+        result = execute_lite_revision_request(
             request,
             drafts_root=drafts_root,
             mock_media=mock_media,
@@ -1157,6 +1170,9 @@ def execute_revision_request(
             acceptance_repair_callback=acceptance_repair_callback,
             localize_materials=localize_materials,
         )
+        if runtime_integrity is not None:
+            result["runtime_integrity"] = runtime_integrity
+        return result
 
     if localize_materials:
         raise ValueError("Material localization is only available for workflow_mode=lite.")
@@ -1460,6 +1476,7 @@ def execute_revision_request(
                 source_text=item.source_text,
                 verbatim_status=item.verbatim_status,
                 kind=item.kind,
+                execution_status=item.execution_status,
             )
             for item in marker_plan
         ]
@@ -1469,6 +1486,7 @@ def execute_revision_request(
                 "item_id": item.item_id,
                 "source_text": item.source_text,
                 "verbatim_status": item.verbatim_status,
+                "execution_status": item.execution_status,
                 "segment_id": item.segment_id,
                 "material_id": item.material_id,
                 "track_name": item.track_name,

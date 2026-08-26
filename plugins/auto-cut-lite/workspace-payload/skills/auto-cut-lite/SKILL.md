@@ -1,6 +1,6 @@
 ---
 name: auto-cut-lite
-description: Use for the packaged Auto-Cut Lite compact workflow, including editable JianYing review drafts, fixed trace tracks, verbatim two-second labels, simple supplied local overlays, unchanged source duration, and portable ZIP delivery.
+description: Use for the packaged Auto-Cut Lite compact workflow, including editable JianYing review drafts, fixed trace tracks, source-text-exact two-second labels, simple supplied local overlays, duration-preserving cuts, additive semantic pauses, and portable ZIP delivery.
 ---
 
 # Auto-Cut Lite
@@ -12,8 +12,17 @@ executing, or validating a review item. Read
 ## Fixed Workflow
 
 - Keep `workflow_mode=lite` and default `lite_cut_layout=split_gap`.
-- Preserve the unchanged project duration and editable source/cut/audio structure.
-- Keep exactly one verbatim two-second review label per source item, clamped at project end.
+- Reject `lite_cut_layout=copy` for new execution; it is historical read/validation compatibility
+  only.
+- Preserve editable source/cut/audio structure. Deletion does not compress the timeline: without
+  added pauses, final duration equals source duration.
+- Treat semantic-pause `duration` as added hold time. `+Ns` adds `N` seconds to the source's
+  existing pause and final duration, then shifts every later video, audio, visual, and label target
+  by the cumulative added time. Keep the pause label at the insertion boundary before the hold.
+- Keep exactly one two-second review label per source item, clamped at final project end. Its
+  visible text must equal only `source_text` code-point-for-code-point.
+- Keep `execution_status`, `label_only_unresolved`, item IDs, warnings, and diagnostics only in
+  internal metadata, receipts, validation output, and reports; never put them in a visible label.
 - Every issue locatable through speech or audio must use authoritative word/character ASR before
   execution or label placement. This includes spoken deletion, semantic pauses, pronunciation,
   breath, mouth noise, and speech timing. Place its verbatim label at the final ASR-resolved
@@ -21,15 +30,22 @@ executing, or validating a review item. Read
 - Only completely non-speech items use the review timestamp. If the comment says
   `07:14 ... 提前到 07:12`, use the target `07:12`. Accept a point timestamp for the label and
   never fall back to `0:00` for unresolved timing.
+- If a newly encountered issue has a reliable authoritative start but no safe maintained
+  implementation, leave one original-text label, record
+  `execution_status=label_only_unresolved` internally, skip that execution, and continue
+  independent items. If timing is unreliable, or an audio-identifiable issue lacks authoritative
+  ASR, fail before opening or writing the draft.
 - Insert supplied pointer or picture files on `Lite Visual Assets` at the requested start using
   JianYing default geometry and no keyframes.
 - Keep animation/picture-timing, text-position/animation, and existing-hand cleanup requests
   label-only.
 - Keep `Lite Timing Adjusted` empty. Ignore clean-cover/cleanup asset specs.
 - Do not require profile binding, target landing, lifecycle, opened-editor, or screenshot evidence.
-- In `split_gap`, A1 contains the kept windows and A2 contains exactly one independent,
-  source-aligned clip per merged ASR delete window. Reject pending/empty segmented plans,
-  full-length A2 clips, and any A2 window that differs from V2.
+- In `split_gap`, A1 contains the kept windows and A2 contains exactly one independent, audible,
+  source-aligned clip per logical ASR delete window. Merge overlaps only within one source item;
+  adjacent different-item windows stay separate and true cross-item overlap fails before writing.
+  Reject pending/empty segmented plans, full-length or cross-item-merged A2, muted A2, and any A2
+  source or pause-mapped target window that differs from V2.
 
 ## Execution
 
@@ -52,4 +68,7 @@ draft validation, ZIP CRC validation, isolated extraction, tree-hash comparison,
 receipt. Packaging stays offline and must not open JianYing or rewrite draft JSON.
 
 Report the draft path, review-item coverage, editable structure, visual insertions versus
-label-only items, strict acceptance result, and delivery ZIP/receipt when requested.
+label-only items, source versus final duration and added-pause total, strict acceptance result, and
+delivery ZIP/receipt when requested. Before non-mock execution, validate the deployment report,
+package-manifest anchor, and managed runtime inventory. Runtime drift is a pre-execution hard stop
+that requires redeployment from a verified package; never hot-patch it or use another checkout.

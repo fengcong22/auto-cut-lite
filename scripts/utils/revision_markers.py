@@ -16,6 +16,8 @@ _UNVERIFIED_SOURCE = "unverified_source_unavailable"
 _UNVERIFIED_TIMING = "unverified_timing_unavailable"
 _SAVED_START_TOLERANCE_US = 500
 _INTERNAL_LEGACY_SOURCES = {"legacy_marker", "legacy_edit"}
+
+
 @dataclass(frozen=True)
 class MarkerPlanItem:
     item_id: str
@@ -25,6 +27,26 @@ class MarkerPlanItem:
     verbatim_status: str
     source: str = ""
     kind: str = "review_only"
+    execution_status: str = ""
+
+
+def _execution_status_from_source_item(source_item: RevisionReviewItem) -> str:
+    direct_status = getattr(source_item, "execution_status", "")
+    if direct_status is not None and str(direct_status).strip():
+        return str(direct_status).strip()
+
+    for metadata in (source_item.evidence, source_item.validation):
+        if not isinstance(metadata, dict):
+            continue
+        explicit_status = metadata.get("execution_status")
+        if explicit_status is not None and str(explicit_status).strip():
+            return str(explicit_status).strip()
+        # Generic status is accepted only for the dedicated label-only state;
+        # ASR and validation pass/fail statuses remain unrelated metadata.
+        generic_status = metadata.get("status")
+        if str(generic_status or "").strip().casefold() == "label_only_unresolved":
+            return "label_only_unresolved"
+    return ""
 
 
 def _deleted_duration_before(point: float, delete_windows: List[List[float]]) -> float:
@@ -49,14 +71,25 @@ def _inserted_duration_before(point: float, request: RevisionRequest) -> float:
 def map_marker_plan_to_timeline(
     plan: Sequence[MarkerPlanItem], request: RevisionRequest
 ) -> List[MarkerPlanItem]:
-    # Lite drafts intentionally preserve the source project duration.  A split-gap
-    # delete is represented by a hole on V1/A1 plus a source-aligned reference clip
-    # on V2/A2; it does not compress the marker timeline.  The same source-time
-    # contract applies to the legacy lite copy layout.  Keep marker mapping in
-    # source time so strict root/active-timeline validation agrees with the saved
-    # editable draft.
+    # Lite never subtracts deleted duration. Explicitly added pauses do extend the
+    # timeline, however, so every later label moves by the cumulative added hold.
+    # A label exactly on a pause boundary stays before that hold. Map only the
+    # start: an inserted hold must not stretch a fixed-duration review label.
     if str(getattr(request, "workflow_mode", "") or "").strip().casefold() == "lite":
-        return [replace(item) for item in plan]
+        mapped_plan: List[MarkerPlanItem] = []
+        for item in plan:
+            mapped_start = max(
+                0.0,
+                item.start + _inserted_duration_before(item.start, request),
+            )
+            mapped_plan.append(
+                replace(
+                    item,
+                    start=mapped_start,
+                    end=mapped_start + max(0.0, item.end - item.start),
+                )
+            )
+        return mapped_plan
 
     delete_windows = _collect_delete_windows(request)
     mapped_plan: List[MarkerPlanItem] = []
@@ -752,6 +785,7 @@ def build_marker_plan(
                 verbatim_status=verbatim_status,
                 source=str(source_item.source or ""),
                 kind=str(source_item.kind or "review_only"),
+                execution_status=_execution_status_from_source_item(source_item),
             )
         )
 

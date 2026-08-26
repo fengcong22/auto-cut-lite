@@ -1,6 +1,6 @@
 ---
 name: auto-cut-high-school-history-lite
-description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, verbatim two-second review labels, simple local overlays, unchanged source duration, and no destructive delete, animation, or automatic scaling.
+description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, source-text-exact two-second review labels, simple local overlays, duration-preserving cuts, additive semantic pauses, and no destructive animation or automatic scaling.
 ---
 
 # High School History Auto-Cut Lite
@@ -44,11 +44,13 @@ reuse task intermediates produced by a mistaken full-version run.
   word/character ASR boundary and reverse-audio checks where applicable. This includes spoken
   deletion, semantic pauses, pronunciation, breath, mouth noise, and speech timing. Review
   labels and the editable cut structure remain required.
+- A visible JianYing label contains only the source item's exact `source_text`. Internal status,
+  item IDs, warnings, and diagnostics never appear in visible label text.
 
 ## Lite Draft Contract
 
-- The default `lite_cut_layout` is `split_gap`. In this layout, delete windows are real
-  editable cut boundaries while the project duration stays unchanged: V1 (`Original Video`)
+- The only executable layout for new Lite tasks is `split_gap`. In this layout, delete windows are
+  real editable cut boundaries and deletion never shortens the project: V1 (`Original Video`)
   and A1 (`Separated Source Audio`) contain only the non-delete intervals; V2 (`Lite Cut
   Segments`) and A2 (`Lite Reused Audio`) contain the source-aligned delete intervals. This is
   written directly to the JianYing timeline and does not require opening the editor. Save
@@ -80,15 +82,22 @@ reuse task intermediates produced by a mistaken full-version run.
   video when no separate source audio is present, then submit it through the bundled
   `volc.bigasr.auc` adapter. Do not ask the user to create TOS storage, a bucket, a signed URL,
   or storage credentials.
-- Set `lite_cut_layout=copy` only for compatibility with older lite drafts that intentionally
-  keep a full V1/A1 and use V2 copies as a manual reference lane.
+- Recognize `lite_cut_layout=copy` only while reading or validating an older Lite draft that
+  intentionally kept a full V1/A1 reference layout. Reject `copy` for every new execution.
+
+- When there are no semantic-pause additions, final project duration equals source duration.
+  A requested `+Ns` pause means add `N` seconds to the source's existing pause, not make the total
+  pause `N` seconds. Sum all added holds into final duration and apply their cumulative offset to
+  every later V1/V2/A1/A2 segment, visual asset, and review label. Keep the pause item's own label
+  at the insertion boundary before the editable still-frame hold.
 
 - Import local video, audio, images, text, subtitles, flower text, and local BGM through the
   maintained repository APIs.
 - In the default split-gap layout, write the non-delete source intervals to `Original Video`
-  and `Separated Source Audio`, and write every merged delete interval to `Lite Cut Segments`
-  and `Lite Reused Audio` at the same timeline/source time. Preserve the original range and
-  total project duration.
+  and `Separated Source Audio`, and write every logical delete interval (after same-item overlap
+  merging only) to `Lite Cut Segments` and `Lite Reused Audio` at the same source time and its
+  pause-mapped timeline time. Preserve the full source range; deletion does not reduce duration,
+  while explicit added holds increase it.
 - Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. A
   supplied pointer insertion is execution-required, but an existing-hand occlusion, removal,
   clean-cover, cleanup, or residual-cover request is label-only. Animation or other
@@ -101,6 +110,14 @@ reuse task intermediates produced by a mistaken full-version run.
   - `Review Marker Animation 1/2/...` contains animation-timing items.
   The three families never share a track. Unknown review-only items remain visible in the Delete
   family as a safe three-family fallback.
+- For every source-ledger item, render exactly and only `source_text` code-point-for-code-point.
+  Keep `execution_status`, including `label_only_unresolved`, solely in internal metadata, marker
+  receipts, validation output, and reports. Never prefix, suffix, or otherwise annotate visible
+  label text with a status, item ID, warning, or diagnostic.
+- If a new issue cannot be solved safely but its authoritative start is reliable, keep exactly one
+  original-text label, set `execution_status=label_only_unresolved` internally, do not improvise an
+  edit, and continue independent items. If timing is unreliable, or an audio-identifiable issue
+  lacks authoritative ASR, fail before opening or writing the draft instead of guessing a label.
 - Lite marker text is left-aligned (`alignment=0`), rendered at a 4–5 font-size range, and uses
   the full normalized safe width with a clamped background/transform so neither stage edge is
   crossed. These grouped lanes are the intentional lite exception to the full workflow's
@@ -110,21 +127,24 @@ reuse task intermediates produced by a mistaken full-version run.
   these colors, wrapping, text alignment, font range, and both stage bounds.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
-  occlusion, or target landing. Clamp the requested duration to the source project duration.
+  occlusion, or target landing. Clamp the mapped target duration to the final project duration.
 - Keep `Lite Timing Adjusted` empty. Animation, page-turn, reveal, release, and other
   picture-timing requests retain only their verbatim review labels.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
-- Keep A1 and A2 source-aligned in split-gap layout. The delete lane's audio is placed on A2
+- Keep A1 and A2 source-aligned by source range and identically pause-mapped on the target timeline
+  in split-gap layout. The delete lane's audio is placed on A2
   even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`
   layout's optional audio copies. A2 deleted-source clips keep normal volume (`1.0`) for manual
   review; do not silently mute them because their segmented-audio role is `reference`.
-- One A2 track may contain many clips, but it must contain exactly one independent clip for each
-  merged ASR delete window. Its source start, timeline start, and duration must equal the matching
-  V2 delete window. Reject a full-length/continuous A2 segment and reject a pending or empty
-  segmented plan before opening or writing the draft.
+- One A2 track may contain many clips, but it must contain exactly one independent, audible clip
+  for each logical ASR delete window. Merge overlaps only within the same stable source item;
+  adjacent windows from different items stay separate, and true cross-item overlap fails before
+  draft writing for disambiguation. Each A2 source range and pause-mapped target range must equal
+  its matching V2 window. Reject full-length/continuous/cross-item-merged A2 and pending or empty
+  segmented plans before opening or writing the draft.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim, the start must equal the edit start, and the duration is `2s` except
-  when clamped at the unchanged source-video end.
+  when clamped at the final pause-extended project end.
 - Place grouped review labels in the existing top safe-band review-marker layout. Keep each
   marker aligned to its edit start and preserve the exact source text; do not re-enable the
   full-workflow horizontal compression or move a label into the picture body.
@@ -135,16 +155,20 @@ reuse task intermediates produced by a mistaken full-version run.
 
 Before delivery, validate the saved root and active timeline variants:
 
-- project duration equals the source video duration;
+- project duration equals source duration plus the sum of explicit added-pause durations; with no
+  added pause it equals source duration;
 - the fixed lite video and A1 tracks exist and remain editable;
 - In split-gap layout, A2 exists when at least one delete window intersects the source audio;
-  in copy layout, A2 follows the legacy `reuse_audio` rule;
+  `copy` is not executable for a new task;
 - root and active-timeline content both save `config.maintrack_adsorb=false`, and every A2
   deleted-source segment has normal volume;
-- root and active-timeline A2 segment count and windows exactly equal the merged ASR delete
-  windows; no A2 segment spans the full source or merges unrelated delete windows;
-- copied source and target ranges stay inside the unchanged project duration;
-- review labels are verbatim, start-aligned, top-safe, and no longer than `2s`;
+- root and active-timeline A2 segment count and windows exactly equal the logical ASR delete
+  windows; no A2 segment spans the full source, merges different items, or overlaps an unrelated
+  A1 interval;
+- source ranges stay inside source duration; target ranges stay inside final duration and every
+  post-pause track and label uses the same cumulative offset;
+- review labels equal only `source_text`, are mapped-start-aligned, top-safe, and no longer than
+  `2s`; internal execution status never appears in their text;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.
 - every spoken delete has a passing word/character ASR boundary receipt; the review timestamp is
   recorded only as `search_hint`, and audio precision/reverse-ASR gates remain enabled. The
@@ -156,8 +180,13 @@ Before delivery, validate the saved root and active timeline variants:
   occlusion, clean-cover, or opened-state evidence is required in lite mode.
 
 Report split-gap delete requests as editable cut boundaries with the deleted source intervals
-isolated on V2/A2; the source project duration is intentionally unchanged for secondary manual
-editing.
+isolated on V2/A2. Report whether final duration stayed equal to source duration or increased only
+by explicit added-pause time.
+
+Before a non-mock installed-runtime execution, validate the deployment report, package-manifest
+anchor, and managed runtime inventory. Any missing, changed, extra, or hash-mismatched managed
+runtime file is drift: stop and require redeployment from a verified package. Do not hot-patch the
+installed runtime or fall back to another checkout.
 
 ## Final Lite Delivery Boundary
 

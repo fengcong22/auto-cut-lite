@@ -12,7 +12,8 @@ Text, sticker, subtitle, flower-text safe-zone movement and intro/outro/disappea
 comments are label-only in Lite:
 
 - set `execution_required=false`;
-- preserve one verbatim two-second label at the requested start;
+- preserve one two-second label whose visible text is exactly the source item's `source_text` at
+  the requested start (or its pause-mapped start);
 - do not change text or sticker coordinates, transforms, scale, `anim_in`, `anim_out`, or any
   animation material;
 - do not compensate for save-time drift or request opened-editor screenshots.

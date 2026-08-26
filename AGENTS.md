@@ -78,10 +78,20 @@ When returning a revision result, report:
 
 - For a source-ledger item, the visible marker text must equal `source_text` code-point-for-code-point, including timestamps, punctuation, whitespace, line breaks, and literal question marks.
 - Never replace source-ledger text with a summary, prefix, item ID, translation, or truncation unless that content already exists in `source_text`.
+- Keep `execution_status`, `label_only_unresolved`, `verbatim_status`, item IDs, warnings, and
+  diagnostic wording only in internal request metadata, marker receipts, validation output, and
+  reports. Never concatenate any of them into `source_text` or a visible JianYing label.
 - Create exactly one marker per stable source item ID. Multiple internal edits for that item share the marker; duplicate IDs fail validation, while identical text under different IDs remains separate.
 - Treat the latest `doc_items` document read as canonical. If an internal row lacks source text, automatically re-read the document; if recovery is unavailable, use the most complete unmodified candidate with `verbatim_status=unverified_source_unavailable` and a warning.
 - Source-text recovery is nonblocking: it must not stop editing, remove an item, prevent draft generation, or silently claim exactness.
 - Validate marker text, count, receipt mapping, and mapped timeline start in both the saved root and active timeline draft content. An explicit empty ledger rejects old extra markers.
+- When a newly encountered issue has a reliable authoritative start but no safe maintained
+  implementation, do not improvise a fix. Keep one visible label equal only to its `source_text`,
+  record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports, and
+  continue independent items. Treat that item as non-executing until a maintained solution exists.
+- That downgrade never authorizes guessed timing. If the authoritative start is unresolved, fail
+  before opening or writing a draft. If the issue is locatable through speech or audio, missing
+  authoritative ASR is the same pre-write failure; the review timestamp remains only a search hint.
 
 ## Review Document Audio Precision
 
@@ -101,11 +111,38 @@ When returning a revision result, report:
 
 ## Lite A1/A2 Audio Layout
 
-- In Lite `split_gap`, A1 contains exactly the complement of the merged ASR delete windows.
-- A2 contains exactly one independent, source-aligned clip per merged ASR delete window on one
-  `Lite Reused Audio` track. A full-length, continuous, or differently merged A2 segment is invalid.
+- In Lite `split_gap`, A1 contains exactly the complement of the authoritative ASR delete windows.
+- A2 contains exactly one independent, audible, source-aligned clip for each logical delete window
+  on one `Lite Reused Audio` track. Overlapping windows may merge only when they belong to the same
+  stable source item. Adjacent windows from different items remain separate; true overlap between
+  different items fails before draft writing and requires disambiguation.
+- A full-length, continuous, cross-item-merged, muted, or otherwise mismatched A2 segment is invalid.
 - A pending or empty segmented audio plan must fail before draft creation; it must never bypass
   split-gap construction or be treated as a successful audio delivery.
+
+## Lite Timeline Duration And Layout
+
+- Lite deletion never compresses the timeline. With no added semantic pause, final project duration
+  equals source duration even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
+- A semantic-pause `duration` is added hold time, not the total desired pause. A request for
+  `+1s` preserves the source pause and adds one second, so final duration increases by exactly one
+  second. Multiple additions accumulate.
+- Apply the cumulative added-pause offset to every later V1/V2/A1/A2 segment, visual asset, and
+  review label. Keep the pause item's own label at the insertion boundary before its added hold;
+  use an editable still-frame segment for the hold.
+- `lite_cut_layout=copy` is historical read/validation compatibility only. Reject it for every new
+  Lite execution; new tasks must use `split_gap`.
+
+## Packaged Runtime Integrity
+
+- Before a non-mock task uses an installed Auto-Cut Lite runtime, validate the deployment report,
+  package-manifest anchor, and installed runtime inventory.
+- Any missing, changed, extra, or hash-mismatched managed runtime file is deployment drift. Stop
+  before task execution and require redeployment from a verified package. Never hot-patch the
+  installed runtime, accept the drift, or fall back to another checkout.
+- Target-local asset indexes (`data/*.local.csv`, `data/jy_cached_audio.csv`, the packaged cloud
+  index refreshes, and `assets/jy_sync/**`) are intentional mutable caches; they are not code
+  changes and are excluded from the immutable runtime inventory check.
 
 ## Resumable Review Pipeline
 

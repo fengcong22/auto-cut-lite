@@ -689,6 +689,7 @@ class TestRevisionRunner(unittest.TestCase):
             kind="pointer_overlay",
             source_text="修改01 添加指针",
             verbatim_status="unverified_source_unavailable",
+            execution_status="label_only_unresolved",
         )
 
         merged = _merge_visual_results_into_items(
@@ -703,6 +704,7 @@ class TestRevisionRunner(unittest.TestCase):
         )
 
         self.assertEqual(merged[0].verbatim_status, "unverified_source_unavailable")
+        self.assertEqual(merged[0].execution_status, "label_only_unresolved")
 
     def test_pause_merge_preserves_review_item_verbatim_status(self):
         source_item = RevisionReviewItem(
@@ -710,6 +712,7 @@ class TestRevisionRunner(unittest.TestCase):
             kind="pause_delete",
             source_text="校对02 调整停顿",
             verbatim_status="unverified_source_unavailable",
+            execution_status="label_only_unresolved",
         )
 
         merged = _merge_pause_results_into_items(
@@ -718,6 +721,7 @@ class TestRevisionRunner(unittest.TestCase):
         )
 
         self.assertEqual(merged[0].verbatim_status, "unverified_source_unavailable")
+        self.assertEqual(merged[0].execution_status, "label_only_unresolved")
 
     def test_doc_request_merge_uses_doc_text_and_status_together(self):
         request_item = RevisionReviewItem(
@@ -730,12 +734,14 @@ class TestRevisionRunner(unittest.TestCase):
             item_id="修改03",
             kind="spoken_delete",
             source_text="source text",
+            execution_status="label_only_unresolved",
         )
 
         merged = _merge_unique_review_items([request_item], [source_item])
 
         self.assertEqual(merged[0].source_text, "source text")
         self.assertEqual(merged[0].verbatim_status, "verified")
+        self.assertEqual(merged[0].execution_status, "label_only_unresolved")
 
     def test_doc_request_merge_uses_request_text_and_status_when_doc_text_is_empty(self):
         request_item = RevisionReviewItem(
@@ -1285,6 +1291,7 @@ class TestRevisionRunner(unittest.TestCase):
                     "start": 10.0,
                     "end": 13.0,
                     "verbatim_status": "verified",
+                    "evidence": {"execution_status": "label_only_unresolved"},
                 }
             ],
         }
@@ -1366,6 +1373,7 @@ class TestRevisionRunner(unittest.TestCase):
                 "item_id",
                 "source_text",
                 "verbatim_status",
+                "execution_status",
                 "segment_id",
                 "material_id",
                 "track_name",
@@ -1376,6 +1384,7 @@ class TestRevisionRunner(unittest.TestCase):
         self.assertEqual(receipt["item_id"], "item-007")
         self.assertEqual(receipt["source_text"], source_text)
         self.assertEqual(receipt["verbatim_status"], "verified")
+        self.assertEqual(receipt["execution_status"], "label_only_unresolved")
         self.assertEqual(receipt["segment_id"], marker_segments[0]["id"])
         self.assertEqual(receipt["material_id"], marker_segments[0]["material_id"])
         self.assertEqual(receipt["track_name"], marker_tracks[0]["name"])

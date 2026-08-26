@@ -101,6 +101,7 @@ class RevisionReviewItem:
     evidence: Dict[str, Any] = field(default_factory=dict)
     validation: Dict[str, Any] = field(default_factory=dict)
     verbatim_status: str = "verified"
+    execution_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -599,6 +600,12 @@ def _parse_review_item(item: Any, idx: int, field_name: str) -> RevisionReviewIt
         raise ValueError(f"{field_name}[{idx}].evidence must be an object when provided.")
     if not isinstance(validation, dict):
         raise ValueError(f"{field_name}[{idx}].validation must be an object when provided.")
+    execution_status = str(
+        item.get("execution_status")
+        or evidence.get("execution_status")
+        or validation.get("execution_status")
+        or ""
+    ).strip()
     return RevisionReviewItem(
         item_id=item_id,
         kind=kind,
@@ -613,6 +620,7 @@ def _parse_review_item(item: Any, idx: int, field_name: str) -> RevisionReviewIt
             str(item.get("verbatim_status") or default_verbatim_status).strip()
             or default_verbatim_status
         ),
+        execution_status=execution_status,
     )
 
 
@@ -1049,10 +1057,14 @@ def load_revision_request(path: str) -> RevisionRequest:
         review_items = [
             replace(
                 item,
-                execution_required=lite_execution_required(
-                    item.kind,
-                    item.source_text,
-                    item.execution_required,
+                execution_required=(
+                    False
+                    if item.execution_status.casefold() == "label_only_unresolved"
+                    else lite_execution_required(
+                        item.kind,
+                        item.source_text,
+                        item.execution_required,
+                    )
                 ),
             )
             for item in review_items

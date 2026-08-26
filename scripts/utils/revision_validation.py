@@ -72,6 +72,27 @@ from utils.revision_models import (
     lite_execution_required,
 )
 
+
+def _effective_lite_execution_required(item: RevisionReviewItem) -> bool:
+    """Apply the marker-only status before deriving Lite execution gates.
+
+    ``doc_items`` can be supplied as already-instantiated model objects by older
+    callers, so the parser-level downgrade is not sufficient on its own.  Keep
+    the status authoritative at the validation boundary as well.
+    """
+
+    statuses = [getattr(item, "execution_status", "")]
+    for payload in (getattr(item, "evidence", None), getattr(item, "validation", None)):
+        if isinstance(payload, dict):
+            statuses.append(payload.get("execution_status", ""))
+    if any(str(status or "").strip().casefold() == "label_only_unresolved" for status in statuses):
+        return False
+    return lite_execution_required(
+        item.kind,
+        item.source_text,
+        item.execution_required,
+    )
+
 _SUBJECT_POINTER_BINDINGS_MODULE: Optional[ModuleType] = None
 _LOCAL_TRANSCRIPT_FIELDS = (
     "local_joined_text",
@@ -2414,6 +2435,7 @@ def _merge_unique_review_items(
             evidence=evidence,
             validation=validation,
             verbatim_status=verbatim_status,
+            execution_status=(source_item.execution_status or item.execution_status),
         )
     return list(merged.values())
 
@@ -2656,6 +2678,11 @@ def _validate_lite_visual_start_alignment(
                 f"Lite visual edit {edit.doc_item_id or index + 1} has an invalid start time."
             )
             continue
+        expected_start += sum(
+            float(pause.duration)
+            for pause in request.pause_adjustments
+            if float(pause.source_time) <= float(edit.start) + 1e-6
+        )
         for spec in specs:
             if not isinstance(spec, dict):
                 continue
@@ -2954,11 +2981,7 @@ def _acceptance_route_records(
             execution_item.execution_required if execution_item is not None else bool(edits)
         )
         if request.workflow_mode == "lite" and execution_item is not None:
-            execution_required = lite_execution_required(
-                execution_item.kind,
-                execution_item.source_text,
-                execution_required,
-            )
+            execution_required = _effective_lite_execution_required(execution_item)
         operation_tokens = [
             _normalize_acceptance_token(edit.op_type) for edit in edits if edit.op_type
         ]
@@ -3529,10 +3552,14 @@ def _saved_semantic_pause_hold_is_proven(
 
     if request is not None:
         delete_windows = _collect_delete_windows(request)
-        deleted_before = sum(
-            max(0.0, min(source_time, delete_end) - delete_start)
-            for delete_start, delete_end in delete_windows
-            if source_time > delete_start
+        deleted_before = (
+            0.0
+            if request.workflow_mode == "lite"
+            else sum(
+                max(0.0, min(source_time, delete_end) - delete_start)
+                for delete_start, delete_end in delete_windows
+                if source_time > delete_start
+            )
         )
         inserted_before = sum(
             pause.duration
@@ -3921,11 +3948,7 @@ def validate_revision_acceptance(
         review_items = [
             replace(
                 item,
-                execution_required=lite_execution_required(
-                    item.kind,
-                    item.source_text,
-                    item.execution_required,
-                ),
+                execution_required=_effective_lite_execution_required(item),
             )
             for item in review_items
         ]
@@ -4542,16 +4565,22 @@ def _semantic_pause_main_video_problems(
         default=0.0,
     )
     delete_duration = sum(end - start for start, end in _collect_delete_windows(request))
-    source_duration = (
-        saved_output_duration
-        - sum(pause.duration for pause in request.pause_adjustments)
-        + delete_duration
-    )
+    declared_duration = request.project.media_duration_seconds
+    if request.workflow_mode == "lite":
+        source_duration = declared_duration or (
+            int(content.get("duration", 0) or 0) / 1_000_000.0
+            - sum(pause.duration for pause in request.pause_adjustments)
+        )
+    else:
+        source_duration = (
+            saved_output_duration
+            - sum(pause.duration for pause in request.pause_adjustments)
+            + delete_duration
+        )
     if source_duration <= 0:
         return ["Semantic pause source-video split cannot resolve source media duration."]
 
     problems: List[str] = []
-    declared_duration = request.project.media_duration_seconds
     if declared_duration > 0 and abs(declared_duration - source_duration) > 0.1:
         problems.append(
             "project.media_duration_seconds does not match the saved timeline-derived source "
@@ -4599,10 +4628,14 @@ def _semantic_pause_main_video_problems(
         actual_target_start = _safe_int(target_range.get("start"))
         actual_target_duration = _safe_int(target_range.get("duration"))
         expected_duration = window_end - window_start
-        deleted_before = sum(
-            max(0.0, min(window_start, delete_end) - delete_start)
-            for delete_start, delete_end in delete_windows
-            if window_start > delete_start
+        deleted_before = (
+            0.0
+            if request.workflow_mode == "lite"
+            else sum(
+                max(0.0, min(window_start, delete_end) - delete_start)
+                for delete_start, delete_end in delete_windows
+                if window_start > delete_start
+            )
         )
         inserted_at_or_before = sum(
             pause.duration

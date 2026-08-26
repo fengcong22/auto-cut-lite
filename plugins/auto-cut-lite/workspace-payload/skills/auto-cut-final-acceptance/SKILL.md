@@ -13,8 +13,9 @@ pointer, and animation acceptance.
 ## Required Gates
 
 - the saved draft and declared active timeline exist and agree;
-- source media, editable tracks, split-gap cut structure, separated/reused audio, and unchanged
-  project duration satisfy the Lite draft contract;
+- source media, editable tracks, split-gap cut structure, separated/reused audio, and the Lite
+  duration contract satisfy the draft contract (source duration when no added pause, source plus
+  explicit added-pause time otherwise);
 - every source review item has one start-aligned verbatim marker; every audio-identifiable item
   is aligned to its final ASR-resolved window or point, not the rough review timestamp; only a
   completely non-speech item may use the review timestamp or requested target;
@@ -22,8 +23,11 @@ pointer, and animation acceptance.
 - spoken deletions retain ASR boundary, delete/must-keep, reverse-ASR, and semantic-join evidence;
 - semantic pauses and other audio-identifiable timing retain authoritative source-ASR identity
   and boundary evidence;
-- A2 contains exactly one independent source-aligned clip per merged ASR/V2 delete window, with
-  no pending/empty plan and no full-length or continuous A2 segment;
+- A2 contains exactly one independent, audible source-aligned clip per logical ASR/V2 delete
+  window, with no pending/empty plan and no full-length, continuous, muted, or cross-item-merged
+  A2 segment;
+- visible marker text equals only `source_text`; internal execution status such as
+  `label_only_unresolved` is kept in receipts/reports and never appears in the label;
 - supplied pointer/image items have a saved local material and editable segment at the requested
   start, with default geometry and no keyframes;
 - animation/picture-timing, text-position/animation, and cleanup-only pointer items are

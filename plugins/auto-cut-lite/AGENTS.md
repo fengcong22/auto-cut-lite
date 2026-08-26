@@ -11,6 +11,10 @@
 - Read `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\deployment-report.json` before execution.
 - Require `deployment_status=installed`, a valid `plugin_manifest_path`, `runtime_root`, and
   `components.python.runtime_path`.
+- Validate the deployment report, package-manifest anchor, and managed runtime inventory before
+  every non-mock task. A missing, changed, extra, or hash-mismatched managed file is runtime drift.
+- Runtime drift is a hard stop before task execution. Tell the user to redeploy from a verified
+  package; do not hot-patch the installed runtime or fall back to another checkout.
 - Run maintained commands from the reported `runtime_root` with the reported Python environment.
 - Never fall back to a source checkout, another Auto-Cut installation, or system Python.
 
@@ -19,6 +23,9 @@
 - Deliver editable JianYing projects unless the user explicitly requests a baked export.
 - Preserve source media, separated or replacement audio, visible cut structure, and traceable
   review markers.
+- The visible JianYing text for each source-ledger marker must equal only that item's `source_text`
+  code-point-for-code-point. Keep item IDs, statuses, warnings, and diagnostics in internal
+  metadata, receipts, validation output, and reports, never in visible label text.
 - Validate the saved root and active timeline before reporting completion.
 - Use the `auto-cut` router for natural-language or mixed requests and the focused `auto-cut-*`
   skill when the user names one.
@@ -46,12 +53,28 @@
 - Only completely non-speech items use review-comment timestamps. When a comment names an old
   time and a requested target such as `07:14 ... 提前到 07:12`, place the label at `07:12`.
   Point timestamps are valid label starts; unresolved timing must never fall back to `0:00`.
-- In `split_gap`, A2 is one track containing one independent source-aligned clip per merged ASR
-  delete window. Reject pending/empty plans, full-length A2 clips, and A2 windows that differ from
-  the V2 delete windows.
+- If a new issue cannot be solved safely but has a reliable authoritative start, create exactly
+  one visible label equal only to its `source_text`, record
+  `execution_status=label_only_unresolved` only in internal metadata/receipts/reports, and continue
+  independent items. Do not improvise an edit. If its time is unreliable, or it is
+  audio-identifiable and lacks authoritative ASR, fail before opening or writing a draft.
+- Lite deletion never compresses the timeline. With no added semantic pause, final duration equals
+  source duration. A `+Ns` pause adds `N` seconds to the existing pause, extends the project by
+  `N` seconds, and shifts every later video/audio/visual/label target by the cumulative added time.
+  Keep the pause item's own label at the insertion boundary before its editable still-frame hold.
+- In `split_gap`, A2 is one track containing one independent, audible source-aligned clip per
+  logical ASR delete window. Merge overlapping windows only within the same source item; keep
+  adjacent windows from different items separate and fail true cross-item overlap before writing.
+  Reject pending/empty plans, full-length or cross-item-merged A2, muted A2, and A2 windows that
+  differ from their pause-mapped V2 windows.
+- `lite_cut_layout=copy` is historical read/validation compatibility only and must be rejected for
+  every new Lite execution. New tasks use `split_gap`.
 
 ## Local Data
 
 - Keep credentials, login state, JianYing account state, private media, project bindings, and
   pointer profiles on the target computer.
+- The runtime integrity check permits only target-local asset caches to change: `data/*.local.csv`,
+  `data/jy_cached_audio.csv`, refreshed packaged cloud indexes, and `assets/jy_sync/**`. Any
+  change outside those cache paths is runtime drift and requires redeployment.
 - Never copy target-local secrets or absolute source-machine paths into a plugin or delivery ZIP.

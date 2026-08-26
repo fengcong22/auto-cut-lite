@@ -21,6 +21,7 @@ setup_env()
 from core.review_marker_ops import ReviewMarkerItem, ReviewMarkerOpsMixin
 from utils.revision_markers import build_marker_plan, map_marker_plan_to_timeline
 from utils.revision_models import (
+    PauseAdjustment,
     PreservationRules,
     RevisionEdit,
     RevisionMarker,
@@ -50,6 +51,57 @@ class _ReviewMarkerProject(ReviewMarkerOpsMixin):
 
 
 class TestReviewMarkerRendering(unittest.TestCase):
+    def test_visible_marker_text_comes_from_source_text_not_label(self):
+        source_text = "00:12 删除原文中的这一段"
+        project = _ReviewMarkerProject()
+
+        receipts = project.add_review_markers(
+            [
+                ReviewMarkerItem(
+                    label="修改07: 已处理 - 删除原文中的这一段",
+                    source_text=source_text,
+                    start_time="2s",
+                    item_id="item-07",
+                )
+            ]
+        )
+
+        self.assertEqual(project.text_calls[0]["text"], source_text)
+        self.assertEqual(receipts[0].label, source_text)
+        self.assertEqual(receipts[0].source_text, source_text)
+
+    def test_lite_grouped_marker_text_omits_execution_status(self):
+        source_text = "05:18 小手只贴在开始位置"
+        project = _ReviewMarkerProject()
+
+        receipts = project.add_review_markers(
+            [
+                ReviewMarkerItem(
+                    label="label_only_unresolved | " + source_text,
+                    source_text=source_text,
+                    execution_status="label_only_unresolved",
+                    start_time="5s",
+                    item_id="item-pointer",
+                    kind="pointer_overlay",
+                )
+            ],
+            layout_mode="lite_grouped",
+        )
+
+        self.assertEqual(project.text_calls[0]["text"], source_text)
+        self.assertNotIn("label_only_unresolved", project.text_calls[0]["text"])
+        self.assertEqual(receipts[0].execution_status, "label_only_unresolved")
+        self.assertEqual(receipts[0].label, source_text)
+
+    def test_legacy_marker_without_source_text_keeps_label_compatibility(self):
+        project = _ReviewMarkerProject()
+        receipts = project.add_review_markers(
+            [ReviewMarkerItem(label="legacy marker", start_time="0s", item_id="legacy")]
+        )
+
+        self.assertEqual(project.text_calls[0]["text"], "legacy marker")
+        self.assertEqual(receipts[0].source_text, "legacy marker")
+
     def test_lite_marker_mapping_keeps_source_time_for_split_gap(self):
         request = RevisionRequest(
             project=RevisionProject(
@@ -75,6 +127,82 @@ class TestReviewMarkerRendering(unittest.TestCase):
             revision_markers.MarkerPlanItem(
                 item_id="item-1",
                 source_text="delete",
+                start=5.0,
+                end=7.0,
+                verbatim_status="verified",
+            )
+        ]
+
+        mapped = map_marker_plan_to_timeline(plan, request)
+
+        self.assertEqual([(item.start, item.end) for item in mapped], [(5.0, 7.0)])
+
+    def test_lite_marker_mapping_adds_only_prior_pause_duration(self):
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="LiteMarkerPauseMapping",
+                source_video="source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            pause_adjustments=[
+                PauseAdjustment(
+                    item_id="pause-1",
+                    source_time=3.0,
+                    duration=1.25,
+                    frame_path="frame.png",
+                )
+            ],
+            workflow_mode="lite",
+        )
+        plan = [
+            revision_markers.MarkerPlanItem(
+                item_id="before",
+                source_text="before pause",
+                start=2.0,
+                end=2.5,
+                verbatim_status="verified",
+            ),
+            revision_markers.MarkerPlanItem(
+                item_id="after",
+                source_text="after pause",
+                start=5.0,
+                end=5.5,
+                verbatim_status="verified",
+            ),
+        ]
+
+        mapped = map_marker_plan_to_timeline(plan, request)
+
+        self.assertEqual(
+            [(item.start, item.end) for item in mapped],
+            [(2.0, 2.5), (6.25, 6.75)],
+        )
+
+    def test_lite_marker_on_pause_boundary_stays_two_seconds_before_hold(self):
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="LiteMarkerPauseBoundary",
+                source_video="source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            pause_adjustments=[
+                PauseAdjustment(
+                    item_id="pause-1",
+                    source_time=5.0,
+                    duration=1.0,
+                    frame_path="frame.png",
+                )
+            ],
+            workflow_mode="lite",
+        )
+        plan = [
+            revision_markers.MarkerPlanItem(
+                item_id="pause-1",
+                source_text="05:00 在现有停顿基础上增加1秒",
                 start=5.0,
                 end=7.0,
                 verbatim_status="verified",
@@ -621,6 +749,30 @@ class TestSavedMarkerPlanValidation(unittest.TestCase):
                 "text": text,
             },
         )
+
+    def test_marker_plan_keeps_execution_status_outside_source_text(self):
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="StatusMarkerDraft",
+                source_video="source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            review_items=[
+                RevisionReviewItem(
+                    "item-status",
+                    "pointer_overlay",
+                    "canonical pointer instruction",
+                    evidence={"execution_status": "label_only_unresolved"},
+                )
+            ],
+        )
+
+        plan = build_marker_plan(request)
+
+        self.assertEqual(plan[0].source_text, "canonical pointer instruction")
+        self.assertEqual(plan[0].execution_status, "label_only_unresolved")
 
     def test_count_correct_but_summary_text_fails(self):
         result = revision_markers.validate_saved_marker_plan(

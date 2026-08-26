@@ -36,6 +36,7 @@ class ReviewMarkerItem:
     track_name: str = ""
     kind: str = "review_only"
     background_color: str = ""
+    execution_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,17 @@ class ReviewMarkerTextLayout:
     max_line_width: float
     estimated_line_count: int
     estimated_text_height: float
+
+
+def _canonical_review_marker(marker: ReviewMarkerItem) -> ReviewMarkerItem:
+    """Bind every visible marker field to the canonical source-ledger text."""
+
+    source_text = marker.source_text
+    if source_text is None or source_text == "":
+        # Direct legacy callers predate source_text. Preserve their label while
+        # establishing the same visible-text invariant for downstream receipts.
+        source_text = marker.label
+    return replace(marker, label=source_text, source_text=source_text)
 
 
 def _sec_label(value: float) -> str:
@@ -152,6 +164,8 @@ class ReviewMarkerOpsMixin:
     ) -> List[ReviewMarkerItem]:
         if not markers:
             return []
+
+        markers = tuple(_canonical_review_marker(marker) for marker in markers)
 
         if str(layout_mode or "dynamic").strip().casefold() == "lite_grouped":
             return self._add_lite_grouped_review_markers(markers)
@@ -306,6 +320,7 @@ class ReviewMarkerOpsMixin:
         each family, so an overlap adds ``Review Marker <Family> 2`` instead
         of mixing an unrelated kind into the same track.
         """
+        markers = tuple(_canonical_review_marker(marker) for marker in markers)
         layout_cell = self._lite_grouped_marker_layout()
         grouped: dict[str, list[ReviewMarkerItem]] = {
             group: [] for group, _prefix in self.LITE_GROUPED_MARKER_GROUPS
@@ -559,7 +574,7 @@ class ReviewMarkerOpsMixin:
         output_path: str,
         markers: Iterable[ReviewMarkerItem],
     ) -> None:
-        markers = list(markers)
+        markers = [_canonical_review_marker(marker) for marker in markers]
         lines = [
             f"# {self.name} 校对标记清单",
             "",

@@ -631,11 +631,29 @@ def _canonical_review_items(
                 inference_text, kind, explicit_kind=explicit_kind
             )
         execution_required = _execution_required_for_kind(kind, execution_required)
+        execution_status = str(
+            source_row.get("execution_status")
+            or (
+                source_row.get("evidence", {}).get("execution_status")
+                if isinstance(source_row.get("evidence"), dict)
+                else ""
+            )
+            or (
+                source_row.get("validation", {}).get("execution_status")
+                if isinstance(source_row.get("validation"), dict)
+                else ""
+            )
+            or ""
+        ).strip()
         if workflow_mode == "lite":
-            execution_required = lite_execution_required(
-                kind,
-                source_text,
-                execution_required,
+            execution_required = (
+                False
+                if execution_status.casefold() == "label_only_unresolved"
+                else lite_execution_required(
+                    kind,
+                    source_text,
+                    execution_required,
+                )
             )
 
         explicit_status = str(source_row.get("verbatim_status") or "").strip()
@@ -686,6 +704,10 @@ def _canonical_review_items(
             row["block_id"] = block_id
         row["kind"] = kind
         row["execution_required"] = execution_required
+        if execution_status:
+            row["execution_status"] = execution_status
+            evidence["execution_status"] = execution_status
+            row["evidence"] = evidence
         if kind in {
             "spoken_delete",
             "speech_delete",
@@ -756,6 +778,7 @@ def _request_model(
             evidence=(item.get("evidence") if isinstance(item.get("evidence"), dict) else {}),
             validation=(item.get("validation") if isinstance(item.get("validation"), dict) else {}),
             verbatim_status=str(item["verbatim_status"]),
+            execution_status=str(item.get("execution_status") or ""),
         )
         for item in review_items
     ]

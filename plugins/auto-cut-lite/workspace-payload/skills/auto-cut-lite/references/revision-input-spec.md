@@ -6,7 +6,9 @@ For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.
 authoritative and overrides every full-workflow example or field described below. In particular,
 animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
 default geometry, every audio-identifiable item uses its ASR-resolved boundary for execution and
-label placement, and only completely non-speech items use review timestamps.
+label placement, and only completely non-speech items use review timestamps. A visible JianYing
+label always equals only the ledger item's `source_text`; execution status and diagnostic wording
+remain internal metadata and never become label text.
 
 Use this format when the task is:
 
@@ -193,16 +195,21 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 
 - `workflow_mode=full` is the default and preserves the existing full-capability behavior.
 - `workflow_mode=lite` selects the High School History compact workflow. It keeps the source
-  duration unchanged. Its default `lite_cut_layout=split_gap` writes non-delete intervals to
+  duration unchanged when no semantic-pause time is added. Its executable
+  `lite_cut_layout=split_gap` writes non-delete intervals to
   `Original Video` and `Separated Source Audio`, delete intervals to `Lite Cut Segments` and
   `Lite Reused Audio`, and simple downloaded assets to `Lite Visual Assets`. It keeps
-  `Lite Timing Adjusted` empty. Set `lite_cut_layout=copy` for the older full-V1/A1 reference
-  layout.
+  `Lite Timing Adjusted` empty. `lite_cut_layout=copy` is historical read/validation compatibility
+  for older full-V1/A1 reference drafts and must be rejected for every new execution.
+- Lite deletion does not compress the timeline. A semantic-pause `duration` is added hold time,
+  not the desired total pause: `+Ns` preserves the existing pause, extends final duration by
+  exactly `N` seconds, and shifts every later video/audio/visual/label target by the cumulative
+  added time. The pause item's own label stays at the insertion boundary before the hold.
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
 - Lite review labels use source text verbatim, start at the authoritative item time, remain in the
-  top safe band, and last `2s` unless clamped by the unchanged project end. For every issue
+  top safe band, and last `2s` unless clamped by the final pause-mapped project end. For every issue
   locatable through speech or audio, authoritative time means the final ASR-resolved window or
   point, never the rough review timestamp. Only completely non-speech items use review timestamps;
   a requested target after `提前到`/`推迟到`/`移到`/`调到` wins over an earlier current time.
@@ -218,9 +225,11 @@ After the exact profile is ready and the user has confirmed the applicable bind 
   the equivalent authoritative source-ASR identity and a resolved point/window matching the
   saved edit and label.
 - In Lite `split_gap`, `Separated Source Audio` contains the kept windows and `Lite Reused Audio`
-  contains exactly one independent source-aligned clip per merged ASR/V2 delete window. Reject
-  pending or empty segmented plans, full-length/continuous A2 clips, extra clips, and mismatched
-  source/timeline starts or durations before draft writing.
+  contains exactly one independent, audible source-aligned clip per logical ASR/V2 delete window.
+  Overlapping windows may merge only within the same stable source item; adjacent windows from
+  different items remain separate, and true cross-item overlap fails before draft writing for
+  disambiguation. Reject pending or empty segmented plans, full-length/continuous/cross-item-merged
+  or muted A2, extra clips, and mismatched source or pause-mapped target ranges before writing.
   A supplied pointer row remains execution-required but uses default geometry and start-only
   acceptance. Cleanup-only pointer rows are label-only. Lite never enables binding, lifecycle,
   placement, hotspot, opened-editor, or full visual/animation acceptance gates.
@@ -288,6 +297,15 @@ Each item should include:
 - `evidence`: proof that the request was executed
 - `validation`: proof that the output was checked
 
+`execution_status` is optional internal state. In Lite,
+`execution_status=label_only_unresolved` means the item's authoritative time is reliable but no
+safe maintained implementation exists: set effective `execution_required=false`, create exactly
+one original-text label, skip ad-hoc execution, and continue independent items. Persist this value
+only in request/evidence metadata, marker receipts, validation output, and reports. Never insert it
+into `source_text` or visible JianYing text. An unresolved authoritative time is not this status;
+it fails before draft open/write. An audio-identifiable item also fails pre-write when authoritative
+ASR is missing.
+
 Evidence examples:
 
 - audio deletion: `cut_window`, ASR source, strategy, deleted phrase, must-keep phrase, reverse-ASR `status`
@@ -300,6 +318,10 @@ Evidence examples:
 
 For a source-ledger marker, render `source_text` code-point-for-code-point. This includes timestamps, punctuation, whitespace, line breaks, and literal question marks. Never substitute a summary, prefix, ID, translation, or truncation unless those exact characters are already present in the source.
 
+The visible marker value is exactly and only `source_text`. Keep `execution_status`,
+`label_only_unresolved`, `verbatim_status`, IDs, warnings, and diagnostic notes outside that value;
+they belong only to internal metadata, receipts, validation output, and reports.
+
 Generate one marker per stable source item ID; multiple internal edits share that marker rather than creating more visible markers. Duplicate source item IDs are validation failures. Identical `source_text` under different IDs remains separate and produces one marker for each ID.
 
 The latest `doc_items` document read is canonical for item identity, kind, and source text. If an internal request item is missing `source_text`, perform automatic document re-read/recovery before rendering markers. If the document cannot be read again, use the most complete unmodified candidate from the available row fields, set `verbatim_status=unverified_source_unavailable`, and preserve the item. This fallback must never stop editing or prevent draft generation. It must emit a warning and must not claim exactness.
@@ -308,7 +330,7 @@ Source recovery is deliberately different from final acceptance. Active editing 
 
 ### Marker receipts and saved-draft validation
 
-Marker tracks are actual dynamically allocated `Review Marker N` text tracks. Keep one receipt per source item with `item_id`, `source_text`, `verbatim_status`, `segment_id`, `material_id`, `track_name`, `start_time`, and `duration`.
+Marker tracks are actual dynamically allocated `Review Marker N` text tracks. Keep one receipt per source item with `item_id`, `source_text`, `verbatim_status`, `segment_id`, `material_id`, `track_name`, `start_time`, and `duration`; retain `execution_status` there when present without changing the visible text.
 
 After saving, validate both the root `draft_content.json` and the active `Timelines/<main_timeline_id>/draft_content.json`. Each saved representation must preserve exact marker text, marker count, receipt mapping, and mapped timeline start. An explicit empty source ledger rejects extra markers left by older work; an empty ledger is not permission to accept unbound marker tracks.
 
@@ -427,6 +449,8 @@ the source-media and adapter fields below bind that artifact to this project.
   `tool`, `tool_version`, and non-empty `parameters`.
 - `pause_adjustments[*].requested_source_time`: the original rough source time
 - `pause_adjustments[*].source_time`: the resolved adjacent-utterance-gap midpoint
+- `pause_adjustments[*].duration`: additional hold seconds inserted on top of the source's existing
+  pause, never the desired total pause duration
 - `pause_adjustments[*].frame_source_time`: the still sampling time, equal to the midpoint
 - `pause_adjustments[*].frame_path`: the extracted still-frame file
 - `pause_adjustments[*].frame_sha256`: SHA-256 of the current still bytes
@@ -443,7 +467,10 @@ and frame source time in addition to the machine field names above.
 Utterance-only ASR is insufficient: each semantic pause requires real word or character timing, and its semantic pause edit and `pause_adjustments` entry must correspond one-to-one before draft generation.
 Compile the audio delivery plan after pause alignment, write it to
 `audio_delivery_plan`, split source/reference audio at
-the resolved source time, and keep audible segments outside the no-audio hold.
+the resolved source time, and keep audible segments outside the no-audio hold. Increase final
+project duration by the sum of `pause_adjustments[*].duration`, map every later target range and
+label through the same cumulative addition, and keep all source ranges in source time. The pause
+item's own marker remains at the insertion boundary before its added still-frame hold.
 Standalone `revision-validate` recomputes this evidence from the current ASR bytes.
 It also requires evidence ASR path/hash/identity and resolution settings to equal
 the immutable request configuration, hashes the current source video, source audio,
@@ -495,6 +522,16 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 6. If the user needs second-stage manual editing, the resulting draft must keep inspectable cut structure and must not collapse into one full-length preview clip.
 7. Do not delete a review-document item because a previous attempt mishandled it or its internal `source_text` is missing. Re-read the document automatically; if unavailable, preserve the most complete unmodified candidate with an unverified warning and continue draft generation.
 8. In segmented audio mode, do not import a full merged QA narration, add unplanned audio segments, or use one narration segment that reaches the configured full-length ratio.
+9. In Lite, merge overlapping delete windows only within one stable source item. Keep adjacent
+   windows from different items as independent V2/A2 clips; reject true cross-item overlap before
+   draft writing and require disambiguation.
+10. A reliable-time item that cannot be executed safely may use internal
+    `execution_status=label_only_unresolved` and one exact `source_text` label while other items
+    continue. Do not improvise the edit or expose that status in the label.
+11. Reject unreliable timing before draft writing. For an audio-identifiable item, the authoritative
+    time must come from configured ASR; a review timestamp cannot substitute for missing ASR.
+12. Reject `lite_cut_layout=copy` for new execution. It may be recognized only when reading or
+    validating historical drafts.
 
 ## Marker vs Edit Semantics
 
@@ -502,10 +539,20 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 - `markers` are review items. They are independently traceable labels for manual verification or later adjustment and do not automatically require a main-track split.
 - `修改` and `校对` remain semantic categories in the item ID/kind and execution evidence. Do not add either prefix to visible source-ledger marker text unless it is already present in `source_text`.
 - A review-only item without a nearby cut is valid when its source-ledger marker remains independently traceable and its receipt identifies the item.
+- `label_only_unresolved` describes internal execution state, not marker content. Its visible label
+  remains exactly `source_text`, with no status prefix, suffix, or explanation.
 - A visible label is not proof of a supplied visual insertion or spoken deletion. Strict
   validation must find their applicable execution evidence. Animation/timing, text-position, and
   cleanup-only pointer items are intentionally label-only in Lite and require no execution proof.
 - For Feishu/Lark review documents, every source item must appear in `review_items` or a separate `doc_items` ledger. Missing items are validation failures even if the saved draft has enough marker segments.
+
+## Installed Runtime Integrity
+
+Before a non-mock packaged Lite execution, validate the deployment report, package-manifest anchor,
+and managed runtime inventory. Any missing, changed, extra, or hash-mismatched managed file is
+runtime drift. Stop before task execution and require redeployment from a verified package; do not
+hot-patch the installed runtime, accept drift, or fall back to a source checkout or another
+installation.
 
 ## Validation Commands
 
