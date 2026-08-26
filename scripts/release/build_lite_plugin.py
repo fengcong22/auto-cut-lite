@@ -11,13 +11,14 @@ import argparse
 import hashlib
 import json
 import shutil
+import subprocess
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.5.1+codex.20260826171831"
+PLUGIN_VERSION = "1.5.2+codex.20260826174222"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -108,7 +109,19 @@ PUBLIC_DATA_FILES = (
     "video_outro_animations.csv",
     "video_scene_effects.csv",
 )
-TEXT_SUFFIXES = {".py", ".md", ".json", ".toml", ".txt", ".yaml", ".yml", ".csv", ".ps1"}
+TEXT_SUFFIXES = {
+    ".py",
+    ".md",
+    ".json",
+    ".toml",
+    ".txt",
+    ".yaml",
+    ".yml",
+    ".csv",
+    ".ps1",
+    ".cmd",
+    ".bat",
+}
 SANITIZE = {
     "高中历史": "通用精简版",
     "High School History": "Generic Lite",
@@ -134,6 +147,39 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _git_release_identity(repo: Path) -> dict[str, object]:
+    commit_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if commit_result.returncode != 0:
+        raise ValueError("release source must be a committed Git worktree")
+    commit = commit_result.stdout.strip().lower()
+    if len(commit) != 40 or any(char not in "0123456789abcdef" for char in commit):
+        raise ValueError("release source Git commit is invalid")
+
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if status_result.returncode != 0:
+        raise ValueError("release source Git status could not be read")
+    return {
+        "commit": commit,
+        "clean": not bool(status_result.stdout.strip()),
+    }
 
 
 def _safe_relative(path: str) -> str:
@@ -194,7 +240,7 @@ def _write_target_setup(stage: Path) -> None:
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\nRead `BEGINNER_DEPLOYMENT.md` before installation.\n\nFirst install: extract the ZIP at the permanent location. The extracted `Auto-cut-lite` directory becomes the combined Codex workspace. Run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1` from that directory.\n\nUpgrade: extract the new ZIP into a temporary directory and run the new deployer there. The existing receipt selects the stable workspace and synchronizes the new package into it. Delete only the temporary upgrade extraction after success. Do not extract a new ZIP directly over the stable workspace.\n\nUse `-UseChinaMirrors` when direct pip/npm access is unreliable. Use `-WorkspaceRoot \"<absolute-path>\\Auto-cut-lite\"` only when selecting or relocating the stable workspace. The runtime remains under `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite`; open the reported `workspace_root` in Codex and start a new thread.\n""",
+        """# Target setup\n\nRead `BEGINNER_DEPLOYMENT.md` before installation.\n\nFirst install: use **Extract All**, open the extracted `Auto-cut-lite` directory, and double-click `START-AUTO-CUT-LITE.cmd`. The launcher asks where the stable workspace should live, validates the extracted package, and uses China mirrors by default. The selected workspace receives the complete managed package, `AGENTS.md`, and `.codex/skills`.\n\nUpgrade: extract the new ZIP into a temporary directory and double-click its `START-AUTO-CUT-LITE.cmd`. Choose the existing workspace when prompted. The installer synchronizes the new package into it with rollback protection. Delete only the temporary upgrade extraction after success. Do not extract a new ZIP directly over the stable workspace.\n\nAdvanced users can run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1` directly. Use `-UseChinaMirrors` when direct pip/npm access is unreliable. Use `-WorkspaceRoot \"<absolute-path>\\Auto-cut-lite\"` only when selecting or relocating the stable workspace. The runtime remains under `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite`; open the reported `workspace_root` in Codex, start a new thread, and follow `CODEX_NEXT_STEPS.md`.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -288,6 +334,9 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
         "default_root": "extracted_package_root",
         "custom_root_supported": True,
         "custom_root_parameter": "WorkspaceRoot",
+        "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+        "one_click_default_network": "china_mirrors",
+        "post_install_guide": "CODEX_NEXT_STEPS.md",
         "required_leaf_name": "Auto-cut-lite",
         "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
         "explicit_path_upgrade": "verified_relocation_with_rollback",
@@ -395,9 +444,17 @@ def _make_zip(stage_parent: Path, output: Path) -> tuple[str, int]:
     return _sha256(output), len(entries)
 
 
-def build(repo_root: Path, output: Path) -> dict[str, object]:
+def build(
+    repo_root: Path,
+    output: Path,
+    *,
+    require_clean: bool = True,
+) -> dict[str, object]:
     repo = repo_root.resolve()
     output = output.resolve()
+    source_identity = _git_release_identity(repo)
+    if require_clean and not source_identity["clean"]:
+        raise ValueError("release source worktree is dirty; commit and retest before packaging")
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -474,7 +531,13 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "feishu_identity": "target_user_only",
             "credentials_bundled": False,
             "private_subject_assets_bundled": False,
+            "source_git_commit": source_identity["commit"],
+            "source_git_clean": source_identity["clean"],
             "one_command_deployer": "deploy-to-codex.ps1",
+            "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+            "one_click_default_network": "china_mirrors",
+            "one_click_internal_manifest_validation": True,
+            "post_install_codex_guide": "CODEX_NEXT_STEPS.md",
             "marketplace_name": "auto-cut-lite-marketplace",
             "marketplace_display_name": "Auto-Cut Lite",
             "named_marketplace_registration": "atomic_structured_helper",

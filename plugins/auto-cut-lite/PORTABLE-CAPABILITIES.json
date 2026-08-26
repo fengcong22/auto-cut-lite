@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.5.1+codex.20260826171831",
+  "plugin_version": "1.5.2+codex.20260826174222",
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"
@@ -24,6 +24,9 @@
     "default_root": "extracted_package_root",
     "custom_root_supported": true,
     "custom_root_parameter": "WorkspaceRoot",
+    "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+    "one_click_default_network": "china_mirrors",
+    "post_install_guide": "CODEX_NEXT_STEPS.md",
     "required_leaf_name": "Auto-cut-lite",
     "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
     "explicit_path_upgrade": "verified_relocation_with_rollback",
@@ -43,6 +46,7 @@
       "required_paths": [
         "AGENTS.md",
         "BEGINNER_DEPLOYMENT.md",
+        "CODEX_NEXT_STEPS.md",
         "installer/manage_workspace.py",
         "WORKSPACE_SETUP.md",
         "workspace-payload/skills/auto-cut/SKILL.md",
@@ -131,9 +135,11 @@
       "id": "named_marketplace_deployment",
       "required_paths": [
         "AGENTS.md",
+        "START-AUTO-CUT-LITE.cmd",
         "deploy-to-codex.ps1",
         "install.ps1",
         "installer/manage_named_marketplace.py",
+        "installer/one_click_deploy.ps1",
         "installer/manage_workspace.py",
         "runtime/requirements.txt",
         "runtime/requirements-audio.lock"

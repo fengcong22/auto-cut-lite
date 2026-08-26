@@ -8,15 +8,20 @@ Auto-Cut Lite uses a combined deployment model:
 - `deployment-report.json` and `workspace-install-receipt.json` connect the workspace to that
   runtime.
 
-On a first install, the extracted directory named exactly `Auto-cut-lite` is the default stable
-workspace. The user should extract it at the permanent location they want to keep. On an upgrade,
-the new package is extracted separately and its deployer follows this precedence:
+For the beginner flow, double-click `START-AUTO-CUT-LITE.cmd`. On a first install it opens a folder
+picker: selecting an existing directory named exactly `Auto-cut-lite` uses that directory, while
+selecting a parent creates or uses its `Auto-cut-lite` child. The complete managed package is
+synchronized into the selected workspace, so a temporary extraction and the stable workspace may
+be different without splitting the deployed package. The direct PowerShell deployer still defaults
+to the current extracted package root when no path or prior receipt exists. On an upgrade, the new
+package is extracted separately and its deployer follows this precedence:
 
 ```text
 explicit -WorkspaceRoot -> existing installation receipt -> current extracted package root
 ```
 
-The workspace installer verifies `PACKAGE-MANIFEST.json`, synchronizes package files, refreshes
+The one-click launcher uses China pip/npm mirrors by default. The workspace installer verifies
+`PACKAGE-MANIFEST.json`, synchronizes package files, refreshes
 `AGENTS.md` and all `auto-cut*` repository skills, removes stale managed package files, and records
 hashes in the receipt. Unrelated files are preserved. An unmanaged target file is adopted only when
 its content exactly matches the incoming file; a different collision or a modified previously

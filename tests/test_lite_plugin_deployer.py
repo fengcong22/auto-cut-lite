@@ -16,6 +16,8 @@ from scripts.release import build_lite_plugin
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "manage_named_marketplace.py"
 DEPLOYER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "deploy-to-codex.ps1"
+ONE_CLICK_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "one_click_deploy.ps1"
+ONE_CLICK_LAUNCHER = REPO_ROOT / "plugins" / "auto-cut-lite" / "START-AUTO-CUT-LITE.cmd"
 
 
 def _load_helper():
@@ -211,6 +213,44 @@ def test_deployer_has_valid_windows_powershell_syntax() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_one_click_launcher_has_valid_powershell_and_beginner_contract() -> None:
+    command = (
+        "$errors=$null; "
+        f"[System.Management.Automation.Language.Parser]::ParseFile('{ONE_CLICK_PATH}',"
+        "[ref]$null,[ref]$errors)|Out-Null; "
+        "if($errors.Count){$errors|ForEach-Object{$_.ToString()};exit 1}"
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    launcher = ONE_CLICK_LAUNCHER.read_text(encoding="utf-8")
+    wrapper = ONE_CLICK_PATH.read_text(encoding="utf-8")
+    beginner = (
+        REPO_ROOT / "plugins" / "auto-cut-lite" / "BEGINNER_DEPLOYMENT.md"
+    ).read_text(encoding="utf-8")
+    assert "installer\\one_click_deploy.ps1" in launcher
+    assert "PACKAGE-MANIFEST.json" in launcher
+    assert "-UseChinaMirrors" not in launcher
+    assert "if (-not $OfficialNetwork)" in wrapper
+    assert "$deployArguments.UseChinaMirrors = $true" in wrapper
+    assert "System.Windows.Forms.FolderBrowserDialog" in wrapper
+    assert "Auto-cut-lite\\Auto-cut-lite" in beginner
+    assert "Get-ExistingWorkspaceRoot" in wrapper
+    assert "MessageBoxButtons]::YesNoCancel" in wrapper
+    assert "workspace_scope -ne 'repo'" in wrapper
+    assert "workspace_label -ne 'Auto-cut-lite'" in wrapper
+    assert "Set-Clipboard -Value $installedWorkspace" in wrapper
+    assert "START-AUTO-CUT-LITE.cmd" in beginner
+    assert "不需要先打开 PowerShell" in beginner
+
+
 def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default() -> None:
     deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
 
@@ -256,7 +296,10 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
             {"name": "auto-cut-lite", "version": "1.3.0"}
         ).encode(),
         "AGENTS.md": b"# Portable workspace rules\n",
+        "CODEX_NEXT_STEPS.md": b"# Next steps\n",
+        "START-AUTO-CUT-LITE.cmd": b"@exit /b 0\n",
         "installer/manage_named_marketplace.py": b"# validation fixture\n",
+        "installer/one_click_deploy.ps1": b"# validation fixture\n",
         "installer/manage_workspace.py": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
         "runtime/requirements-audio.lock": b"# validation fixture\n",
@@ -407,7 +450,7 @@ def test_plugin_and_builder_versions_match() -> None:
 def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> None:
     output = tmp_path / build_lite_plugin.ARCHIVE_NAME
 
-    receipt = build_lite_plugin.build(REPO_ROOT, output)
+    receipt = build_lite_plugin.build(REPO_ROOT, output, require_clean=False)
 
     assert receipt["archive_root"] == "Auto-cut-lite"
     assert receipt["workspace_mode"] == "combined_package_workspace"
@@ -417,10 +460,35 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
     )
     assert receipt["workspace_package_sync"] == "manifest_verified_transactional"
     assert receipt["workspace_package_rollback"] is True
+    assert receipt["one_click_launcher"] == "START-AUTO-CUT-LITE.cmd"
+    assert receipt["one_click_default_network"] == "china_mirrors"
+    assert receipt["one_click_internal_manifest_validation"] is True
+    assert receipt["post_install_codex_guide"] == "CODEX_NEXT_STEPS.md"
+    assert len(receipt["source_git_commit"]) == 40
+    assert isinstance(receipt["source_git_clean"], bool)
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
     assert names
     assert {name.split("/", 1)[0] for name in names} == {"Auto-cut-lite"}
     assert "Auto-cut-lite/BEGINNER_DEPLOYMENT.md" in names
+    assert "Auto-cut-lite/CODEX_NEXT_STEPS.md" in names
+    assert "Auto-cut-lite/START-AUTO-CUT-LITE.cmd" in names
+    assert "Auto-cut-lite/installer/one_click_deploy.ps1" in names
     assert "Auto-cut-lite/PACKAGE-MANIFEST.json" in names
     assert not any(name.startswith("auto-cut-lite/") for name in names)
+
+
+def test_builder_rejects_a_dirty_release_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "release-test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Release Test"], cwd=repo, check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("committed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "fixture"], cwd=repo, check=True)
+    tracked.write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="worktree is dirty"):
+        build_lite_plugin.build(repo, tmp_path / "release.zip")

@@ -217,8 +217,11 @@ function Read-AndValidatePackageManifest {
     foreach ($required in @(
         '.codex-plugin/plugin.json',
         'AGENTS.md',
+        'CODEX_NEXT_STEPS.md',
+        'START-AUTO-CUT-LITE.cmd',
         'deploy-to-codex.ps1',
         'installer/manage_named_marketplace.py',
+        'installer/one_click_deploy.ps1',
         'installer/manage_workspace.py',
         'workspace-payload/skills/auto-cut/SKILL.md',
         'runtime/requirements.txt',

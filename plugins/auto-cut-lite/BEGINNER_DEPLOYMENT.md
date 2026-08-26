@@ -1,160 +1,132 @@
-# Auto-Cut Lite 新手部署说明
+# Auto-Cut Lite 新手一键部署说明
 
-## 先理解三个位置
+## 先看结论
 
-1. **下载位置**：刚收到的 ZIP 和 `.receipt.json` 校验回执所在的文件夹。部署成功后，这两个
-   下载文件可以删除。
-2. **稳定工作区**：首次安装时解压出来的 `Auto-cut-lite` 文件夹。它同时保存部署文件、
-   `AGENTS.md` 和 `.codex\skills`，以后要用 Codex 打开它。这个文件夹不能删除。
-3. **运行时位置**：部署器自动创建的 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。真正执行插件的
-   Python 环境在这里，不需要手工打开或移动。
+正常安装只有四步：
 
-首次安装可以把解压目录直接当工作区，而且本版默认就是这样做。升级时不要把新 ZIP 直接覆盖
-解压到旧工作区；应把新包临时解压到别处，运行新部署器，让它根据安装回执更新原工作区。
+1. 对 ZIP 使用“全部解压”。
+2. 打开解压后的 `Auto-cut-lite`，双击 `START-AUTO-CUT-LITE.cmd`。
+3. 在弹窗中选择你希望长期使用的 `Auto-cut-lite` 工作区位置。
+4. 部署成功后，用 Codex 打开窗口里显示的 `workspace_root`，并新建线程。
+
+不需要先打开 PowerShell，不需要输入命令，也不需要自己替换路径。启动器默认使用国内
+pip/npm 镜像，并自动校验解压后的每个受管文件。
 
 ## 一、首次安装
 
 ### 1. 准备最低环境
 
-部署前只需要确保：
+部署前只需要：
 
 - Windows 10/11 x64；
-- 64 位 Python 3.11，安装时勾选“Add Python to PATH”；
-- Codex Desktop 可以正常打开。若部署器提示 Codex CLI 不可执行，再安装 Node.js LTS，部署器会
-  使用官方 npm 入口。
+- 64 位 Python 3.11，安装 Python 时勾选 `Add Python to PATH`；
+- Codex Desktop 能正常打开。
 
-剪映、FFmpeg、飞书登录和 ASR 密钥可以在部署成功后，让 Codex 再逐项帮助配置。
+剪映、FFmpeg、飞书登录和 ASR 密钥可以部署成功后再让 Codex 逐项引导配置。若部署器提示找
+不到可用的 Codex CLI，再安装 Node.js LTS，然后重新双击启动器。
 
-### 2. 在下载文件夹打开 PowerShell
+### 2. 全部解压
 
-把 ZIP 和名字以 `.zip.receipt.json` 结尾的回执放在同一个文件夹。用资源管理器打开这个文件夹，
-点击顶部地址栏，输入 `powershell`，按回车。随后出现的 PowerShell 已经位于正确文件夹，不需要
-自己输入或替换路径。
+不要在压缩包预览窗口里直接双击文件。请右键 ZIP，选择“全部解压”。临时解压到下载目录也
+可以，因为下一步可以另选长期工作区；若想让解压目录直接成为工作区，就把 ZIP 解压到准备长期
+保存的位置。
 
-### 3. 自动校验 ZIP
+### 3. 双击并选择工作区
 
-整段复制到 PowerShell，按回车：
+进入解压后的 `Auto-cut-lite` 文件夹，双击：
 
-```powershell
-$packages = @(Get-ChildItem -File -Filter 'auto-cut-lite-*-windows-x64.zip')
-if ($packages.Count -ne 1) { throw '当前文件夹必须只有一个 Auto-Cut Lite ZIP，请移走旧版本后重试。' }
-$zip = $packages[0]
-$receiptFile = Get-Item -LiteralPath ($zip.FullName + '.receipt.json')
-$receipt = Get-Content -LiteralPath $receiptFile.FullName -Raw -Encoding UTF8 | ConvertFrom-Json
-$actual = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-$expected = ([string]$receipt.archive_sha256).ToLowerInvariant()
-if ($actual -ne $expected) { throw "校验失败：实际 $actual，回执 $expected" }
-Write-Host "校验成功：$actual"
+```text
+START-AUTO-CUT-LITE.cmd
 ```
 
-看到“校验成功”才能继续。若提示找不到回执，说明 ZIP 对应的 `.receipt.json` 没放在同一文件夹。
+首次部署会弹出文件夹选择框。你可以：
 
-### 4. 选择永久位置并解压
+- 直接选择一个已经叫 `Auto-cut-lite` 的文件夹；
+- 选择其他父文件夹，部署器会自动在里面创建 `Auto-cut-lite`。
 
-下面命令会弹出文件夹选择窗口。请选择一个准备长期保存 Auto-Cut Lite 的**父文件夹**，不要选择
-现有的 `Auto-cut-lite` 文件夹。整段复制运行：
+例如 Codex 已经为你准备了某个工作区位置，就选择那个 `Auto-cut-lite` 文件夹或它的上一级目录。
+部署器会智能识别，避免生成 `Auto-cut-lite\Auto-cut-lite`。
 
-```powershell
-$shell = New-Object -ComObject Shell.Application
-$picked = $shell.BrowseForFolder(0, '选择 Auto-Cut Lite 的长期保存位置', 0)
-if ($null -eq $picked) { throw '已取消选择。' }
-$parent = [string]$picked.Self.Path
-$workspace = Join-Path $parent 'Auto-cut-lite'
-if (Test-Path -LiteralPath $workspace) { throw "目标已存在：$workspace。首次安装请选择其他父文件夹。" }
-Expand-Archive -LiteralPath $zip.FullName -DestinationPath $parent
-if (-not (Test-Path -LiteralPath (Join-Path $workspace 'deploy-to-codex.ps1'))) { throw '解压结果不完整。' }
-Set-Location -LiteralPath $workspace
-Write-Host "稳定工作区：$workspace"
-```
+最终选定的 `Auto-cut-lite` 会同时保存完整包文件、`AGENTS.md` 和 `.codex\skills`，也是以后 Codex
+应该打开的稳定工作区。运行时单独安装到 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。
 
-这一步打印出的“稳定工作区”就是以后 Codex 要打开的目录。不要再移动或删除它。
+Windows 如果询问是否允许运行，请确认文件来自你收到的 Auto-Cut Lite 包后再继续。部署过程会
+自动完成：
 
-### 5. 部署
+- 校验 `PACKAGE-MANIFEST.json` 和包内文件哈希；
+- 安装或覆盖升级独立运行时；
+- 注册 `Auto-Cut Lite` 命名市场并清理旧的 Personal 重复项；
+- 写入工作区 `AGENTS.md` 和全部 `.codex\skills`；
+- 安装独立音频环境；
+- 失败时执行回滚；
+- 输出并复制最终 `workspace_root`。
 
-国内网络建议直接使用镜像开关：
+安装依赖可能需要较长时间，不要关闭黑色窗口。默认已经启用国内镜像，不需要再输入
+`-UseChinaMirrors`。
 
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1 -UseChinaMirrors
-```
+## 二、部署成功后
 
-能稳定访问官方 pip/npm 时，也可以不用镜像：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1
-```
-
-部署会安装主运行时和独立音频运行时，可能需要较长时间。不要关闭窗口。仅想先检查包和最低环境
-时，可把 `-ValidateOnly` 加到命令末尾；检查成功后仍要再运行一次不带 `-ValidateOnly` 的正式部署。
-
-## 二、部署成功后的操作
-
-成功输出中会出现：
+窗口看到下面这些内容才算部署成功：
 
 ```text
 deployment_status=installed
 workspace_root=某个绝对路径\Auto-cut-lite
 workspace_scope=repo
 workspace_label=Auto-cut-lite
-workspace_mode=combined_package_workspace
 ```
 
-`readiness=pending_user_configuration` 通常不是部署失败，只表示剪映、FFmpeg、飞书用户授权或 ASR
-密钥仍有一项需要配置。
+启动器会把工作区路径复制到剪贴板并打开资源管理器。接下来：
 
-1. 复制 `workspace_root=` 后面的路径。
-2. 在 Codex 中选择“打开文件夹”，打开这个路径。
-3. 在该工作区新建一个线程。旧线程不会自动刷新技能。
-4. 查看技能列表：所有 `auto-cut-*` 应为 `scope=repo`，右侧标签为 `Auto-cut-lite`，不应再有
-   Auto-Cut 的 `Personal` 重复项。
+1. 打开 Codex，选择“打开文件夹”。
+2. 粘贴 `workspace_root` 路径并打开。
+3. 在这个工作区新建线程，旧线程不会自动刷新技能。
+4. 打开工作区里的 `CODEX_NEXT_STEPS.md`，把其中的话发给 Codex。
 
-然后在新线程发送下面这段话：
+技能列表中的 `auto-cut-*` 应显示为 `scope=repo`，右侧标签为 `Auto-cut-lite`，不应再有
+Auto-Cut 的 `Personal` 重复项。
 
-```text
-请读取当前 Auto-Cut Lite 工作区的 AGENTS.md，并检查
-%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\deployment-report.json。
-请逐项帮助我完成并验证：剪映专业版及草稿目录、FFmpeg/FFprobe、lark-cli 当前用户登录与
-default-as user/strict-mode user、火山 ASR 本机凭据和一次真实字词对齐测试。
-不要让我提供或发送任何 token；需要我登录、授权或填写本机密钥时，请一步一步提示我操作。
-最后重新检查 readiness，并明确列出仍未完成的项目。
-```
+`readiness=pending_user_configuration` 通常不代表部署失败，只表示剪映、FFmpeg、飞书用户授权或
+ASR 本机凭据还需要在新线程中配置。
 
-可以发给其他人的部署成功话术：
-
-```text
-Auto-Cut Lite 已部署完成。请用 Codex 打开部署输出中的 workspace_root，并在该目录新建线程。
-技能列表中的 auto-cut-* 应显示为仓库技能，标签为 Auto-cut-lite，不应显示 Personal 重复项。
-如果 readiness=pending_user_configuration，请在新线程让 Codex 继续配置剪映、FFmpeg、飞书用户
-身份和 ASR；这不代表部署失败。
-```
-
-部署成功并确认稳定工作区存在后，下载目录里的 ZIP 和 `.zip.receipt.json` 可以删除。不要删除
-稳定工作区，也不要删除 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。
+部署成功并确认 Codex 能打开稳定工作区后，如果最初是在另一个位置临时解压，那个临时解压目录、
+下载的 ZIP 和 `.zip.receipt.json` 都可以删除。不要删除 `workspace_root`，也不要删除
+`%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。
 
 ## 三、以后升级
 
-升级时仍先在新 ZIP 所在的下载文件夹打开 PowerShell，并按“自动校验 ZIP”的命令完成校验。
-然后整段运行：
+1. 把新 ZIP 解压到任意临时文件夹，不要直接覆盖旧的稳定工作区。
+2. 在新解压包中双击 `START-AUTO-CUT-LITE.cmd`。
+3. 检测到旧工作区后，选择“是”即可沿用并升级；选择“否”可以迁移到新位置。
+4. 成功后确认输出的 `workspace_root` 正确，再删除这次升级使用的临时解压目录和 ZIP。
+5. 用 Codex 重新打开 `workspace_root` 并新建线程。
 
-```powershell
-$upgradeParent = Join-Path ([System.IO.Path]::GetTempPath()) ('auto-cut-lite-upgrade-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $upgradeParent | Out-Null
-Expand-Archive -LiteralPath $zip.FullName -DestinationPath $upgradeParent
-$upgradePackage = Join-Path $upgradeParent 'Auto-cut-lite'
-Set-Location -LiteralPath $upgradePackage
-powershell -NoProfile -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1 -UseChinaMirrors
+迁移时部署器会先校验旧工作区，并使用已有的备份与回滚机制，不需要手工移动 `.codex` 文件。
+
+## 四、失败时怎么做
+
+不要反复移动文件或手工复制 `.codex\skills`。保持部署窗口打开，把窗口中的完整错误文字发给
+Codex；若窗口给出了部署报告，也把下面这个文件告诉 Codex：
+
+```text
+%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\deployment-report.json
 ```
 
-部署器会按“命令参数 -> 旧安装回执 -> 当前临时解压目录”的顺序选择工作区。正常升级没有传
-`-WorkspaceRoot`，所以它会自动更新原来的稳定工作区，不会把临时目录变成新工作区。
+部署器会保留失败原因并尽量回滚到升级前状态。
 
-成功后检查输出的 `workspace_root` 仍是原工作区，再关闭 PowerShell，用资源管理器删除刚创建的
-`auto-cut-lite-upgrade-...` 临时文件夹。新 ZIP 和回执也可以删除。随后重新用 Codex 打开原
-`workspace_root` 并新建线程。
+## 五、高级手动入口
 
-不要把新 ZIP 直接解压覆盖旧工作区。那样会在部署器校验和创建回滚备份之前改写文件。
+只有排错或需要使用官方网络时才需要 PowerShell。在解压后的 `Auto-cut-lite` 文件夹地址栏输入
+`powershell` 并回车，然后运行：
 
-## 四、主动更换工作区位置
+```powershell
+# 默认国内镜像，并弹窗选择工作区
+.\installer\one_click_deploy.ps1
 
-只有确实要迁移时才使用 `-WorkspaceRoot`。目标必须是绝对路径，最后一级文件夹名必须完全等于
-`Auto-cut-lite`。部署器会先验证旧工作区未被手工修改，再把受管文件迁移到新位置；目标中的
-不同名用户文件会保留，同名且内容不同的文件会使迁移停止。
+# 改用官方 pip/npm 网络
+.\installer\one_click_deploy.ps1 -OfficialNetwork
+
+# 仅直接调用底层部署器
+.\deploy-to-codex.ps1 -UseChinaMirrors
+```
+
+正常新手安装不需要执行这一节。
