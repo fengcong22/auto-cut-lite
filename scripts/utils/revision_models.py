@@ -251,6 +251,84 @@ _VISUAL_KINDS = {
     "visual_overlay",
     "overlay",
 }
+
+_LITE_LABEL_ONLY_KINDS = {
+    "animation_timing",
+    "page_turn",
+    "release_boundary",
+    "state_release",
+    "state_reveal",
+    "timing",
+}
+_LITE_POINTER_KINDS = {
+    "add_arrow",
+    "add_hand",
+    "add_pointer",
+    "arrow",
+    "arrow_overlay",
+    "circle",
+    "circle_overlay",
+    "hand",
+    "hand_overlay",
+    "hand_pointer",
+    "magnifier",
+    "magnifier_overlay",
+    "pointer",
+    "pointer_overlay",
+    "underline",
+    "underline_overlay",
+}
+_LITE_POINTER_CLEANUP_HINTS = (
+    "clean-cover",
+    "clean cover",
+    "cleanup",
+    "遮挡",
+    "清理原小手",
+    "清除原小手",
+    "去掉原小手",
+    "移除原小手",
+    "盖住原小手",
+    "覆盖原小手",
+)
+_LITE_POINTER_INSERT_HINTS = (
+    "add",
+    "insert",
+    "place",
+    "paste",
+    "新增",
+    "添加",
+    "加一个",
+    "加小手",
+    "贴上",
+    "贴入",
+    "放入",
+    "放置",
+    "插入",
+    "替换成",
+)
+
+
+def lite_execution_required(
+    kind: str,
+    source_text: str,
+    requested: bool,
+) -> bool:
+    """Return the effective execution flag for the fixed Lite visual contract."""
+
+    normalized_kind = str(kind or "").strip().casefold()
+    if normalized_kind in _LITE_LABEL_ONLY_KINDS:
+        return False
+    if normalized_kind not in _LITE_POINTER_KINDS:
+        return bool(requested)
+
+    folded = str(source_text or "").casefold()
+    cleanup_only = any(hint.casefold() in folded for hint in _LITE_POINTER_CLEANUP_HINTS)
+    insert_requested = any(hint.casefold() in folded for hint in _LITE_POINTER_INSERT_HINTS)
+    if cleanup_only and not insert_requested:
+        return False
+    return bool(requested)
+
+
 _VISUAL_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 _PASS_STATUSES = {
     "pass",
@@ -926,12 +1004,27 @@ def load_revision_request(path: str) -> RevisionRequest:
             require_subject_pointer_binding=False,
             require_pointer_lifecycle_evidence=False,
         )
+        review_items = [
+            replace(
+                item,
+                execution_required=lite_execution_required(
+                    item.kind,
+                    item.source_text,
+                    item.execution_required,
+                ),
+            )
+            for item in review_items
+        ]
 
-    lite_cut_layout = str(
-        payload.get("lite_cut_layout")
-        or (project_payload.get("lite_cut_layout") if isinstance(project_payload, dict) else "")
-        or "split_gap"
-    ).strip().lower()
+    lite_cut_layout = (
+        str(
+            payload.get("lite_cut_layout")
+            or (project_payload.get("lite_cut_layout") if isinstance(project_payload, dict) else "")
+            or "split_gap"
+        )
+        .strip()
+        .lower()
+    )
     if lite_cut_layout not in {"split_gap", "copy"}:
         raise ValueError("lite_cut_layout must be either 'split_gap' or 'copy'.")
 
@@ -985,9 +1078,8 @@ def build_revision_summary(
         required_tracks.append("source_audio_track")
     if request.audio_delivery_plan.mode == "segmented":
         required_tracks.append("audio_delivery_tracks")
-    if (
-        request.workflow_mode != "lite"
-        and (replacement_windows or _request_uses_full_track_replacement_audio(request))
+    if request.workflow_mode != "lite" and (
+        replacement_windows or _request_uses_full_track_replacement_audio(request)
     ):
         required_tracks.append("replacement_audio_track")
     if marker_plan:

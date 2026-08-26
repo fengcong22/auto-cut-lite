@@ -9,6 +9,10 @@ description: Use when revising JianYing or 剪映 editable drafts for short ad, 
 
 Before executing this skill from the distributed plugin, read the [portable runtime contract](../auto-cut-lite/references/portable-runtime.md). Use the installed isolated runtime and `workflow_mode=lite`; do not fall back to a source checkout or another Auto-Cut installation.
 
+## Lite Review Override
+
+Read the [Lite execution contract](../auto-cut-lite/references/lite-execution-contract.md) first. In this package it overrides every later text-position, overlap, animation, scale, baked-window, or screenshot-driven visual instruction: those review items remain label-only, while a supplied local image/pointer is inserted only with default geometry. BGM, audio, color, editable-structure, and retention rules may still be used when they do not mutate the prohibited Lite visual fields.
+
 
 ## Overview
 

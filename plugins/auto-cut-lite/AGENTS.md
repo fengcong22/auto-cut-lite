@@ -23,6 +23,25 @@
 - Use the `auto-cut` router for natural-language or mixed requests and the focused `auto-cut-*`
   skill when the user names one.
 
+## Lite Execution Precedence
+
+- Before classifying or executing any visual review item, read
+  `.codex/skills/auto-cut-lite/references/lite-execution-contract.md`.
+- That contract overrides conflicting text in every router, focused skill, reference, checklist,
+  example, inherited instruction, and directly named `auto-cut-*` skill in this workspace.
+- Animation and other picture-timing requests are label-only. Never create a
+  `Lite Timing Adjusted` segment or require animation execution evidence.
+- Supplied hands, pointers, and local images are ordinary editable assets at their requested
+  start with JianYing default geometry. Do not move, scale, rotate, keyframe, calibrate, target,
+  or optimize them.
+- Existing-hand occlusion, removal, clean-cover, cleanup, and residual-cover requests are
+  label-only. Do not create cleanup media or layers.
+- Do not start pointer-profile onboarding or require bindings, target geometry, lifecycle,
+  hotspot, opened-editor, or screenshot evidence for a Lite editing request.
+- Spoken-word and audio rules retain their ASR, must-keep, reverse-validation, and editable-cut
+  requirements. Review timestamps are search hints only; spoken-delete labels start at the final
+  word/character ASR-resolved cut start, not the review timestamp.
+
 ## Local Data
 
 - Keep credentials, login state, JianYing account state, private media, project bindings, and

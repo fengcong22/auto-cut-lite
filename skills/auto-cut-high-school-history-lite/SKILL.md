@@ -63,7 +63,8 @@ reuse task intermediates produced by a mistaken full-version run.
   plugin/package. Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
   review timestamp directly into a spoken-word cut. Resolve every final boundary from Chinese
   word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
-  `must_keep` phrases and strategy, then run reverse validation. Lite draft generation fails
+  `must_keep` phrases and strategy, then run reverse validation. Start that review item's label
+  at the final ASR-resolved cut start rather than the rough review timestamp. Lite draft generation fails
   closed when that boundary receipt is absent or does not match the saved cut.
 - For source ASR, use the same local path as the full workflow: extract audio from the local source
   video when no separate source audio is present, then submit it through the bundled
@@ -79,9 +80,9 @@ reuse task intermediates produced by a mistaken full-version run.
   and `Lite Reused Audio` at the same timeline/source time. Preserve the original range and
   total project duration.
 - Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. A
-  pointer request is always execution-required and cannot be downgraded to a marker-only item.
-  Animation or other picture-timing requests are label-only and do not create `Lite Timing
-  Adjusted` segments.
+  supplied pointer insertion is execution-required, but an existing-hand occlusion, removal,
+  clean-cover, cleanup, or residual-cover request is label-only. Animation or other
+  picture-timing requests are label-only and do not create `Lite Timing Adjusted` segments.
 - Review labels are all retained verbatim. Lite uses three isolated marker track families rather
   than the full workflow's dynamic horizontal lanes:
   - `Review Marker Delete 1/2/...` contains spoken/delete/noise items; an overlap only adds
@@ -100,8 +101,8 @@ reuse task intermediates produced by a mistaken full-version run.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
   occlusion, or target landing. Clamp the requested duration to the source project duration.
-- Copy timing-adjusted source ranges to `Lite Timing Adjusted` at the requested target time.
-  Never remove the original range.
+- Keep `Lite Timing Adjusted` empty. Animation, page-turn, reveal, release, and other
+  picture-timing requests retain only their verbatim review labels.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
 - Keep A1 and A2 source-aligned in split-gap layout. The delete lane's audio is placed on A2
   even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`

@@ -14,7 +14,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.release.build_lite_plugin import PLUGIN_NAME, _privacy_scan
+from scripts.release.build_lite_plugin import PLUGIN_NAME, WORKSPACE_NAME, _privacy_scan
 
 
 def _sha256(path: Path) -> str:
@@ -44,7 +44,7 @@ def _validate_member(info: zipfile.ZipInfo) -> None:
         or "\\" in name
         or not path.parts
         or any(part in {"", ".", ".."} for part in path.parts)
-        or path.parts[0] != PLUGIN_NAME
+        or path.parts[0] != WORKSPACE_NAME
     ):
         raise ValueError(f"unsafe ZIP member: {name}")
     file_type = (info.external_attr >> 16) & 0o170000
@@ -76,7 +76,9 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
             _validate_member(info)
         package.extractall(destination)
 
-    root = destination / PLUGIN_NAME
+    if receipt.get("archive_root") != WORKSPACE_NAME:
+        raise ValueError("release receipt archive root is invalid")
+    root = destination / WORKSPACE_NAME
     manifest = _json_object(root / "PACKAGE-MANIFEST.json", "package manifest")
     plugin_manifest = _json_object(root / ".codex-plugin" / "plugin.json", "plugin manifest")
     if manifest.get("name") != PLUGIN_NAME or plugin_manifest.get("name") != PLUGIN_NAME:

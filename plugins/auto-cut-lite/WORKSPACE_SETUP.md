@@ -1,31 +1,34 @@
-# Auto-Cut Lite workspace
+# Auto-Cut Lite combined workspace
 
-Deployment keeps the isolated runtime under `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`. By default it
-installs the skill surface under:
+Auto-Cut Lite uses a combined deployment model:
+
+- The stable Codex workspace contains the extracted package files, `AGENTS.md`, and `.codex/skills`.
+- The executable plugin runtime and Python environments remain under
+  `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`.
+- `deployment-report.json` and `workspace-install-receipt.json` connect the workspace to that
+  runtime.
+
+On a first install, the extracted directory named exactly `Auto-cut-lite` is the default stable
+workspace. The user should extract it at the permanent location they want to keep. On an upgrade,
+the new package is extracted separately and its deployer follows this precedence:
 
 ```text
-%USERPROFILE%\Documents\Codex\Auto-cut-lite\.codex\skills
+explicit -WorkspaceRoot -> existing installation receipt -> current extracted package root
 ```
 
-To use another parent directory, deploy with an absolute path whose final folder name remains
-`Auto-cut-lite`:
+The workspace installer verifies `PACKAGE-MANIFEST.json`, synchronizes package files, refreshes
+`AGENTS.md` and all `auto-cut*` repository skills, removes stale managed package files, and records
+hashes in the receipt. Unrelated files are preserved. An unmanaged target file is adopted only when
+its content exactly matches the incoming file; a different collision or a modified previously
+managed file stops the operation. Package files, skills, and `AGENTS.md` share one rollback.
 
-```powershell
-.\deploy-to-codex.ps1 -WorkspaceRoot "D:\CodexWorkspaces\Auto-cut-lite"
-```
+Do not extract a new ZIP directly over an existing stable workspace. Extract it separately, run the
+new deployer, and delete that temporary extraction only after success. Passing a different absolute
+`-WorkspaceRoot` whose final folder name is `Auto-cut-lite` performs a verified relocation with
+rollback coverage.
 
-Open the reported `workspace_root` as the Codex workspace and start a new thread. The Skills page
-will then discover the Auto-Cut skills with repository scope and display the workspace label
-`Auto-cut-lite` instead of `Personal`. On upgrade, omitting `-WorkspaceRoot` reuses the installed
-workspace path from the previous receipt before falling back to the default Documents path. Passing
-a different explicit path performs a verified relocation: the old managed skills and `AGENTS.md`
-are moved only after their hashes match the active receipt, and deployment rollback restores the
-previous workspace.
+The plugin manifest intentionally omits `skills`, and the package has no top-level `skills`
+directory. Repository skills are installed only under `<workspace>\.codex\skills`, so Codex should
+show scope `repo` and label `Auto-cut-lite` rather than duplicate `Personal` entries.
 
-The workspace installer refreshes only `AGENTS.md` and skill directories whose names are
-`auto-cut` or begin with `auto-cut-`. Other workspace files are preserved. Upgrade backups and the
-workspace installation receipt are kept under `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`.
-
-The plugin stores its deployable skill payload under `workspace-payload/skills`. It intentionally
-has no top-level `skills` directory, preventing Codex from auto-discovering the same skills at
-user scope and displaying duplicate `Personal` entries.
+See `BEGINNER_DEPLOYMENT.md` for copyable first-install and upgrade instructions.

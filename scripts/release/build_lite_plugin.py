@@ -16,7 +16,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
-PLUGIN_VERSION = "1.3.0+codex.20260825093950"
+WORKSPACE_NAME = "Auto-cut-lite"
+PLUGIN_VERSION = "1.5.0+codex.20260826153510"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -189,11 +190,11 @@ def _write_text(path: Path, text: str) -> None:
 def _write_target_setup(stage: Path) -> None:
     _write_text(
         stage / "install.ps1",
-        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio, [string]$WorkspaceRoot)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio -WorkspaceRoot $WorkspaceRoot\nexit $LASTEXITCODE\n""",
+        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio, [switch]$UseChinaMirrors, [string]$WorkspaceRoot)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio -UseChinaMirrors:$UseChinaMirrors -WorkspaceRoot $WorkspaceRoot\nexit $LASTEXITCODE\n""",
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\n1. Install 64-bit Python 3.11, JianYing/CapCut desktop and FFmpeg/FFprobe. A directly executable Codex CLI is preferred; Node.js provides the official npm CLI fallback when the Codex Desktop binary is restricted.\n2. In PowerShell run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1`. To choose another workspace parent, add `-WorkspaceRoot \"D:\\CodexWorkspaces\\Auto-cut-lite\"`; the path must be absolute and its final folder name must be `Auto-cut-lite`. The full main and audio runtimes are installed by default in separate virtual environments. Use `-SkipAudio` only for an explicit reduced installation.\n3. The installer registers a dedicated marketplace named `auto-cut-lite-marketplace` with display name `Auto-Cut Lite`, migrates any old `auto-cut-lite@personal` installation, and asks Codex to install `auto-cut-lite@auto-cut-lite-marketplace`. The plugin manifest intentionally exposes no user-scoped skills.\n4. The installer refreshes all Auto-Cut skills and `AGENTS.md` under the selected workspace. When `-WorkspaceRoot` is omitted, upgrades reuse the previous receipt path and first installs use `%USERPROFILE%\\Documents\\Codex\\Auto-cut-lite`. Passing a different explicit path verifies and relocates the previously managed workspace with rollback coverage. Open the reported `workspace_root` in Codex and start a new thread so the skills are discovered with repository scope and the `Auto-cut-lite` label.\n5. Authorize Feishu as the current operator when first prompted. Deployment enforces `default-as user` and `strict-mode user` when `lark-cli` exists, but never copies or creates a token.\n6. Configure ASR credentials only on the target computer and verify them with a real alignment request.\n7. Set the JianYing draft root on the target computer. The package never copies a source computer's account state, caches or absolute paths.\n\nRead `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json` for machine readiness and the exact `workspace_root`. `deployment_status=installed` can coexist with `readiness=pending_user_configuration`. The ZIP is intentionally compact because pinned Python dependencies are installed on the target computer; after full deployment the isolated environments consume substantially more storage.\n\nThe generic workflow does not ship a subject-specific pointer library. Add local image or pointer assets explicitly per project when needed.\n""",
+        """# Target setup\n\nRead `BEGINNER_DEPLOYMENT.md` before installation.\n\nFirst install: extract the ZIP at the permanent location. The extracted `Auto-cut-lite` directory becomes the combined Codex workspace. Run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1` from that directory.\n\nUpgrade: extract the new ZIP into a temporary directory and run the new deployer there. The existing receipt selects the stable workspace and synchronizes the new package into it. Delete only the temporary upgrade extraction after success. Do not extract a new ZIP directly over the stable workspace.\n\nUse `-UseChinaMirrors` when direct pip/npm access is unreliable. Use `-WorkspaceRoot \"<absolute-path>\\Auto-cut-lite\"` only when selecting or relocating the stable workspace. The runtime remains under `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite`; open the reported `workspace_root` in Codex and start a new thread.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -283,12 +284,15 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
         raise ValueError("audio runtime must be installed by default in a separate environment")
     workspace = payload.get("workspace_installation")
     if not isinstance(workspace, dict) or workspace != {
-        "default_root": "%USERPROFILE%/Documents/Codex/Auto-cut-lite",
+        "mode": "combined_package_workspace",
+        "default_root": "extracted_package_root",
         "custom_root_supported": True,
         "custom_root_parameter": "WorkspaceRoot",
         "required_leaf_name": "Auto-cut-lite",
-        "upgrade_root_precedence": "parameter_then_existing_receipt_then_default",
+        "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
         "explicit_path_upgrade": "verified_relocation_with_rollback",
+        "managed_package_sync": "manifest_verified_transactional",
+        "managed_package_rollback": True,
         "payload_skills_path": "workspace-payload/skills",
         "skills_path": ".codex/skills",
         "agents_path": "AGENTS.md",
@@ -401,7 +405,7 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
         prefix="auto-cut-lite-plugin-", dir=output.parent
     ) as temporary:
         parent = Path(temporary)
-        stage = parent / PLUGIN_NAME
+        stage = parent / WORKSPACE_NAME
         source_plugin = repo / "plugins" / PLUGIN_NAME
         if not source_plugin.is_dir():
             raise FileNotFoundError(source_plugin)
@@ -450,10 +454,15 @@ def build(repo_root: Path, output: Path) -> dict[str, object]:
             "portable_capability_count": capability_evidence["capability_count"],
             "portable_required_path_count": capability_evidence["required_path_count"],
             "packaged_skill_count": capability_evidence["skill_count"],
-            "workspace_root_default": "%USERPROFILE%\\Documents\\Codex\\Auto-cut-lite",
+            "archive_root": WORKSPACE_NAME,
+            "workspace_mode": "combined_package_workspace",
+            "workspace_root_default": "extracted_package_root",
             "workspace_root_customizable": True,
             "workspace_root_parameter": "WorkspaceRoot",
+            "workspace_root_precedence": "parameter_then_existing_receipt_then_package_root",
             "workspace_explicit_path_upgrade": "verified_relocation_with_rollback",
+            "workspace_package_sync": "manifest_verified_transactional",
+            "workspace_package_rollback": True,
             "workspace_skill_payload": "workspace-payload/skills",
             "workspace_skill_scope": capability_evidence["workspace_scope"],
             "workspace_skill_label": capability_evidence["workspace_label"],

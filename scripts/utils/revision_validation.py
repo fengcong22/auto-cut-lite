@@ -7,6 +7,7 @@ import re
 import subprocess
 import wave
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -68,6 +69,7 @@ from utils.revision_models import (
     _replacement_audio_paths_for_request,
     _visual_plan_segments,
     build_revision_summary,
+    lite_execution_required,
 )
 
 _SUBJECT_POINTER_BINDINGS_MODULE: Optional[ModuleType] = None
@@ -285,6 +287,8 @@ def _saved_audio_delivery_volume(request: RevisionRequest, segment: Any) -> floa
     ):
         return 1.0
     return float(segment.volume)
+
+
 _WAV_VALIDATION_CHUNK_FRAMES = 65_536
 
 
@@ -2752,7 +2756,7 @@ _CONDITIONAL_ACCEPTANCE_GATES = (
     "pointer",
     "animation",
 )
-_LITE_VISUAL_ACCEPTANCE_GATES = {"visual", "pointer"}
+_LITE_VISUAL_ACCEPTANCE_GATES = {"visual", "pointer", "animation"}
 _CHEAP_AUDIO_KINDS = {
     "bgm_replace",
     "replace_bgm",
@@ -2949,6 +2953,12 @@ def _acceptance_route_records(
         execution_required = (
             execution_item.execution_required if execution_item is not None else bool(edits)
         )
+        if request.workflow_mode == "lite" and execution_item is not None:
+            execution_required = lite_execution_required(
+                execution_item.kind,
+                execution_item.source_text,
+                execution_required,
+            )
         operation_tokens = [
             _normalize_acceptance_token(edit.op_type) for edit in edits if edit.op_type
         ]
@@ -3907,6 +3917,18 @@ def validate_revision_acceptance(
     routes_by_id = {record["normalized_item_id"]: record for record in profile["items"]}
     action_entries = _build_request_action_entries(request)
     review_items = _merge_unique_review_items(request.review_items, doc_items)
+    if request.workflow_mode == "lite":
+        review_items = [
+            replace(
+                item,
+                execution_required=lite_execution_required(
+                    item.kind,
+                    item.source_text,
+                    item.execution_required,
+                ),
+            )
+            for item in review_items
+        ]
     acceptance = request.acceptance
     draft_visual_evidence = (
         _collect_draft_visual_evidence(content or {}) if content is not None else {}
@@ -4154,7 +4176,9 @@ def validate_revision_acceptance(
         item_gates = set(route.get("gates") or [])
         kind = str(route.get("kind") or item.kind or _classify_review_text(item.source_text))
         timebase = item.evidence.get("timebase") if isinstance(item.evidence, dict) else None
-        if isinstance(timebase, dict) and str(timebase.get("status") or "").startswith("unresolved"):
+        if isinstance(timebase, dict) and str(timebase.get("status") or "").startswith(
+            "unresolved"
+        ):
             reason = (
                 f"Review item {item.item_id} has unresolved timebase "
                 f"{timebase.get('status')}; a replacement-local timestamp cannot be executed."
@@ -4167,10 +4191,14 @@ def validate_revision_acceptance(
         item_has_validation = _evidence_has_validation(item.validation, item.evidence)
         item_audio_validation_passed = _audio_validation_is_pass(item.validation, item.evidence)
 
-        lifecycle_required = request.workflow_mode != "lite" and strict and (
-            "pointer" in item_gates
-            or kind == "pointer_overlay"
-            or _classify_review_text(item.source_text) == "pointer_overlay"
+        lifecycle_required = (
+            request.workflow_mode != "lite"
+            and strict
+            and (
+                "pointer" in item_gates
+                or kind == "pointer_overlay"
+                or _classify_review_text(item.source_text) == "pointer_overlay"
+            )
         )
         if lifecycle_required:
             lifecycle_problems = pointer_lifecycle_evidence_problems(item.evidence)
@@ -4758,7 +4786,7 @@ def validate_saved_revision_draft(
         ):
             errors.append(
                 "Draft collapsed the main video timeline into one full-length segment while keep_cut_points=true."
-        )
+            )
         if (
             request.workflow_mode != "lite"
             and keep_cut_points

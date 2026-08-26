@@ -84,6 +84,73 @@ def test_all_packaged_skill_relative_links_resolve() -> None:
     assert missing == []
 
 
+def test_visual_skills_share_one_authoritative_lite_execution_contract() -> None:
+    contract = SKILLS_ROOT / "auto-cut-lite" / "references" / "lite-execution-contract.md"
+    contract_text = contract.read_text(encoding="utf-8-sig")
+    assert "single authoritative visual execution contract" in contract_text
+    assert "Lite Timing Adjusted" in contract_text
+    assert "execution_required" in contract_text
+    assert "word/character ASR-resolved cut start" in contract_text
+    assert "rough review timestamp" in contract_text
+
+    agents_text = (PLUGIN_ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
+    assert "Lite Execution Precedence" in agents_text
+    assert ".codex/skills/auto-cut-lite/references/lite-execution-contract.md" in agents_text
+    assert "overrides conflicting text in every router" in agents_text
+
+    contract_users = {
+        "auto-cut",
+        "auto-cut-animation-timing-revision",
+        "auto-cut-basic-oral-video",
+        "auto-cut-editable-ad-revision",
+        "auto-cut-favorite-text-assets",
+        "auto-cut-final-acceptance",
+        "auto-cut-lite",
+        "auto-cut-local-image-overlay-revision",
+        "auto-cut-pointer-targeting",
+        "auto-cut-profile-onboarding",
+        "auto-cut-revision-draft",
+        "auto-cut-text-safezone-animation-revision",
+    }
+    for skill_name in contract_users:
+        skill_text = (SKILLS_ROOT / skill_name / "SKILL.md").read_text(encoding="utf-8-sig")
+        assert "lite-execution-contract.md" in skill_text, skill_name
+
+
+def test_active_lite_visual_prompts_do_not_reenable_full_visual_execution() -> None:
+    active_files = [
+        SKILLS_ROOT / "auto-cut" / "SKILL.md",
+        SKILLS_ROOT / "auto-cut-animation-timing-revision" / "SKILL.md",
+        SKILLS_ROOT / "auto-cut-animation-timing-revision" / "agents" / "openai.yaml",
+        SKILLS_ROOT / "auto-cut-local-image-overlay-revision" / "SKILL.md",
+        SKILLS_ROOT / "auto-cut-pointer-targeting" / "SKILL.md",
+        SKILLS_ROOT / "auto-cut-pointer-targeting" / "agents" / "openai.yaml",
+        SKILLS_ROOT / "auto-cut-text-safezone-animation-revision" / "SKILL.md",
+        SKILLS_ROOT / "auto-cut-final-acceptance" / "SKILL.md",
+    ]
+    active_text = "\n".join(path.read_text(encoding="utf-8-sig") for path in active_files)
+    forbidden = (
+        "fresh-check its exact stage+subject",
+        "frame-level boundary checks",
+        "精准覆盖局部错误内容",
+        "pointer source-reference sizing",
+        "markers are not execution evidence",
+    )
+    for phrase in forbidden:
+        assert phrase not in active_text
+
+    animation_text = (SKILLS_ROOT / "auto-cut-animation-timing-revision" / "SKILL.md").read_text(
+        encoding="utf-8-sig"
+    )
+    pointer_text = (SKILLS_ROOT / "auto-cut-pointer-targeting" / "SKILL.md").read_text(
+        encoding="utf-8-sig"
+    )
+    assert "execution_required=false" in animation_text
+    assert "leave `Lite Timing Adjusted` empty" in animation_text
+    assert "default geometry" in pointer_text
+    assert "label-only" in pointer_text
+
+
 def test_documented_python_entrypoints_are_bundled() -> None:
     missing: list[str] = []
     command_pattern = re.compile(r"\bpython(?:\.exe)?\s+([A-Za-z0-9_./\\-]+\.py)\b")
@@ -155,12 +222,15 @@ def test_portable_capability_contract_requires_named_marketplace_and_split_runti
     assert audio["default"] == "installed"
     assert audio["isolation"] == "separate"
     assert payload["workspace_installation"] == {
-        "default_root": "%USERPROFILE%/Documents/Codex/Auto-cut-lite",
+        "mode": "combined_package_workspace",
+        "default_root": "extracted_package_root",
         "custom_root_supported": True,
         "custom_root_parameter": "WorkspaceRoot",
         "required_leaf_name": "Auto-cut-lite",
-        "upgrade_root_precedence": "parameter_then_existing_receipt_then_default",
+        "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
         "explicit_path_upgrade": "verified_relocation_with_rollback",
+        "managed_package_sync": "manifest_verified_transactional",
+        "managed_package_rollback": True,
         "payload_skills_path": "workspace-payload/skills",
         "skills_path": ".codex/skills",
         "agents_path": "AGENTS.md",

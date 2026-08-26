@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -220,11 +221,13 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
     assert "'plugin', 'remove', $legacyReference" in deployer
     assert "'remove-personal'" in deployer
     assert "[string]$WorkspaceRoot" in deployer
-    assert (
-        "$defaultWorkspaceRoot = Join-Path $userProfile 'Documents\\Codex\\Auto-cut-lite'"
-        in deployer
-    )
+    assert "[switch]$UseChinaMirrors" in deployer
+    assert "$defaultWorkspaceRoot = $packageRoot" in deployer
+    assert "$workspaceRootSource = 'package_root'" in deployer
     assert "$workspaceRootSource = 'existing_receipt'" in deployer
+    assert "parameter_then_existing_receipt_then_package_root" in deployer
+    assert "$env:PIP_INDEX_URL = 'https://mirrors.aliyun.com/pypi/simple/'" in deployer
+    assert "$env:npm_config_registry = 'https://registry.npmmirror.com'" in deployer
     assert "WorkspaceRoot must be an absolute path" in deployer
     assert "WorkspaceRoot folder name must be exactly" in deployer
     assert "'installer/manage_workspace.py'" in deployer
@@ -247,7 +250,7 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     tmp_path: Path,
 ) -> None:
-    package = tmp_path / "auto-cut-lite"
+    package = tmp_path / "Auto-cut-lite"
     files = {
         ".codex-plugin/plugin.json": json.dumps(
             {"name": "auto-cut-lite", "version": "1.3.0"}
@@ -301,6 +304,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
             "-ValidateOnly",
             "-WorkspaceRoot",
             str(custom_workspace),
+            "-UseChinaMirrors",
         ],
         capture_output=True,
         text=True,
@@ -322,11 +326,15 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert f"workspace_root={custom_workspace}" in result.stdout
     assert "workspace_root_source=parameter" in result.stdout
     assert "workspace_root_customizable=true" in result.stdout
+    assert "workspace_mode=combined_package_workspace" in result.stdout
+    assert f"workspace_package_root={custom_workspace}" in result.stdout
+    assert "workspace_upgrade_precedence=parameter_then_existing_receipt_then_package_root" in result.stdout
     assert "workspace_label=Auto-cut-lite" in result.stdout
     assert "workspace_scope=repo" in result.stdout
     assert "workspace_skill_count=17" in result.stdout
     assert "workspace_skill_payload=workspace-payload/skills" in result.stdout
     assert "plugin_top_level_skills_present=false" in result.stdout
+    assert "china_mirrors_enabled=True" in result.stdout
     assert "codex_invocation=direct" in result.stdout
 
     invalid_workspace = subprocess.run(
@@ -372,6 +380,10 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     )
     assert fallback.returncode == 0, fallback.stdout + fallback.stderr
     assert "codex_invocation=official_npm_fallback" in fallback.stdout
+    if "workspace_root_source=package_root" in fallback.stdout:
+        assert f"workspace_root={package}" in fallback.stdout
+    else:
+        assert "workspace_root_source=existing_receipt" in fallback.stdout
 
 
 def test_plugin_and_builder_versions_match() -> None:
@@ -390,3 +402,25 @@ def test_plugin_and_builder_versions_match() -> None:
     )
     assert f'PLUGIN_VERSION = "{plugin_manifest["version"]}"' in builder
     assert capabilities["plugin_version"] == plugin_manifest["version"]
+
+
+def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> None:
+    output = tmp_path / build_lite_plugin.ARCHIVE_NAME
+
+    receipt = build_lite_plugin.build(REPO_ROOT, output)
+
+    assert receipt["archive_root"] == "Auto-cut-lite"
+    assert receipt["workspace_mode"] == "combined_package_workspace"
+    assert receipt["workspace_root_default"] == "extracted_package_root"
+    assert receipt["workspace_root_precedence"] == (
+        "parameter_then_existing_receipt_then_package_root"
+    )
+    assert receipt["workspace_package_sync"] == "manifest_verified_transactional"
+    assert receipt["workspace_package_rollback"] is True
+    with zipfile.ZipFile(output) as archive:
+        names = archive.namelist()
+    assert names
+    assert {name.split("/", 1)[0] for name in names} == {"Auto-cut-lite"}
+    assert "Auto-cut-lite/BEGINNER_DEPLOYMENT.md" in names
+    assert "Auto-cut-lite/PACKAGE-MANIFEST.json" in names
+    assert not any(name.startswith("auto-cut-lite/") for name in names)

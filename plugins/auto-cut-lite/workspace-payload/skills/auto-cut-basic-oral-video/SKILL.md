@@ -9,6 +9,10 @@ description: Apply the packaged generic basic oral-video style to editable JianY
 
 Before executing this skill from the distributed plugin, read the [portable runtime contract](../auto-cut-lite/references/portable-runtime.md). Use the installed isolated runtime and `workflow_mode=lite`; do not fall back to a source checkout or another Auto-Cut installation.
 
+## Lite Review Override
+
+For review-document work, first read the [Lite execution contract](../auto-cut-lite/references/lite-execution-contract.md). It overrides every position, scale, safe-zone, animation, sticker, and visual-validation rule below: review-requested text/flower animation or movement is label-only; supplied local visual assets use default geometry; pointer cleanup is label-only. The style rules below remain available only for a user-requested new oral-video build and must not be used to convert a Lite review label into a visual execution item.
+
 
 Use this skill as a style guide for short oral-video ads that should feel brisk, benefit-dense, and clean rather than cinematic.
 

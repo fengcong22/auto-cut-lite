@@ -11,8 +11,9 @@ import re
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
+from utils.replacement_timebase import resolve_review_timebases
 from utils.revision_models import (
     AcceptanceRules,
     PreservationRules,
@@ -23,9 +24,9 @@ from utils.revision_models import (
     _classify_review_text,
     _looks_execution_required,
     _normalize_review_id,
+    lite_execution_required,
 )
 from utils.revision_validation import derive_acceptance_profile
-from utils.replacement_timebase import resolve_review_timebases
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
@@ -485,6 +486,8 @@ def _unique_fallback_id(preferred: str, safe_base: str, used_ids: set[str]) -> s
 
 def _canonical_review_items(
     source_rows: list[dict[str, Any]],
+    *,
+    workflow_mode: str = "full",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     explicit_ids: list[str] = []
     normalized_explicit: dict[str, str] = {}
@@ -560,7 +563,9 @@ def _canonical_review_items(
             kind = "colored_span_delete"
             colored_spans = _extract_colored_spans(source_row)
             row["colored_spans"] = copy.deepcopy(colored_spans)
-            row_evidence = source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
+            row_evidence = (
+                source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
+            )
             row_evidence = copy.deepcopy(row_evidence)
             row_evidence["colored_spans"] = copy.deepcopy(colored_spans)
             row_evidence["colored_span_status"] = "resolved" if colored_spans else "missing_markup"
@@ -585,6 +590,12 @@ def _canonical_review_items(
                 inference_text, kind, explicit_kind=explicit_kind
             )
         execution_required = _execution_required_for_kind(kind, execution_required)
+        if workflow_mode == "lite":
+            execution_required = lite_execution_required(
+                kind,
+                source_text,
+                execution_required,
+            )
 
         explicit_status = str(source_row.get("verbatim_status") or "").strip()
         verbatim_status = (
@@ -738,26 +749,22 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
     source_rows = _extract_items(snapshot_copy)
     document = _document_identity(snapshot_copy)
     normalized_project = _normalize_project(project_copy)
-    review_items, warnings = _canonical_review_items(source_rows)
+    workflow_mode = str(normalized_project.get("workflow_mode") or "full")
+    review_items, warnings = _canonical_review_items(
+        source_rows,
+        workflow_mode=workflow_mode,
+    )
     review_items, timebase_warnings, unresolved_timebase_ids, replacement_anchors = (
         resolve_review_timebases(review_items, snapshot=snapshot_copy, project=normalized_project)
     )
     warnings.extend(timebase_warnings)
-    workflow_mode = str(normalized_project.get("workflow_mode") or "full")
-
     acceptance = _acceptance_payload(review_items)
     provisional_request, model_items = _request_model(normalized_project, review_items, acceptance)
     provisional_profile = derive_acceptance_profile(provisional_request, doc_items=model_items)
     enabled_gates = set(provisional_profile["enabled_gates"])
-    requires_segmented_audio = bool(
-        {"audio_precision", "audio_join"}.intersection(enabled_gates)
-    )
-    acceptance["require_audio_validation"] = bool(
-        {"audio_precision", "audio_join"} & enabled_gates
-    )
-    acceptance["require_visual_evidence"] = (
-        workflow_mode != "lite" and "visual" in enabled_gates
-    )
+    requires_segmented_audio = bool({"audio_precision", "audio_join"}.intersection(enabled_gates))
+    acceptance["require_audio_validation"] = bool({"audio_precision", "audio_join"} & enabled_gates)
+    acceptance["require_visual_evidence"] = workflow_mode != "lite" and "visual" in enabled_gates
     acceptance["require_pause_validation"] = "pause_fit" in enabled_gates
     acceptance["require_subject_pointer_binding"] = (
         workflow_mode != "lite" and "pointer" in enabled_gates

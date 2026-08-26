@@ -2,6 +2,11 @@
 
 This document defines the repository-scoped input format for review-driven JianYing draft revision.
 
+For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.md) is
+authoritative and overrides every full-workflow example or field described below. In particular,
+animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
+default geometry, and spoken-delete labels use the ASR-resolved edit start.
+
 Use this format when the task is:
 
 - continue revising an existing draft
@@ -189,22 +194,25 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 - `workflow_mode=lite` selects the High School History compact workflow. It keeps the source
   duration unchanged. Its default `lite_cut_layout=split_gap` writes non-delete intervals to
   `Original Video` and `Separated Source Audio`, delete intervals to `Lite Cut Segments` and
-  `Lite Reused Audio`, simple downloaded assets to `Lite Visual Assets`, and timing copies to
-  `Lite Timing Adjusted`. Set `lite_cut_layout=copy` for the older full-V1/A1 reference layout.
+  `Lite Reused Audio`, and simple downloaded assets to `Lite Visual Assets`. It keeps
+  `Lite Timing Adjusted` empty. Set `lite_cut_layout=copy` for the older full-V1/A1 reference
+  layout.
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
 - Lite review labels use source text verbatim, start at the edit time, remain in the top safe band,
-  and last `2s` unless clamped by the unchanged project end.
-- Lite mode does not weaken spoken-delete or pointer evidence. Review-document timestamps are
+  and last `2s` unless clamped by the unchanged project end. For spoken deletion, edit time means
+  the final ASR-resolved cut start, never the rough review timestamp.
+- Lite mode does not weaken spoken-delete evidence. Review-document timestamps are
   `search_hint` values only. A spoken delete must carry a passing word/character `asr_alignment`
   receipt whose `resolved_cut_window` equals the edit start/end, together with `delete`, explicit
   `must_keep`, and `strategy`. The receipt must bind the source-audio SHA-256, provider plus
   model/resource identity, adapter version, ordered positive-duration matched word/character
   rows, and `authoritative_cut_boundary=true`. Candidate transcripts, prompted local ASR, or a
   rough-time match must keep `authoritative_cut_boundary=false` and cannot be written as a cut.
-  Pointer rows remain execution-required and retain the ordinary pointer binding, lifecycle,
-  placement, and visual acceptance gates.
+  A supplied pointer row remains execution-required but uses default geometry and start-only
+  acceptance. Cleanup-only pointer rows are label-only. Lite never enables binding, lifecycle,
+  placement, hotspot, opened-editor, or full visual/animation acceptance gates.
 
 ## Required Fields
 
@@ -302,8 +310,8 @@ Use `acceptance` to make the final gate explicit. For Feishu/Lark review documen
 - `require_review_items: true`
 - `require_execution_evidence: true`
 - `require_audio_validation: true` when spoken deletion/audio repair exists
-- `require_visual_evidence: true` when pointer, hand, underline, animation, visual deletion, or overlay edits exist
-- `require_pointer_profile_binding: true` for course pointer jobs; each pointer item must carry a fresh `evidence.subject_profile_receipt`
+- In Lite, keep `require_visual_evidence: false` and `require_pointer_profile_binding: false`.
+  Supplied visual execution is validated by the fixed Lite asset/start/default-geometry checks.
 - strict validation always enforces the canonical pointer-profile receipt for pointer items; omitting or setting this field to false is not an opt-out
 - `require_pause_validation: true` when post-delete pauses are shortened, extended, preserved, repaired with `semantic_pause_adjustment`, or marked `visual_hold_review`
 - `require_final_acceptance: true` when the draft is being delivered as complete
@@ -469,7 +477,9 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 1. Use one edit item per review issue.
 2. Use one source-ledger marker per stable source item ID; multiple internal edits for that ID share it.
 3. Do not encode multiple unrelated fixes into one giant time window.
-4. If a screenshot note is truly review-only, use `markers`; if it asks to add, remove, shift, retime, point, underline, or replace anything, add a `review_items` row with `execution_required=true` and execution evidence.
+4. Apply the Lite classification matrix: animation/timing, text movement/animation, and
+   cleanup-only pointer notes use `execution_required=false`; supplied pointer/image insertions
+   use `execution_required=true`; spoken deletion remains execution-required with ASR evidence.
 5. If the user says materials must remain visible, keep the matching `preserve` fields set to `true`.
 6. If the user needs second-stage manual editing, the resulting draft must keep inspectable cut structure and must not collapse into one full-length preview clip.
 7. Do not delete a review-document item because a previous attempt mishandled it or its internal `source_text` is missing. Re-read the document automatically; if unavailable, preserve the most complete unmodified candidate with an unverified warning and continue draft generation.
@@ -481,7 +491,9 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 - `markers` are review items. They are independently traceable labels for manual verification or later adjustment and do not automatically require a main-track split.
 - `修改` and `校对` remain semantic categories in the item ID/kind and execution evidence. Do not add either prefix to visible source-ledger marker text unless it is already present in `source_text`.
 - A review-only item without a nearby cut is valid when its source-ledger marker remains independently traceable and its receipt identifies the item.
-- A visible `校对` or `修改` label is not proof that a requested visual asset, animation timing change, or spoken-word deletion was executed. Strict validation must find execution evidence.
+- A visible label is not proof of a supplied visual insertion or spoken deletion. Strict
+  validation must find their applicable execution evidence. Animation/timing, text-position, and
+  cleanup-only pointer items are intentionally label-only in Lite and require no execution proof.
 - For Feishu/Lark review documents, every source item must appear in `review_items` or a separate `doc_items` ledger. Missing items are validation failures even if the saved draft has enough marker segments.
 
 ## Validation Commands

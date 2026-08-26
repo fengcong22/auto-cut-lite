@@ -21,11 +21,7 @@ from utils.lite_revision import (
 )
 from utils.review_job_compiler import compile_review_job
 from utils.revision_models import _classify_review_text
-from utils.revision_runner import (
-    RevisionAcceptanceError,
-    execute_revision_request,
-    load_revision_request,
-)
+from utils.revision_runner import execute_revision_request, load_revision_request
 from utils.revision_evidence import audio_delivery_plan_sha256
 from core.review_marker_ops import ReviewMarkerOpsMixin
 
@@ -78,9 +74,7 @@ class LiteRevisionTests(unittest.TestCase):
                             "end": 2.0,
                             "doc_item_id": "visual-1",
                             "asset_paths": [pointer],
-                            "visual_plan": {
-                                "segments": [{"asset_path": pointer, "duration": 1.0}]
-                            },
+                            "visual_plan": {"segments": [{"asset_path": pointer, "duration": 1.0}]},
                             "evidence": {"asset_path": pointer},
                         }
                     ],
@@ -335,9 +329,246 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(request_payload["workflow_mode"], "lite")
         self.assertEqual(request_payload["audio_delivery_plan"]["mode"], "segmented")
         self.assertTrue(request_payload["acceptance"]["require_audio_validation"])
+        self.assertEqual(request_payload["review_items"][0]["review_timestamp_role"], "search_hint")
+
+    def test_lite_compiler_applies_label_only_animation_and_pointer_cleanup_contract(self):
+        rows = [
+            {
+                "id": "animation-1",
+                "kind": "animation_timing",
+                "source_text": "00:01 动画提前并加快",
+                "execution_required": True,
+            },
+            {
+                "id": "cleanup-1",
+                "kind": "pointer_overlay",
+                "source_text": "00:02 小手遮挡，清除原小手",
+                "execution_required": True,
+            },
+            {
+                "id": "pointer-1",
+                "kind": "pointer_overlay",
+                "source_text": "00:03 添加小手素材",
+                "execution_required": True,
+            },
+            {
+                "id": "image-1",
+                "kind": "visual_overlay",
+                "source_text": "00:04 贴入提供的图片",
+                "execution_required": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {"review_items": rows},
+                {
+                    "draft_name": "LiteBehaviorCompiler",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                doc_payload = json.load(source_file)
+            with open(compiled["revision_request"], "r", encoding="utf-8") as source_file:
+                request_payload = json.load(source_file)
+
+        flags = {item["id"]: item["execution_required"] for item in doc_payload["review_items"]}
         self.assertEqual(
-            request_payload["review_items"][0]["review_timestamp_role"], "search_hint"
+            flags,
+            {
+                "animation-1": False,
+                "cleanup-1": False,
+                "pointer-1": True,
+                "image-1": True,
+            },
         )
+        enabled_gates = set(request_payload["acceptance_profile"]["enabled_gates"])
+        self.assertFalse({"visual", "pointer", "animation"} & enabled_gates)
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            full = compile_review_job(
+                {"review_items": [rows[0]]},
+                {
+                    "draft_name": "FullBehaviorCompiler",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "full",
+                },
+                output_dir,
+            )
+            with open(full["doc_items"], "r", encoding="utf-8") as source_file:
+                full_item = json.load(source_file)["review_items"][0]
+        self.assertTrue(full_item["execution_required"])
+
+    def test_lite_mixed_visual_behavior_passes_strict_acceptance(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteMixedVisualContract",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "edits": [
+                    {
+                        "type": "animation_timing",
+                        "source_kind": "animation_timing",
+                        "start": 1.0,
+                        "end": 2.0,
+                        "doc_item_id": "animation-1",
+                    },
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "doc_item_id": "pointer-1",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "pointer_asset",
+                                    "asset_path": "C:/media/pointer.png",
+                                    "scale_x": 0.05,
+                                    "scale_y": 0.06,
+                                    "transform_x": 400.0,
+                                    "transform_y": -250.0,
+                                    "rotation": 15.0,
+                                    "alpha": 0.4,
+                                    "keyframes": [{"time": 0.0, "x": 1.0}],
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pointer_overlay",
+                        "start": 3.0,
+                        "end": 4.0,
+                        "doc_item_id": "cleanup-1",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "clean_cover",
+                                    "asset_path": "C:/media/clean-cover.png",
+                                    "timeline_start": 3.0,
+                                    "duration": 1.0,
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "visual_overlay",
+                        "start": 4.0,
+                        "end": 5.0,
+                        "doc_item_id": "image-1",
+                        "visual_plan": {
+                            "segments": [
+                                {
+                                    "role": "visual_overlay",
+                                    "asset_path": "C:/media/local-image.png",
+                                    "scale_x": 0.2,
+                                    "transform_x": -300.0,
+                                    "keyframes": [{"time": 0.0, "scale": 0.2}],
+                                }
+                            ]
+                        },
+                    },
+                ],
+                "review_items": [
+                    {
+                        "id": "animation-1",
+                        "kind": "animation_timing",
+                        "source_text": "00:01 动画提前",
+                        "start": 1.0,
+                        "end": 2.0,
+                        "execution_required": True,
+                    },
+                    {
+                        "id": "pointer-1",
+                        "kind": "pointer_overlay",
+                        "source_text": "00:02 添加小手素材",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "execution_required": True,
+                    },
+                    {
+                        "id": "cleanup-1",
+                        "kind": "pointer_overlay",
+                        "source_text": "00:03 小手遮挡，清除原小手",
+                        "start": 3.0,
+                        "end": 4.0,
+                        "execution_required": True,
+                    },
+                    {
+                        "id": "image-1",
+                        "kind": "visual_overlay",
+                        "source_text": "00:04 贴入提供的图片",
+                        "start": 4.0,
+                        "end": 5.0,
+                        "execution_required": True,
+                    },
+                ],
+                "acceptance": {
+                    "require_review_items": True,
+                    "expected_review_item_count": 4,
+                    "expected_review_item_ids": [
+                        "animation-1",
+                        "pointer-1",
+                        "cleanup-1",
+                        "image-1",
+                    ],
+                    "require_visual_evidence": True,
+                    "require_subject_pointer_binding": True,
+                },
+            }
+        )
+        item_flags = {item.item_id: item.execution_required for item in request.review_items}
+        self.assertFalse(item_flags["animation-1"])
+        self.assertFalse(item_flags["cleanup-1"])
+        self.assertTrue(item_flags["pointer-1"])
+        self.assertTrue(item_flags["image-1"])
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+                strict=True,
+            )
+            with open(
+                os.path.join(
+                    drafts_root,
+                    "LiteMixedVisualContract",
+                    "draft_content.json",
+                ),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertTrue(result["acceptance_validation"]["ok"])
+        enabled_gates = set(result["acceptance_validation"]["metrics"]["enabled_gates"])
+        self.assertFalse({"visual", "pointer", "animation"} & enabled_gates)
+        self.assertEqual(len(_track(content, LITE_TRACKS["timing_adjusted"])["segments"]), 0)
+        visual_segments = _track(content, LITE_TRACKS["visual_assets"])["segments"]
+        self.assertEqual(len(visual_segments), 2)
+        self.assertEqual(
+            [row["segments"][0]["timeline_start"] for row in result["visual_overlay_results"]],
+            [2.0, 4.0],
+        )
+        for overlay in result["visual_overlay_results"]:
+            for segment in overlay["segments"]:
+                self.assertEqual(segment["scale_x"], 1.0)
+                self.assertEqual(segment["scale_y"], 1.0)
+                self.assertEqual(segment["transform_x"], 0.0)
+                self.assertEqual(segment["transform_y"], 0.0)
+                self.assertEqual(segment["keyframes"], [])
+
+        marker_tracks = [
+            track for track in content["tracks"] if track["name"].startswith("Review Marker")
+        ]
+        self.assertEqual(sum(len(track["segments"]) for track in marker_tracks), 4)
 
     def test_review_job_compiler_normalizes_replacement_local_clock_once(self):
         with tempfile.TemporaryDirectory() as output_dir:
@@ -457,9 +688,7 @@ class LiteRevisionTests(unittest.TestCase):
                 request_payload = json.load(request_file)
 
         self.assertTrue(request_payload["review_items"][0]["execution_required"])
-        self.assertEqual(
-            request_payload["review_items"][0]["review_timestamp_role"], "search_hint"
-        )
+        self.assertEqual(request_payload["review_items"][0]["review_timestamp_role"], "search_hint")
         self.assertFalse(request_payload["acceptance"]["require_visual_evidence"])
         self.assertFalse(request_payload["acceptance"]["require_subject_pointer_binding"])
         self.assertFalse(request_payload["acceptance"]["require_pointer_lifecycle_evidence"])
@@ -671,9 +900,7 @@ class LiteRevisionTests(unittest.TestCase):
                             "granularity": "word",
                             "input_sha256": "a" * 64,
                             "authoritative_cut_boundary": True,
-                            "words": [
-                                {"text": "summary", "start": 2.0, "end": 4.0}
-                            ],
+                            "words": [{"text": "summary", "start": 2.0, "end": 4.0}],
                             "resolved_cut_window": [2.0, 4.0],
                         },
                     },
@@ -746,7 +973,10 @@ class LiteRevisionTests(unittest.TestCase):
         reused_audio = _track(content, LITE_TRACKS["reused_audio"])
 
         self.assertEqual(
-            [(s["target_timerange"]["start"], s["target_timerange"]["duration"]) for s in original["segments"]],
+            [
+                (s["target_timerange"]["start"], s["target_timerange"]["duration"])
+                for s in original["segments"]
+            ],
             [(0, 2_000_000), (4_000_000, 6_000_000)],
         )
         self.assertEqual(len(cut_track["segments"]), 1)
@@ -762,7 +992,9 @@ class LiteRevisionTests(unittest.TestCase):
         ]
         marker_segments = [segment for track in marker_tracks for segment in track["segments"]]
         self.assertEqual(len(marker_segments), 3)
-        self.assertTrue(all(segment["target_timerange"]["duration"] == 2_000_000 for segment in marker_segments))
+        self.assertTrue(
+            all(segment["target_timerange"]["duration"] == 2_000_000 for segment in marker_segments)
+        )
         text_materials = {item["id"]: item for item in content["materials"]["texts"]}
         marker_colors = {
             text_materials[segment["material_id"]]["background_color"]
@@ -801,9 +1033,7 @@ class LiteRevisionTests(unittest.TestCase):
                                 "granularity": "character",
                                 "input_sha256": "b" * 64,
                                 "authoritative_cut_boundary": True,
-                                "words": [
-                                    {"text": "ending", "start": 9.5, "end": 10.0}
-                                ],
+                                "words": [{"text": "ending", "start": 9.5, "end": 10.0}],
                                 "resolved_cut_window": [9.5, 10.0],
                             },
                         },
@@ -843,6 +1073,85 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(marker_segment["target_timerange"]["start"], 9_500_000)
         self.assertEqual(marker_segment["target_timerange"]["duration"], 500_000)
         self.assertEqual(content["duration"], 10_000_000)
+        self.assertTrue(result["validation"]["ok"])
+
+    def test_lite_spoken_delete_marker_uses_asr_cut_start_not_review_timestamp(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteAsrAlignedMarker",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 8.0,
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "spoken_delete",
+                        "start": 2.25,
+                        "end": 2.75,
+                        "doc_item_id": "spoken-1",
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "delete": "口误",
+                            "must_keep": ["前词", "后词"],
+                            "strategy": "precision_first",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "character",
+                                "input_sha256": "d" * 64,
+                                "authoritative_cut_boundary": True,
+                                "words": [
+                                    {"text": "口", "start": 2.25, "end": 2.5},
+                                    {"text": "误", "start": 2.5, "end": 2.75},
+                                ],
+                                "resolved_cut_window": [2.25, 2.75],
+                            },
+                        },
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "spoken-1",
+                        "kind": "spoken_delete",
+                        "source_text": "00:01 删除口误",
+                        "start": 1.0,
+                        "end": 1.5,
+                        "execution_required": True,
+                        "evidence": {"review_timestamp_role": "search_hint"},
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+            )
+            with open(
+                os.path.join(
+                    drafts_root,
+                    "LiteAsrAlignedMarker",
+                    "draft_content.json",
+                ),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        marker_segment = next(
+            segment
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        self.assertEqual(marker_segment["target_timerange"]["start"], 2_250_000)
+        self.assertNotEqual(marker_segment["target_timerange"]["start"], 1_000_000)
         self.assertTrue(result["validation"]["ok"])
 
     def test_lite_split_gap_disables_maintrack_adsorb_and_restores_a2_volume(self):
@@ -1092,9 +1401,7 @@ class LiteRevisionTests(unittest.TestCase):
                 ],
             }
         )
-        problems = _spoken_cut_alignment_problems(
-            request.edits[0], request.review_items[0]
-        )
+        problems = _spoken_cut_alignment_problems(request.edits[0], request.review_items[0])
         self.assertTrue(any("model/resource_id" in problem for problem in problems))
         self.assertTrue(any("source audio SHA-256" in problem for problem in problems))
         self.assertTrue(any("authoritative_cut_boundary" in problem for problem in problems))

@@ -1,7 +1,7 @@
 interface:
-  display_name: "Auto-Cut 动画时序精修"
-  short_description: "处理动画提前、加速、翻页、状态覆盖和防撞出点精读。"
-  default_prompt: "Use $auto-cut-animation-timing-revision to analyze and revise JianYing course animation timing edits with frame-level boundary checks."
+  display_name: "Auto-Cut Lite 动画标签"
+  short_description: "动画、翻页和画面时序意见只保留原文标签，不执行动画修改"
+  default_prompt: "Use $auto-cut-animation-timing-revision to keep Lite animation and picture-timing comments as verbatim label-only items with no timing execution."
 
 policy:
   allow_implicit_invocation: true

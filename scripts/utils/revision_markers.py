@@ -11,6 +11,19 @@ _UNVERIFIED_SOURCE = "unverified_source_unavailable"
 _UNVERIFIED_TIMING = "unverified_timing_unavailable"
 _SAVED_START_TOLERANCE_US = 500
 _INTERNAL_LEGACY_SOURCES = {"legacy_marker", "legacy_edit"}
+_LITE_ASR_ALIGNED_MARKER_KINDS = {
+    "audio_delete",
+    "colored_span_delete",
+    "ellipsis_range_delete",
+    "gap_delete",
+    "pause_delete",
+    "phrase_delete",
+    "range_delete",
+    "speech_delete",
+    "spoken_delete",
+    "tail_cleanup",
+    "tail_particle_delete",
+}
 
 
 @dataclass(frozen=True)
@@ -552,6 +565,17 @@ def _build_action_index(request: RevisionRequest) -> Dict[str, List[Any]]:
     return action_index
 
 
+def _build_edit_action_index(request: RevisionRequest) -> Dict[str, List[Any]]:
+    action_index: Dict[str, List[Any]] = {}
+    for action in request.edits:
+        item_id = _extract_action_item_id(action)
+        if not item_id:
+            continue
+        normalized_item_id = _normalize_item_id(item_id)
+        action_index.setdefault(normalized_item_id, []).append(action)
+    return action_index
+
+
 def _action_window(actions: List[Any]) -> Tuple[Optional[float], Optional[float]]:
     starts = [float(action.start) for action in actions if action.start is not None]
     ends = [float(action.end) for action in actions if action.end is not None]
@@ -559,11 +583,19 @@ def _action_window(actions: List[Any]) -> Tuple[Optional[float], Optional[float]
 
 
 def _resolve_marker_window(
-    source_item: RevisionReviewItem, actions: List[Any]
+    source_item: RevisionReviewItem,
+    actions: List[Any],
+    *,
+    prefer_action_window: bool = False,
 ) -> Tuple[float, float, bool]:
     action_start, action_end = _action_window(actions)
     row_start = source_item.start
     row_end = source_item.end
+
+    if prefer_action_window and action_start is not None:
+        if action_end is not None and action_end > action_start:
+            return action_start, action_end, False
+        return action_start, action_start + 0.8, True
 
     if row_start is not None and row_end is not None:
         start, end = float(row_start), float(row_end)
@@ -642,7 +674,11 @@ def _build_legacy_plan(request: RevisionRequest) -> List[MarkerPlanItem]:
                 end=end,
                 verbatim_status=_UNVERIFIED_SOURCE,
                 source="legacy_edit",
-                kind=str(getattr(edit, "source_kind", "") or getattr(edit, "op_type", "") or "review_only"),
+                kind=str(
+                    getattr(edit, "source_kind", "")
+                    or getattr(edit, "op_type", "")
+                    or "review_only"
+                ),
             )
         )
     return plan
@@ -659,6 +695,7 @@ def build_marker_plan(
         return _build_legacy_plan(request)
 
     action_index = _build_action_index(request)
+    edit_action_index = _build_edit_action_index(request)
     plan: List[MarkerPlanItem] = []
     seen_item_ids: set[str] = set()
     for index, source_item in enumerate(source_items):
@@ -670,7 +707,20 @@ def build_marker_plan(
         seen_item_ids.add(normalized_item_id)
 
         actions = action_index.get(normalized_item_id, [])
-        start, end, _timing_unverified = _resolve_marker_window(source_item, actions)
+        source_kind = str(source_item.kind or "").strip().casefold()
+        asr_aligned_lite_marker = (
+            request.workflow_mode == "lite"
+            and source_kind in _LITE_ASR_ALIGNED_MARKER_KINDS
+            and bool(edit_action_index.get(normalized_item_id))
+        )
+        timing_actions = (
+            edit_action_index[normalized_item_id] if asr_aligned_lite_marker else actions
+        )
+        start, end, _timing_unverified = _resolve_marker_window(
+            source_item,
+            timing_actions,
+            prefer_action_window=asr_aligned_lite_marker,
+        )
         normalized_start, normalized_end = _normalize_window(start, end)
         start, end = normalized_start, normalized_end
 

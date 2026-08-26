@@ -1,7 +1,7 @@
 interface:
-  display_name: "Auto-Cut 文本安全区"
-  short_description: "修订红框安全区、花字入场/出场动画、贴纸位置和保存后偏移"
-  default_prompt: "Use $auto-cut-text-safezone-animation-revision to revise editable JianYing text, sticker, safe-zone, or flower animation issues."
+  display_name: "Auto-Cut Lite 文本标签"
+  short_description: "安全区、文字位置和花字动画意见只保留原文标签"
+  default_prompt: "Use $auto-cut-text-safezone-animation-revision to keep Lite text-position, safe-zone, sticker, and flower-animation comments label-only."
 
 policy:
   allow_implicit_invocation: true

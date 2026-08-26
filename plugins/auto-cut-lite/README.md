@@ -1,39 +1,18 @@
-# Auto-Cut 精简通用版
+# Auto-Cut Lite
 
-这是一个通用的 Codex 插件包。它保留当前 Auto-Cut 的 17 个通用技能入口，将审阅文档转换为可二次编辑的剪映工程，并支持动画时序、音频、BGM、花字、局部图片、指向物配置和最终验收。
+这是 Auto-Cut 的通用精简版 Codex 包，包含 17 个工作区技能。音频删除仍使用字/词级 ASR
+确定真实切口，标签从真实切口开始，而不是直接采用修改意见里的粗略时间。动画、画面时序和原有
+小手遮挡清理仅保留原文标签；用户提供的小手或局部图片按剪映默认几何贴入，不自动位移、缩放、
+制作关键帧或校准落点。
 
-在 Windows x64 目标电脑上解压完整 ZIP，然后在解压出的 `auto-cut-lite` 目录运行：
+本版采用“合并工作区 + 独立运行时”模式：
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1
-```
+- 首次安装时，解压出的 `Auto-cut-lite` 文件夹就是要长期保留并用 Codex 打开的工作区。
+- 工作区同时保存包文件、`AGENTS.md` 和 `.codex\skills`。
+- 真正执行任务的插件和 Python 环境仍安装在 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。
+- 升级时把新 ZIP 解压到临时位置并运行新部署器；部署器按旧回执更新原工作区。
+- 插件清单不注册 `skills`，包内也没有顶层 `skills`，因此技能应显示为仓库范围
+  `Auto-cut-lite`，而不是重复的 `Personal`。
 
-如需把工作区技能部署到其他父目录，请传入绝对路径，并保持末级文件夹名为
-`Auto-cut-lite`，例如：
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\deploy-to-codex.ps1 `
-  -WorkspaceRoot "D:\Codex工作区\Auto-cut-lite"
-```
-
-不传 `-WorkspaceRoot` 时，升级会优先沿用上次安装回执中的工作区；首次安装则默认使用
-`%USERPROFILE%\Documents\Codex\Auto-cut-lite`。如果已有旧工作区并显式传入另一个路径，
-部署器会在校验旧技能未被修改后迁移到新路径，并保留可恢复的旧工作区回执和备份。
-
-脚本会校验包内容，分别安装主 Python 与音频 Python 运行环境，把插件注册到显示名为 `Auto-Cut Lite` 的独立市场，并写出 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\deployment-report.json`。若机器上存在旧的 `auto-cut-lite@personal`，部署器会迁移安装来源并保留可恢复备份；安装完成后请新建 Codex 对话再使用。
-
-工作区技能在包内保存于 `workspace-payload\skills`，部署时复制到工作区的
-`.codex\skills`。插件根目录和安装缓存不会包含顶层 `skills` 目录，因此 Codex 不会再把
-同一批技能自动注册成 `Personal`。
-
-插件不包含剪映软件、飞书登录状态、用户 token、ASR 密钥、用户收藏素材或任何本机项目绑定。首次使用时，操作者应在自己的电脑上配置飞书用户身份：
-
-```powershell
-lark-cli config default-as user
-lark-cli config strict-mode user
-lark-cli docs +fetch --as user --doc <document-url> --json
-```
-
-部署脚本只会设置严格用户身份，不会代替用户登录或伪造授权。目标机完整安装需要 64 位 Python 3.11、剪映专业版、FFmpeg/FFprobe 和 `lark-cli`；ASR 服务凭据也必须由操作者在本机配置。Codex CLI 必须可执行；若 Codex Desktop 自带入口受 Windows 限制但目标机装有 Node.js，部署器会通过固定版本的官方 `@openai/codex` npm 包执行插件注册。缺少这些本机配置时，插件会显示 `deployment_status=installed` 与 `readiness=pending_user_configuration`，不会误报为全部就绪。
-
-运行代码位于 `runtime/`。主依赖安装在插件根目录的 `.runtime-venv`，音频修复依赖安装在独立的 `runtime\.venv-audio`，默认都会部署；只有显式传入 `-SkipAudio` 才会跳过音频环境并把部署标记为未完全就绪。ZIP 体积较小是因为固定版本依赖在目标电脑安装，完整部署后的实际占用会显著增加。通用版不携带任何预置学科、私有指向物库或本机项目绑定；用户可以在目标电脑通过 `auto-cut-profile-onboarding` 为自己的项目建立配置，该数据保存在 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite\pointer-profiles.local`，不随插件升级被覆盖。
+请从 [BEGINNER_DEPLOYMENT.md](BEGINNER_DEPLOYMENT.md) 开始。里面包含无需手工替换路径的
+校验、首次安装、国内镜像、升级、验收和部署后配置步骤。

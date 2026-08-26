@@ -1,7 +1,7 @@
 interface:
   display_name: "Auto-Cut 最终验收"
-  short_description: "Validate JianYing revision drafts against source review items, audio, visuals, pauses, and editable structure"
-  default_prompt: "Use $auto-cut-final-acceptance to validate a JianYing revision draft against source review items, audio precision, semantic pause timing, pointer source-reference sizing, visual edits, and editable-project structure."
+  short_description: "按 Lite 标签、默认几何、音频和可编辑结构验收剪映草稿"
+  default_prompt: "Use $auto-cut-final-acceptance to validate the fixed Lite label-only and default-geometry visual contract together with audio, source coverage, editable structure, and package integrity."
 
 policy:
   allow_implicit_invocation: true

@@ -9,6 +9,10 @@ description: 使用剪映收藏夹里的花字效果、花字模板、文字模�
 
 Before executing this skill from the distributed plugin, read the [portable runtime contract](../auto-cut-lite/references/portable-runtime.md). Use the installed isolated runtime and `workflow_mode=lite`; do not fall back to a source checkout or another Auto-Cut installation.
 
+## Lite Review Override
+
+Read the [Lite execution contract](../auto-cut-lite/references/lite-execution-contract.md) first. Asset synchronization and explicit favorite-asset lookup remain available, but they must not turn a Lite review request for text position, safe-zone movement, or flower animation into an executed visual change. Such review items remain label-only.
+
 
 用这条 skill 处理“直接调用我收藏夹里的花字/模板”的请求，不要把“搜得到”和“真正能落到草稿里”混为一谈。
 

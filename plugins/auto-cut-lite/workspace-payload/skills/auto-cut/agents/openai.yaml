@@ -1,7 +1,7 @@
 interface:
   display_name: "Auto-Cut 总入口"
   short_description: "自然语言路由：分析剪映任务并选择合适的 Auto-Cut 子 skill"
-  default_prompt: "Use $auto-cut to analyze this JianYing editing request, choose the right Auto-Cut subskills, include semantic pause timing, source-reference pointer sizing, and final acceptance when needed, and execute with the repository rules."
+  default_prompt: "Use $auto-cut to route this JianYing request under the fixed Lite contract: precise ASR audio cuts and ASR-aligned labels, default-geometry supplied visuals, label-only animation and pointer cleanup, plus final acceptance when needed."
 
 policy:
   allow_implicit_invocation: true

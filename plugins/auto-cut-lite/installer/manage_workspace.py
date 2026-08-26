@@ -10,12 +10,15 @@ import shutil
 import stat
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 WORKSPACE_NAME = "Auto-cut-lite"
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_SKILL_PAYLOAD = Path("workspace-payload") / "skills"
+PACKAGE_MANIFEST_NAME = "PACKAGE-MANIFEST.json"
+PACKAGE_AGENT_PATH = "AGENTS.md"
+WORKSPACE_MODE = "combined_package_workspace"
 RECEIPT_SCHEMA_VERSION = 1
 REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 
@@ -84,6 +87,87 @@ def _tree_sha256(root: Path) -> str:
         digest.update(relative)
         digest.update(bytes.fromhex(_sha256(path)))
     return digest.hexdigest()
+
+
+def _safe_package_relative(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("package manifest path is invalid")
+    normalized = value.replace("\\", "/")
+    candidate = PurePosixPath(normalized)
+    if (
+        candidate.is_absolute()
+        or not candidate.parts
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+        or any(":" in part for part in candidate.parts)
+    ):
+        raise ValueError(f"unsafe package manifest path: {value}")
+    return candidate.as_posix()
+
+
+def _package_path(root: Path, relative: str) -> Path:
+    safe = _safe_package_relative(relative)
+    target = root.joinpath(*PurePosixPath(safe).parts)
+    _assert_descendant(target, root)
+    return target
+
+
+def _read_package_inventory(plugin_root: Path) -> dict[str, str]:
+    manifest_path = plugin_root / PACKAGE_MANIFEST_NAME
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"package manifest is invalid: {exc}") from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("name") != PLUGIN_NAME
+        or not isinstance(payload.get("version"), str)
+        or not isinstance(payload.get("files"), list)
+    ):
+        raise ValueError("package manifest identity is invalid")
+
+    inventory: dict[str, str] = {}
+    seen_casefold: set[str] = set()
+    for row in payload["files"]:
+        if not isinstance(row, dict):
+            raise ValueError("package manifest file row is invalid")
+        relative = _safe_package_relative(row.get("path"))
+        key = relative.casefold()
+        if key in seen_casefold:
+            raise ValueError(f"package manifest has a duplicate path: {relative}")
+        seen_casefold.add(key)
+        source = _package_path(plugin_root, relative)
+        expected_size = row.get("size")
+        expected_hash = row.get("sha256")
+        if (
+            not isinstance(expected_size, int)
+            or not isinstance(expected_hash, str)
+            or not source.is_file()
+            or _is_reparse(source)
+            or source.stat().st_size != expected_size
+            or _sha256(source) != expected_hash.casefold()
+        ):
+            raise ValueError(f"package manifest file validation failed: {relative}")
+        inventory[relative] = expected_hash.casefold()
+
+    manifest_relative = PACKAGE_MANIFEST_NAME
+    manifest_key = manifest_relative.casefold()
+    if manifest_key in seen_casefold:
+        raise ValueError("package manifest must not inventory itself")
+    inventory[manifest_relative] = _sha256(manifest_path)
+    if PACKAGE_AGENT_PATH not in inventory:
+        raise ValueError("package manifest does not inventory AGENTS.md")
+    return inventory
+
+
+def _package_sync_inventory(inventory: dict[str, str]) -> dict[str, str]:
+    synchronized: dict[str, str] = {}
+    for relative, digest in inventory.items():
+        if relative.casefold() == PACKAGE_AGENT_PATH.casefold():
+            continue
+        if relative.casefold().startswith(".codex/skills/"):
+            raise ValueError("package inventory must not overlap repository skill installation")
+        synchronized[relative] = digest
+    return synchronized
 
 
 def _atomic_write_json(path: Path, payload: dict[str, Any], state_root: Path) -> None:
@@ -206,6 +290,44 @@ def _receipt_details(
     expected_agents_hash = payload.get("installed_agents_sha256")
     if not isinstance(expected_agents_hash, str):
         raise ValueError("workspace receipt contains an invalid AGENTS.md hash")
+    package_field_names = {
+        "workspace_mode",
+        "workspace_package_root",
+        "workspace_package_file_count",
+        "installed_package_files",
+        "installed_package_sha256",
+    }
+    package_fields_present = package_field_names.intersection(payload)
+    if package_fields_present and package_fields_present != package_field_names:
+        raise ValueError("workspace receipt contains an incomplete package inventory")
+    installed_package_files: list[str] = []
+    installed_package_sha256: dict[str, str] = {}
+    if package_fields_present:
+        if payload.get("workspace_mode") != WORKSPACE_MODE:
+            raise ValueError("workspace receipt contains an invalid workspace mode")
+        package_root_value = payload.get("workspace_package_root")
+        if (
+            not isinstance(package_root_value, str)
+            or _lexical(package_root_value) != workspace_root
+        ):
+            raise ValueError("workspace receipt contains an invalid package root")
+        raw_package_files = payload.get("installed_package_files")
+        raw_package_hashes = payload.get("installed_package_sha256")
+        if not isinstance(raw_package_files, list) or not isinstance(raw_package_hashes, dict):
+            raise ValueError("workspace receipt contains an invalid package inventory")
+        package_casefold: set[str] = set()
+        for raw_relative in raw_package_files:
+            relative = _safe_package_relative(raw_relative)
+            if relative == PACKAGE_AGENT_PATH or relative.casefold() in package_casefold:
+                raise ValueError("workspace receipt contains an invalid package path")
+            package_casefold.add(relative.casefold())
+            digest = raw_package_hashes.get(relative)
+            if not isinstance(digest, str) or len(digest) != 64:
+                raise ValueError("workspace receipt contains an invalid package hash")
+            installed_package_files.append(relative)
+            installed_package_sha256[relative] = digest.casefold()
+        if payload.get("workspace_package_file_count") != len(installed_package_files):
+            raise ValueError("workspace receipt package count does not match its inventory")
     backup_value = payload.get("backup_root")
     if not isinstance(backup_value, str) or not Path(backup_value).is_absolute():
         raise ValueError("workspace receipt contains an invalid backup root")
@@ -226,6 +348,17 @@ def _receipt_details(
                 )
         if not workspace_agents.is_file() or _sha256(workspace_agents) != expected_agents_hash:
             raise ValueError("workspace AGENTS.md changed after deployment; refusing operation")
+        for relative in installed_package_files:
+            target = _package_path(workspace_root, relative)
+            if (
+                not target.is_file()
+                or _is_reparse(target)
+                or _sha256(target) != installed_package_sha256[relative]
+            ):
+                raise ValueError(
+                    "workspace package file changed after deployment; refusing operation: "
+                    f"{relative}"
+                )
 
     return {
         "workspace_root": workspace_root,
@@ -234,6 +367,8 @@ def _receipt_details(
         "installed_names": installed_names,
         "expected_hashes": expected_hashes,
         "expected_agents_hash": expected_agents_hash,
+        "installed_package_files": installed_package_files,
+        "installed_package_sha256": installed_package_sha256,
         "backup_root": backup_root,
     }
 
@@ -295,6 +430,8 @@ def _restore_install(
     agents_installed: bool,
     agents_backed_up: bool,
     backed_up_names: list[str],
+    package_written_files: list[str],
+    backed_up_package_files: list[str],
 ) -> None:
     failed_root = backup_root / "failed-new"
     failed_skills = failed_root / "skills"
@@ -316,6 +453,20 @@ def _restore_install(
     if agents_backed_up and backup_agents.exists():
         workspace_agents.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(backup_agents), str(workspace_agents))
+    failed_package = failed_root / "package"
+    for relative in package_written_files:
+        target = _package_path(workspace_agents.parent, relative)
+        if target.exists():
+            failed_target = _package_path(failed_package, relative)
+            failed_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(target), str(failed_target))
+    backup_package = backup_root / "package"
+    for relative in backed_up_package_files:
+        source = _package_path(backup_package, relative)
+        if source.exists():
+            target = _package_path(workspace_agents.parent, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
 
 
 def _restore_relocated_workspace(
@@ -324,6 +475,7 @@ def _restore_relocated_workspace(
     relocation_root: Path,
     moved_names: list[str],
     agents_moved: bool,
+    moved_package_files: list[str],
 ) -> None:
     previous_skills = previous_details["workspace_skills"]
     previous_agents = previous_details["workspace_agents"]
@@ -342,6 +494,15 @@ def _restore_relocated_workspace(
             raise ValueError(f"previous workspace target is no longer empty: {previous_agents}")
         previous_agents.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(relocated_agents), str(previous_agents))
+    relocated_package = relocation_root / "package"
+    for relative in moved_package_files:
+        source = _package_path(relocated_package, relative)
+        destination = _package_path(previous_details["workspace_root"], relative)
+        if destination.exists():
+            raise ValueError(f"previous workspace target is no longer empty: {destination}")
+        if source.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(destination))
 
 
 def install_workspace(
@@ -359,18 +520,22 @@ def install_workspace(
     receipt_path = _lexical(receipt_path)
     _validate_destinations(workspace_root, state_root, receipt_path)
     previous_receipt = _read_active_receipt(receipt_path)
-    previous_details: dict[str, Any] | None = None
+    active_details: dict[str, Any] | None = None
+    relocation_details: dict[str, Any] | None = None
     if previous_receipt is not None:
-        active_details = _receipt_details(previous_receipt, state_root, verify_installed_files=True)
+        active_details = _receipt_details(
+            previous_receipt, state_root, verify_installed_files=True
+        )
         previous_root = active_details["workspace_root"]
         if previous_root != workspace_root:
             if _is_same_or_descendant(previous_root, workspace_root) or _is_same_or_descendant(
                 workspace_root, previous_root
             ):
                 raise ValueError("old and new workspace roots cannot overlap")
-            previous_details = active_details
-    _assert_regular_tree(plugin_root)
+            relocation_details = active_details
     manifest = _read_plugin_manifest(plugin_root)
+    package_inventory = _read_package_inventory(plugin_root)
+    synchronized_package = _package_sync_inventory(package_inventory)
     source_agents = plugin_root / "AGENTS.md"
     if not source_agents.is_file() or _is_reparse(source_agents):
         raise ValueError("portable AGENTS.md is missing or unsafe")
@@ -382,6 +547,7 @@ def install_workspace(
     backup_root = state_root / "workspace-backups" / operation_id
     staged_skills = staging_root / "skills"
     staged_agents = staging_root / "AGENTS.md"
+    staged_package = staging_root / "package"
     workspace_skills = workspace_root / ".codex" / "skills"
     workspace_agents = workspace_root / "AGENTS.md"
 
@@ -391,6 +557,11 @@ def install_workspace(
         shutil.copy2(source_agents, staged_agents)
         for source in source_skills:
             shutil.copytree(source, staged_skills / source.name)
+        for relative in synchronized_package:
+            source = _package_path(plugin_root, relative)
+            target = _package_path(staged_package, relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
         _assert_regular_tree(staging_root)
 
         workspace_root.mkdir(parents=True, exist_ok=True)
@@ -403,6 +574,51 @@ def install_workspace(
             not workspace_agents.is_file() or _is_reparse(workspace_agents)
         ):
             raise ValueError(f"existing workspace AGENTS.md is unsafe: {workspace_agents}")
+
+        current_package_hashes: dict[str, str] = {}
+        if active_details is not None and relocation_details is None:
+            current_package_hashes = active_details["installed_package_sha256"]
+        incoming_casefold = {relative.casefold() for relative in synchronized_package}
+        stale_package_files = [
+            relative
+            for relative in current_package_hashes
+            if relative.casefold() not in incoming_casefold
+        ]
+        package_to_write: list[str] = []
+        package_to_replace: list[str] = []
+        package_adopted_files: list[str] = []
+        package_retained_files: list[str] = []
+        current_by_casefold = {
+            relative.casefold(): relative for relative in current_package_hashes
+        }
+        for relative, incoming_hash in synchronized_package.items():
+            target = _package_path(workspace_root, relative)
+            current = target.parent
+            while current != workspace_root:
+                if current.exists() and (not current.is_dir() or _is_reparse(current)):
+                    raise ValueError(f"workspace package parent is unsafe: {current}")
+                current = current.parent
+            if target.exists():
+                if not target.is_file() or _is_reparse(target):
+                    raise ValueError(f"workspace package target is unsafe: {relative}")
+                actual_hash = _sha256(target)
+                managed_relative = current_by_casefold.get(relative.casefold())
+                if managed_relative is not None:
+                    if actual_hash == incoming_hash:
+                        package_retained_files.append(relative)
+                    else:
+                        package_to_replace.append(relative)
+                        package_to_write.append(relative)
+                elif actual_hash == incoming_hash:
+                    package_adopted_files.append(relative)
+                else:
+                    raise ValueError(
+                        "workspace package target collides with an unmanaged file: "
+                        f"{relative}"
+                    )
+            else:
+                package_to_write.append(relative)
+
         backed_up_names: list[str] = []
         agents_backed_up = workspace_agents.exists()
         backup_root.mkdir(parents=True, exist_ok=False)
@@ -412,6 +628,9 @@ def install_workspace(
         agents_installed = False
         relocated_names: list[str] = []
         relocated_agents = False
+        relocated_package_files: list[str] = []
+        backed_up_package_files: list[str] = []
+        package_written_files: list[str] = []
         relocation_root = backup_root / "relocated-from"
         try:
             if existing_skills:
@@ -422,21 +641,39 @@ def install_workspace(
             if agents_backed_up:
                 shutil.move(str(workspace_agents), str(backup_root / "AGENTS.md"))
                 agents_moved_to_backup = True
-            if previous_details is not None:
+            for relative in [*package_to_replace, *stale_package_files]:
+                source = _package_path(workspace_root, relative)
+                target = _package_path(backup_root / "package", relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+                backed_up_package_files.append(relative)
+            if relocation_details is not None:
                 relocated_skills = relocation_root / "skills"
                 relocated_skills.mkdir(parents=True)
-                for name in previous_details["installed_names"]:
+                for name in relocation_details["installed_names"]:
                     shutil.move(
-                        str(previous_details["workspace_skills"] / name),
+                        str(relocation_details["workspace_skills"] / name),
                         str(relocated_skills / name),
                     )
                     relocated_names.append(name)
                 relocation_root.mkdir(parents=True, exist_ok=True)
                 shutil.move(
-                    str(previous_details["workspace_agents"]),
+                    str(relocation_details["workspace_agents"]),
                     str(relocation_root / "AGENTS.md"),
                 )
                 relocated_agents = True
+                for relative in relocation_details["installed_package_files"]:
+                    source = _package_path(relocation_details["workspace_root"], relative)
+                    target = _package_path(relocation_root / "package", relative)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(source), str(target))
+                    relocated_package_files.append(relative)
+            for relative in package_to_write:
+                source = _package_path(staged_package, relative)
+                target = _package_path(workspace_root, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source), str(target))
+                package_written_files.append(relative)
             for source in sorted(staged_skills.iterdir(), key=lambda path: path.name.casefold()):
                 shutil.move(str(source), str(workspace_skills / source.name))
                 installed_names.append(source.name)
@@ -444,6 +681,23 @@ def install_workspace(
             agents_installed = True
 
             skill_hashes = {name: _tree_sha256(workspace_skills / name) for name in installed_names}
+            installed_package_files = sorted(
+                synchronized_package, key=lambda value: value.casefold()
+            )
+            installed_package_hashes = {
+                relative: _sha256(_package_path(workspace_root, relative))
+                for relative in installed_package_files
+            }
+            if relocation_details is not None:
+                package_sync_action = "relocated"
+            elif previous_receipt is not None and current_package_hashes:
+                package_sync_action = "upgraded"
+            elif previous_receipt is not None:
+                package_sync_action = "migrated_split_workspace"
+            elif len(package_adopted_files) == len(installed_package_files):
+                package_sync_action = "adopted_extracted_package"
+            else:
+                package_sync_action = "installed"
             receipt: dict[str, Any] = {
                 "schema_version": RECEIPT_SCHEMA_VERSION,
                 "status": "installed",
@@ -452,8 +706,11 @@ def install_workspace(
                 "workspace_root": str(workspace_root),
                 "workspace_label": WORKSPACE_NAME,
                 "workspace_scope": "repo",
+                "workspace_mode": WORKSPACE_MODE,
                 "workspace_skills_root": str(workspace_skills),
                 "workspace_agents_path": str(workspace_agents),
+                "workspace_package_root": str(workspace_root),
+                "workspace_package_file_count": len(installed_package_files),
                 "deployment_report_path": str(state_root / "deployment-report.json"),
                 "plugin_root": str(plugin_root),
                 "runtime_root": str(plugin_root / "runtime"),
@@ -461,6 +718,13 @@ def install_workspace(
                 "installed_skill_names": installed_names,
                 "installed_skill_sha256": skill_hashes,
                 "installed_agents_sha256": _sha256(workspace_agents),
+                "installed_package_files": installed_package_files,
+                "installed_package_sha256": installed_package_hashes,
+                "package_written_files": package_written_files,
+                "package_adopted_files": package_adopted_files,
+                "package_retained_files": package_retained_files,
+                "backed_up_package_files": backed_up_package_files,
+                "package_sync_action": package_sync_action,
                 "plugin_manifest_exposes_skills": False,
                 "plugin_top_level_skills_present": False,
                 "workspace_skill_payload": WORKSPACE_SKILL_PAYLOAD.as_posix(),
@@ -469,13 +733,17 @@ def install_workspace(
                 "agents_backed_up": agents_backed_up,
                 "installed_at_utc": datetime.now(timezone.utc).isoformat(),
             }
-            if previous_details is not None:
+            if previous_receipt is not None:
+                receipt["previous_install_receipt"] = previous_receipt
+            if relocation_details is not None:
                 receipt.update(
                     {
                         "workspace_action": "relocated",
-                        "relocated_from_workspace_root": str(previous_details["workspace_root"]),
+                        "relocated_from_workspace_root": str(
+                            relocation_details["workspace_root"]
+                        ),
                         "relocated_skill_names": relocated_names,
-                        "previous_install_receipt": previous_receipt,
+                        "relocated_package_files": relocated_package_files,
                     }
                 )
             else:
@@ -494,16 +762,19 @@ def install_workspace(
                     agents_installed=agents_installed,
                     agents_backed_up=agents_moved_to_backup,
                     backed_up_names=backed_up_names,
+                    package_written_files=package_written_files,
+                    backed_up_package_files=backed_up_package_files,
                 )
             except Exception as restore_exc:  # pragma: no cover - catastrophic filesystem failure
                 restore_errors.append(f"new workspace restore failed: {restore_exc}")
-            if previous_details is not None:
+            if relocation_details is not None:
                 try:
                     _restore_relocated_workspace(
-                        previous_details=previous_details,
+                        previous_details=relocation_details,
                         relocation_root=relocation_root,
                         moved_names=relocated_names,
                         agents_moved=relocated_agents,
+                        moved_package_files=relocated_package_files,
                     )
                 except (
                     Exception
@@ -539,6 +810,31 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
     backup_root = details["backup_root"]
     installed_names = details["installed_names"]
 
+    def receipt_package_list(key: str) -> list[str]:
+        value = payload.get(key, [])
+        if not isinstance(value, list):
+            raise ValueError(f"workspace receipt contains an invalid {key}")
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw_relative in value:
+            relative = _safe_package_relative(raw_relative)
+            if relative.casefold() in seen or relative == PACKAGE_AGENT_PATH:
+                raise ValueError(f"workspace receipt contains an invalid {key}")
+            seen.add(relative.casefold())
+            result.append(relative)
+        return result
+
+    package_written_files = receipt_package_list("package_written_files")
+    backed_up_package_files = receipt_package_list("backed_up_package_files")
+    installed_package_casefold = {
+        relative.casefold() for relative in details["installed_package_files"]
+    }
+    if any(
+        relative.casefold() not in installed_package_casefold
+        for relative in package_written_files
+    ):
+        raise ValueError("workspace receipt written package inventory is invalid")
+
     previous_receipt = payload.get("previous_install_receipt")
     previous_details: dict[str, Any] | None = None
     relocation_root = backup_root / "relocated-from"
@@ -548,12 +844,19 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
         previous_details = _receipt_details(
             previous_receipt, state_root, verify_installed_files=False
         )
+    is_relocation = payload.get("workspace_action") == "relocated"
+    if is_relocation:
+        if previous_details is None:
+            raise ValueError("relocated workspace receipt has no previous installation")
         if payload.get("relocated_skill_names") != previous_details["installed_names"]:
             raise ValueError("relocated workspace skill inventory is invalid")
         if _managed_skill_entries(previous_details["workspace_skills"]):
             raise ValueError("previous workspace gained managed skills after relocation")
         if previous_details["workspace_agents"].exists():
             raise ValueError("previous workspace gained AGENTS.md after relocation")
+        relocated_package_files = receipt_package_list("relocated_package_files")
+        if relocated_package_files != previous_details["installed_package_files"]:
+            raise ValueError("relocated workspace package inventory is invalid")
         for name in previous_details["installed_names"]:
             relocated = relocation_root / "skills" / name
             if not relocated.is_dir() or _tree_sha256(relocated) != previous_details[
@@ -566,13 +869,47 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
             or _sha256(relocated_agents) != previous_details["expected_agents_hash"]
         ):
             raise ValueError("relocated AGENTS.md backup is invalid")
+        for relative in relocated_package_files:
+            if _package_path(previous_details["workspace_root"], relative).exists():
+                raise ValueError(
+                    f"previous workspace gained a managed package file: {relative}"
+                )
+            relocated = _package_path(relocation_root / "package", relative)
+            if (
+                not relocated.is_file()
+                or _is_reparse(relocated)
+                or _sha256(relocated)
+                != previous_details["installed_package_sha256"][relative]
+            ):
+                raise ValueError(f"relocated workspace package backup is invalid: {relative}")
 
         _restore_relocated_workspace(
             previous_details=previous_details,
             relocation_root=relocation_root,
             moved_names=previous_details["installed_names"],
             agents_moved=True,
+            moved_package_files=relocated_package_files,
         )
+    elif previous_details is not None and previous_details["workspace_root"] != workspace_root:
+        raise ValueError("previous workspace receipt target does not match the current workspace")
+
+    previous_package_hashes = (
+        previous_details["installed_package_sha256"] if previous_details is not None else {}
+    )
+    previous_package_by_casefold = {
+        relative.casefold(): (relative, digest)
+        for relative, digest in previous_package_hashes.items()
+    }
+    for relative in backed_up_package_files:
+        backup = _package_path(backup_root / "package", relative)
+        previous = previous_package_by_casefold.get(relative.casefold())
+        if (
+            previous is None
+            or not backup.is_file()
+            or _is_reparse(backup)
+            or _sha256(backup) != previous[1]
+        ):
+            raise ValueError(f"workspace package backup is invalid: {relative}")
 
     _restore_install(
         workspace_agents=workspace_agents,
@@ -582,6 +919,8 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
         agents_installed=True,
         agents_backed_up=bool(payload.get("agents_backed_up")),
         backed_up_names=list(payload.get("backed_up_skill_names", [])),
+        package_written_files=package_written_files,
+        backed_up_package_files=backed_up_package_files,
     )
     if previous_receipt is not None:
         _atomic_write_json(receipt_path, previous_receipt, state_root)
@@ -593,13 +932,13 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
         "status": "rolled_back",
         "action": (
             "restored_relocated_workspace"
-            if previous_details is not None
+            if is_relocation
             else "restored_previous_workspace"
         ),
         "workspace_root": str(workspace_root),
         "restored_workspace_root": (
             str(previous_details["workspace_root"])
-            if previous_details is not None
+            if is_relocation and previous_details is not None
             else str(workspace_root)
         ),
     }

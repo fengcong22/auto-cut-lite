@@ -3,6 +3,7 @@ param(
     [switch]$WithAudio,
     [switch]$SkipAudio,
     [switch]$ValidateOnly,
+    [switch]$UseChinaMirrors,
     [string]$WorkspaceRoot
 )
 
@@ -26,9 +27,9 @@ $targetRoot = Join-Path $targetParent $pluginName
 $marketplacePath = Join-Path $marketplaceRoot '.agents\plugins\marketplace.json'
 $personalMarketplacePath = Join-Path $userProfile '.agents\plugins\marketplace.json'
 $legacyTargetRoot = Join-Path (Join-Path $userProfile 'plugins') $pluginName
-$defaultWorkspaceRoot = Join-Path $userProfile 'Documents\Codex\Auto-cut-lite'
+$defaultWorkspaceRoot = $packageRoot
 $resolvedWorkspaceRoot = $defaultWorkspaceRoot
-$workspaceRootSource = 'default'
+$workspaceRootSource = 'package_root'
 $workspaceSkillsRoot = Join-Path $resolvedWorkspaceRoot '.codex\skills'
 $workspaceAgentsPath = Join-Path $resolvedWorkspaceRoot 'AGENTS.md'
 $workspaceReceiptPath = Join-Path $stateRoot 'workspace-install-receipt.json'
@@ -78,6 +79,10 @@ $report = [ordered]@{
     workspace_root_source = $workspaceRootSource
     workspace_root_customizable = $true
     workspace_root_parameter = 'WorkspaceRoot'
+    workspace_mode = 'combined_package_workspace'
+    workspace_package_root = $resolvedWorkspaceRoot
+    workspace_package_file_count = 0
+    workspace_package_sync_action = $null
     workspace_action = $null
     workspace_relocated_from = $null
     workspace_label = $workspaceLabel
@@ -90,6 +95,7 @@ $report = [ordered]@{
     workspace_backup_path = $null
     workspace_receipt_path = $workspaceReceiptPath
     workspace_open_required = $true
+    china_mirrors_enabled = [bool]$UseChinaMirrors
     components = [ordered]@{}
     pending_user_actions = @()
     error = $null
@@ -441,6 +447,12 @@ try {
         throw 'Use either -WithAudio or -SkipAudio, not both. Audio is installed by default.'
     }
     $audioRequested = -not $SkipAudio
+    if ($UseChinaMirrors) {
+        $env:PIP_INDEX_URL = 'https://mirrors.aliyun.com/pypi/simple/'
+        $env:PIP_DEFAULT_TIMEOUT = '120'
+        $env:PIP_RETRIES = '8'
+        $env:npm_config_registry = 'https://registry.npmmirror.com'
+    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
         -not [Environment]::Is64BitOperatingSystem -or
         [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
@@ -498,6 +510,7 @@ try {
     $report.workspace_root_source = $workspaceRootSource
     $report.workspace_skills_root = $workspaceSkillsRoot
     $report.workspace_agents_path = $workspaceAgentsPath
+    $report.workspace_package_root = $resolvedWorkspaceRoot
 
     Assert-RegularTree -Root $packageRoot
     Assert-NoReparseInExistingPath -Path $targetRoot -StopAt $localAppData
@@ -578,11 +591,15 @@ try {
         Write-Output "workspace_root=$resolvedWorkspaceRoot"
         Write-Output "workspace_root_source=$workspaceRootSource"
         Write-Output "workspace_root_customizable=true"
+        Write-Output "workspace_mode=combined_package_workspace"
+        Write-Output "workspace_package_root=$resolvedWorkspaceRoot"
+        Write-Output "workspace_upgrade_precedence=parameter_then_existing_receipt_then_package_root"
         Write-Output "workspace_label=$workspaceLabel"
         Write-Output "workspace_scope=repo"
         Write-Output "workspace_skill_count=$($packagedWorkspaceSkills.Count)"
         Write-Output "workspace_skill_payload=workspace-payload/skills"
         Write-Output "plugin_top_level_skills_present=false"
+        Write-Output "china_mirrors_enabled=$([bool]$UseChinaMirrors)"
         Write-Output "codex_invocation=$($codexEvidence.invocation)"
         return
     }
@@ -754,6 +771,9 @@ try {
     if ($workspaceInstall.status -ne 'installed' -or
         $workspaceInstall.workspace_scope -ne 'repo' -or
         $workspaceInstall.workspace_label -ne $workspaceLabel -or
+        $workspaceInstall.workspace_mode -ne 'combined_package_workspace' -or
+        -not [string]::Equals([string]$workspaceInstall.workspace_package_root, $resolvedWorkspaceRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        [int]$workspaceInstall.workspace_package_file_count -le 0 -or
         [int]$workspaceInstall.workspace_skill_count -ne $expectedWorkspaceSkillCount -or
         $workspaceInstall.plugin_manifest_exposes_skills -ne $false -or
         $workspaceInstall.plugin_top_level_skills_present -ne $false -or
@@ -761,6 +781,8 @@ try {
         throw 'Workspace skill installation receipt failed validation.'
     }
     $report.workspace_skill_count = [int]$workspaceInstall.workspace_skill_count
+    $report.workspace_package_file_count = [int]$workspaceInstall.workspace_package_file_count
+    $report.workspace_package_sync_action = [string]$workspaceInstall.package_sync_action
     $report.workspace_backup_path = [string]$workspaceInstall.backup_root
     $report.workspace_action = [string]$workspaceInstall.workspace_action
     if (@($workspaceInstall.PSObject.Properties.Name) -contains 'relocated_from_workspace_root' -and
@@ -791,6 +813,9 @@ try {
     Write-Host "workspace_root=$resolvedWorkspaceRoot"
     Write-Host "workspace_root_source=$workspaceRootSource"
     Write-Host "workspace_scope=repo"
+    Write-Host "workspace_mode=combined_package_workspace"
+    Write-Host "workspace_package_file_count=$($report.workspace_package_file_count)"
+    Write-Host "workspace_package_sync_action=$($report.workspace_package_sync_action)"
     Write-Host "workspace_label=$workspaceLabel"
     Write-Host "workspace_skill_count=$($report.workspace_skill_count)"
     Write-Host "Deployment report: $reportPath"
