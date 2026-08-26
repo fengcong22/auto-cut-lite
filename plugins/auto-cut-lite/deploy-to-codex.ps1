@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $pluginName = 'auto-cut-lite'
 $marketplaceName = 'auto-cut-lite-marketplace'
@@ -276,11 +277,31 @@ function Get-CommandEvidence {
     return [ordered]@{ status = 'detected'; path = $command.Source }
 }
 
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$Arguments
+    )
+    $previousErrorActionPreference = $ErrorActionPreference
+    $nativeExitCode = 1
+    try {
+        # Windows PowerShell 5.1 wraps native stderr as ErrorRecord objects.
+        # Warnings such as `npm notice` must not become terminating errors.
+        $ErrorActionPreference = 'Continue'
+        & $Path @Arguments
+        $nativeExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+        $global:LASTEXITCODE = $nativeExitCode
+    }
+}
+
 function Resolve-CodexCommand {
     $direct = Get-Command 'codex' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $direct) {
         try {
-            & $direct.Source '--version' 2>&1 | Out-Null
+            Invoke-NativeCommand -Path $direct.Source -Arguments @('--version') 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 return [ordered]@{
                     status = 'detected'
@@ -299,7 +320,7 @@ function Resolve-CodexCommand {
     $npx = Get-Command 'npx.cmd' -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($null -ne $npx) {
         try {
-            & $npx.Source '--version' 2>&1 | Out-Null
+            Invoke-NativeCommand -Path $npx.Source -Arguments @('--version') 2>&1 | Out-Null
             if ($LASTEXITCODE -eq 0) {
                 return [ordered]@{
                     status = 'detected'
@@ -326,11 +347,12 @@ function Invoke-CodexCommand {
         [Parameter(Mandatory)][string[]]$Arguments
     )
     if ($Evidence.invocation -eq 'direct') {
-        & $Evidence.path @Arguments
+        Invoke-NativeCommand -Path $Evidence.path -Arguments $Arguments
         return
     }
     if ($Evidence.invocation -eq 'official_npm_fallback') {
-        & $Evidence.path '--yes' $Evidence.npm_package @Arguments
+        $npxArguments = @('--yes', [string]$Evidence.npm_package) + $Arguments
+        Invoke-NativeCommand -Path $Evidence.path -Arguments $npxArguments
         return
     }
     throw 'No usable Codex CLI invocation is available.'
@@ -455,6 +477,7 @@ try {
         $env:PIP_DEFAULT_TIMEOUT = '120'
         $env:PIP_RETRIES = '8'
         $env:npm_config_registry = 'https://registry.npmmirror.com'
+        $env:npm_config_update_notifier = 'false'
     }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or
         -not [Environment]::Is64BitOperatingSystem -or

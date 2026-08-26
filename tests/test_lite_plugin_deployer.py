@@ -268,6 +268,10 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
     assert "parameter_then_existing_receipt_then_package_root" in deployer
     assert "$env:PIP_INDEX_URL = 'https://mirrors.aliyun.com/pypi/simple/'" in deployer
     assert "$env:npm_config_registry = 'https://registry.npmmirror.com'" in deployer
+    assert "$env:npm_config_update_notifier = 'false'" in deployer
+    assert "function Invoke-NativeCommand" in deployer
+    assert "$ErrorActionPreference = 'Continue'" in deployer
+    assert "$global:LASTEXITCODE = $nativeExitCode" in deployer
     assert "WorkspaceRoot must be an absolute path" in deployer
     assert "WorkspaceRoot folder name must be exactly" in deployer
     assert "'installer/manage_workspace.py'" in deployer
@@ -403,7 +407,9 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert "folder name must be exactly" in (invalid_workspace.stdout + invalid_workspace.stderr)
 
     (command_bin / "codex.cmd").write_text("@exit /b 1\n", encoding="ascii")
-    (command_bin / "npx.cmd").write_text("@exit /b 0\n", encoding="ascii")
+    (command_bin / "npx.cmd").write_text(
+        "@echo npm notice 1>&2\n@exit /b 0\n", encoding="ascii"
+    )
     fallback = subprocess.run(
         [
             "powershell",
