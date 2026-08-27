@@ -30,6 +30,21 @@
 - Use the `auto-cut` router for natural-language or mixed requests and the focused `auto-cut-*`
   skill when the user names one.
 
+## Resumable Review-document Entry
+
+- Natural-language review-document tasks use `review-document-run` from the deployed runtime.
+  It owns canonical compilation, strict content-addressed caching, source ASR, full-candidate
+  reverse ASR, editable draft writing, final acceptance, ZIP publication, and phase recovery.
+- Keep every job's cache, state, timing, compiled inputs, media evidence, and phase receipts under
+  an ignored `tmp/` job directory in this workspace.
+- Re-running the same command resumes a phase only when its input digest and receipt-bound files or
+  draft tree still validate. Deleted, changed, truncated, or corrupt artifacts force the affected
+  phase and dependents to rerun.
+- `review-job-compile` and `revision-run` remain low-level compatibility commands for callers that
+  already own canonical intermediate files. Do not use them to bypass the public phase DAG or
+  claim optimized source-document acceptance without equivalent evidence.
+- Never generate or execute a temporary Python file for a review-document task.
+
 ## Lite Execution Precedence
 
 - Before classifying or executing any visual review item, read

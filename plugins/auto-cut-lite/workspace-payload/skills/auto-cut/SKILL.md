@@ -45,8 +45,15 @@ that subskill directly.
 - Explicit profile-library administration only: `auto-cut-profile-onboarding`; never route an
   ordinary Lite edit there automatically
 
-For mixed review work, first compile one canonical source ledger, then apply audio operations,
-simple supplied-asset insertion, verbatim labels, saved-draft validation, and requested packaging.
+For natural-language or mixed review-document work, use `review-document-run` as the public
+entrypoint. It compiles one canonical source ledger, applies strict cached ASR and media evidence,
+writes the editable draft, validates it, publishes the requested ZIP, and resumes valid phases
+from `job_state.json`. Use `review-job-compile` and `revision-run` only as low-level compatibility
+commands when a maintained caller already owns canonical intermediate files and equivalent phase
+evidence. Never generate a temporary Python runner.
+
+Then apply audio operations, simple supplied-asset insertion, verbatim labels, saved-draft
+validation, and requested packaging.
 Never route a Lite visual item into full animation retiming, pointer targeting/calibration,
 safe-zone movement, cleanup layers, or opened-editor evidence.
 

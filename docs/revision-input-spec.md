@@ -25,7 +25,14 @@ The request format must make these requirements explicit:
 
 ## Default Source-document Workflow
 
-For a natural-language Feishu/Lark source-document job, compile the document snapshot and project description with `review-job-compile` before editing. Resume through `job_state.json`; do not rebuild canonical ledgers or valid evidence phases merely because a later phase was interrupted. Legacy request builders and direct revision scripts remain compatible, but they do not establish optimized/source-document final acceptance unless they produce the same cache identities, checkpoints, receipts, and acceptance evidence.
+For a natural-language Feishu/Lark source-document job, run `review-document-run` with the
+document snapshot and project description. It owns the fixed phase DAG from canonical compilation
+through strict acceptance and ZIP publication. Resume through `job_state.json`; do not rebuild
+canonical ledgers, valid ASR/cache evidence, processed media, or a valid saved draft merely
+because a later phase was interrupted. `review-job-compile` and direct `revision-run` remain
+low-level compatibility commands, but they do not establish optimized/source-document final
+acceptance unless they produce the same cache identities, checkpoints, receipts, and acceptance
+evidence.
 
 Keep compiled requests, cache entries, checkpoints, evidence plans, and timing files under an ignored `tmp/` job directory. Missing source text follows the nonblocking recovery contract below and never removes the item or stops unrelated editing work.
 
@@ -486,6 +493,22 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 
 ## Validation Commands
 
+Run the complete public Lite source-document workflow:
+
+```powershell
+python scripts/jy_wrapper.py review-document-run `
+  --snapshot-json path/to/document_snapshot.json `
+  --project-json path/to/project.json `
+  --job-root tmp/review-job `
+  --drafts-root "<draft root>" `
+  --package-zip "<output>\Auto-Cut-Lite.zip" `
+  --json
+```
+
+Run that same command again after an interruption. Completed phases resume only when their input
+digests and receipt-bound artifact/tree hashes still validate; a missing or changed artifact
+reruns the affected phase and its dependents.
+
 Summarize a request:
 
 ```bash
@@ -516,8 +539,10 @@ Execute with the strict post-save gate:
 python scripts/jy_wrapper.py revision-run --request-json path/to/request.json --doc-items-json path/to/doc_items.json --strict --drafts-root "<draft root>" --json
 ```
 
-For a complete High School History lite delivery, append `--workflow-mode lite` and
-`--package-zip "<Desktop>\\<final-name>.zip"`. The command keeps the whole final stage offline:
+For a low-level complete High School History lite delivery from already compiled inputs, append
+`--workflow-mode lite` and `--package-zip "<Desktop>\\<final-name>.zip"` to `revision-run`. The
+public `review-document-run` command already fixes Lite mode and requires the package path. Both
+paths keep the whole final stage offline:
 it runs the saved-draft acceptance first, then packages the editable draft, the bundled material
 relink tool, and `使用说明.txt`, validates the ZIP CRC and extracted tree hash, and returns only
 after the ZIP and external receipt are published. It never opens JianYing or rewrites draft JSON.

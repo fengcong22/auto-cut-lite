@@ -2,7 +2,7 @@ import json
 import math
 import re
 from dataclasses import dataclass, replace
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.revision_models import (
     RevisionRequest,
@@ -18,6 +18,9 @@ _UNVERIFIED_SOURCE = "unverified_source_unavailable"
 _UNVERIFIED_TIMING = "unverified_timing_unavailable"
 _SAVED_START_TOLERANCE_US = 500
 _INTERNAL_LEGACY_SOURCES = {"legacy_marker", "legacy_edit"}
+_ASR_RECEIPT_PASS_STATUSES = {"pass", "passed", "ok", "validated", "complete", "completed"}
+_ASR_RECEIPT_GRANULARITIES = {"word", "character", "word_character", "word+character"}
+_SHA256_HEX_LENGTH = 64
 
 
 @dataclass(frozen=True)
@@ -34,6 +37,110 @@ class MarkerPlanItem:
 
 def _execution_status_from_source_item(source_item: RevisionReviewItem) -> str:
     return review_item_execution_status(source_item)
+
+
+def _is_sha256(value: Any) -> bool:
+    text = str(value or "").strip().casefold()
+    return len(text) == _SHA256_HEX_LENGTH and all(
+        character in "0123456789abcdef" for character in text
+    )
+
+
+def _label_only_asr_marker_time(source_item: RevisionReviewItem) -> Optional[float]:
+    """Return a validated item-level ASR marker point when one is present.
+
+    Older compiled requests may carry the receipt on a now-filtered edit.  This
+    helper deliberately returns ``None`` when the item has no item-level receipt
+    so that compatibility path remains available.  Once an item-level receipt
+    is supplied, however, it is authoritative and must be complete.
+    """
+
+    execution_status = _execution_status_from_source_item(source_item).casefold()
+    if not execution_status.startswith("label_only_") or (
+        lite_timing_source(source_item.kind, source_item.source_text) != "asr"
+    ):
+        return None
+    evidence = source_item.evidence if isinstance(source_item.evidence, Mapping) else {}
+    alignment = evidence.get("asr_alignment")
+    if alignment is None:
+        return None
+
+    problems: List[str] = []
+    if not isinstance(alignment, Mapping):
+        problems.append("asr_alignment receipt must be an object")
+        alignment = {}
+    if str(evidence.get("review_timestamp_role") or "").strip().casefold() != "search_hint":
+        problems.append("review_timestamp_role must be search_hint")
+    if str(alignment.get("status") or "").strip().casefold() not in _ASR_RECEIPT_PASS_STATUSES:
+        problems.append("asr_alignment.status is not pass")
+    if (
+        str(alignment.get("granularity") or "").strip().casefold()
+        not in _ASR_RECEIPT_GRANULARITIES
+    ):
+        problems.append("asr_alignment.granularity must be word or character")
+    if not str(alignment.get("provider") or "").strip():
+        problems.append("asr_alignment.provider is missing")
+    if not str(alignment.get("model") or alignment.get("resource_id") or "").strip():
+        problems.append("asr_alignment model/resource_id is missing")
+    if not str(alignment.get("adapter_version") or "").strip():
+        problems.append("asr_alignment.adapter_version is missing")
+    if not _is_sha256(
+        alignment.get("input_sha256") or alignment.get("source_audio_sha256")
+    ):
+        problems.append("asr_alignment source audio SHA-256 is missing or invalid")
+    if alignment.get("authoritative_cut_boundary") is not False:
+        problems.append("label-only asr_alignment.authoritative_cut_boundary must be false")
+
+    matches = alignment.get("matches") or alignment.get("words")
+    if not isinstance(matches, list) or not matches:
+        problems.append("asr_alignment word/character matches are missing")
+    else:
+        previous_start = -math.inf
+        for index, row in enumerate(matches):
+            if not isinstance(row, Mapping) or not str(row.get("text") or "").strip():
+                problems.append(f"asr_alignment match {index + 1} has no text")
+                continue
+            try:
+                match_start = float(row.get("start"))
+                match_end = float(row.get("end"))
+            except (TypeError, ValueError, OverflowError):
+                problems.append(f"asr_alignment match {index + 1} has invalid timing")
+                continue
+            if (
+                not math.isfinite(match_start)
+                or not math.isfinite(match_end)
+                or match_start < 0.0
+                or match_end <= match_start
+                or match_start < previous_start
+            ):
+                problems.append(
+                    f"asr_alignment match {index + 1} is not a positive ordered interval"
+                )
+            previous_start = match_start
+
+    resolved_time: Optional[float] = None
+    try:
+        resolved_time = float(alignment.get("resolved_time"))
+    except (TypeError, ValueError, OverflowError):
+        problems.append("asr_alignment.resolved_time is missing or invalid")
+    else:
+        if not math.isfinite(resolved_time) or resolved_time < 0.0:
+            problems.append("asr_alignment.resolved_time is missing or invalid")
+        evidence_time = evidence.get("resolved_time")
+        if evidence_time is not None:
+            try:
+                if abs(float(evidence_time) - resolved_time) > 0.001:
+                    problems.append("evidence.resolved_time does not match asr_alignment")
+            except (TypeError, ValueError, OverflowError):
+                problems.append("evidence.resolved_time is invalid")
+
+    if problems:
+        raise ValueError(
+            f"Lite label-only audio item {source_item.item_id} has invalid ASR receipt: "
+            + "; ".join(problems)
+            + "."
+        )
+    return resolved_time
 
 
 def _deleted_duration_before(point: float, delete_windows: List[List[float]]) -> float:
@@ -727,7 +834,12 @@ def build_marker_plan(
             lite_timing_source(source_kind, source_item.source_text) == "asr"
         )
         pauses = pause_index.get(normalized_item_id, [])
-        if asr_aligned_lite_marker and pauses:
+        label_only_asr_time = (
+            _label_only_asr_marker_time(source_item) if asr_aligned_lite_marker else None
+        )
+        if label_only_asr_time is not None:
+            start, end = label_only_asr_time, label_only_asr_time + 0.8
+        elif asr_aligned_lite_marker and pauses:
             pause_start = min(float(pause.source_time) for pause in pauses)
             start, end = pause_start, pause_start + 0.8
         else:

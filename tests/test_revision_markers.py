@@ -1602,6 +1602,109 @@ class TestRevisionMarkerPlan(unittest.TestCase):
         self.assertEqual(len(plan), 100)
         self.assertLessEqual(extract_action_item_id.call_count, 200)
 
+    def test_lite_label_only_audio_marker_uses_item_level_asr_receipt_without_edit(self):
+        source_text = "02:00 读音问题暂时只贴原文标签。\n标点与换行都保留？"
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="LabelOnlyAsrMarker",
+                source_video="C:/media/source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            review_items=[
+                RevisionReviewItem(
+                    item_id="audio-label",
+                    kind="pronunciation_repair",
+                    source_text=source_text,
+                    start=2.0,
+                    execution_required=False,
+                    execution_status="label_only_unresolved",
+                    evidence={
+                        "execution_status": "label_only_unresolved",
+                        "review_timestamp_role": "search_hint",
+                        "resolved_time": 6.25,
+                        "asr_alignment": {
+                            "status": "pass",
+                            "granularity": "word",
+                            "provider": "test-asr",
+                            "resource_id": "test-model",
+                            "adapter_version": "1",
+                            "input_sha256": "d" * 64,
+                            "authoritative_cut_boundary": False,
+                            "matches": [
+                                {"text": "读音", "start": 6.25, "end": 6.45}
+                            ],
+                            "resolved_time": 6.25,
+                        },
+                    },
+                )
+            ],
+            workflow_mode="lite",
+        )
+
+        plan = build_marker_plan(request)
+
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(plan[0].source_text, source_text)
+        self.assertEqual(plan[0].execution_status, "label_only_unresolved")
+        self.assertEqual((plan[0].start, plan[0].end), (6.25, 7.05))
+        self.assertEqual(request.pause_adjustments, [])
+
+    def test_lite_label_only_audio_marker_rejects_incomplete_item_asr_receipt(self):
+        valid_alignment = {
+            "status": "pass",
+            "granularity": "word",
+            "provider": "test-asr",
+            "resource_id": "test-model",
+            "adapter_version": "1",
+            "input_sha256": "d" * 64,
+            "authoritative_cut_boundary": False,
+            "matches": [{"text": "读音", "start": 6.25, "end": 6.45}],
+            "resolved_time": 6.25,
+        }
+        cases = {
+            "missing hash": {**valid_alignment, "input_sha256": "bad"},
+            "cut boundary": {**valid_alignment, "authoritative_cut_boundary": True},
+            "unordered match": {
+                **valid_alignment,
+                "matches": [
+                    {"text": "后", "start": 6.4, "end": 6.5},
+                    {"text": "前", "start": 6.2, "end": 6.3},
+                ],
+            },
+        }
+        for label, alignment in cases.items():
+            with self.subTest(label=label):
+                request = RevisionRequest(
+                    project=RevisionProject(
+                        draft_name="InvalidLabelOnlyAsrMarker",
+                        source_video="C:/media/source.mp4",
+                    ),
+                    edits=[],
+                    markers=[],
+                    preserve=PreservationRules(),
+                    review_items=[
+                        RevisionReviewItem(
+                            item_id="audio-label",
+                            kind="pronunciation_repair",
+                            source_text="02:00 读音问题",
+                            start=2.0,
+                            execution_required=False,
+                            execution_status="label_only_unresolved",
+                            evidence={
+                                "execution_status": "label_only_unresolved",
+                                "review_timestamp_role": "search_hint",
+                                "asr_alignment": alignment,
+                            },
+                        )
+                    ],
+                    workflow_mode="lite",
+                )
+
+                with self.assertRaisesRegex(ValueError, "invalid ASR receipt"):
+                    build_marker_plan(request)
+
     def test_legacy_plan_and_summary_keep_one_marker_per_explicit_action(self):
         request = self._request(
             edits=[

@@ -74,7 +74,12 @@ If the strict gate fails, do not report the draft as complete. Source-text recov
 
 ## Resumable Source-document Jobs
 
-For natural-language source-document work, start with `review-job-compile`, use its canonical `doc_items.json` and `revision_request.json`, and resume from atomic `job_state.json` checkpoints. The ordered phases and cache identities live in [the revision input spec](../../docs/revision-input-spec.md); do not duplicate or bypass that source of truth.
+For natural-language source-document work, start with `review-document-run`. It creates the
+canonical `doc_items.json` and `revision_request.json` and resumes from atomic `job_state.json`
+checkpoints. The ordered phases and cache identities live in
+[the revision input spec](../../docs/revision-input-spec.md); do not duplicate or bypass that
+source of truth. Use `review-job-compile` or direct `revision-run` only when a maintained caller
+already owns the canonical intermediate files.
 
 Run only bounded, independent read-only preparation concurrently. JianYing writes and saved-draft inspection are serialized, and inspection waits for the corresponding save; ordered Feishu writes are serialized globally; overlapping timeline repairs are prohibited. No two writers may target the same draft. A corrupt phase reruns in isolation, and missing source-text recovery never cancels unrelated phases or draft generation.
 

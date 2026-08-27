@@ -101,7 +101,11 @@ For mixed tasks, route ordinary pointer work to `auto-cut-pointer-targeting` fir
 - Prefer repository tools such as `scripts/jy_wrapper.py`, `scripts/draft_inspector.py`, and maintained project scripts over ad hoc JSON edits.
 - Preserve editable JianYing draft structure unless the user explicitly asks for a baked export.
 - Route review-driven jobs through canonical source-ledger recovery, verbatim marker validation, and the routed final-acceptance profile.
-- For natural-language source-document jobs, run `review-job-compile` and the resumable job tooling by default, then route the compiled inputs through the focused revision and final-acceptance skills.
+- For natural-language source-document jobs, run the maintained `review-document-run` command by
+  default. It owns compilation, strict cache identity, ASR, editable draft writing, acceptance,
+  packaging, and phase recovery, then routes evidence through the focused skills.
+- Keep `review-job-compile` and `revision-run` only as low-level compatibility commands for callers
+  that already have canonical intermediate files.
 - Legacy direct scripts remain compatible, but cannot claim optimized/source-document final acceptance without evidence from equivalent checkpoints, cache entries, receipts, and gates.
 
 ## Complete Project Delivery

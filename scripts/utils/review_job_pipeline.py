@@ -183,6 +183,7 @@ class PhaseDefinition:
     input_digest: str = ""
     retry_count: int = 0
     timeline_interval: tuple[float, float] | None = None
+    resume_check: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str):
@@ -207,6 +208,8 @@ class PhaseDefinition:
             raise ValueError("phase retry_count must be non-negative")
         if self.retry_count > 1:
             raise ValueError("phase retry_count must be at most 1")
+        if self.resume_check is not None and not callable(self.resume_check):
+            raise TypeError("phase resume_check must be callable or None")
 
         interval = self.timeline_interval
         normalized_interval: tuple[float, float] | None = None
@@ -245,6 +248,23 @@ class PhaseDefinition:
         if label == "depends_on" and any(not value.strip() for value in result):
             raise ValueError("depends_on phase names must not be empty")
         return result
+
+
+@dataclass(frozen=True)
+class PhaseOutcome:
+    """One phase result with explicit cache and content-identity telemetry."""
+
+    result: Any
+    output_digest: str | None = None
+    cache_hit: bool | None = False
+
+    def __post_init__(self) -> None:
+        if self.output_digest is not None and (
+            not isinstance(self.output_digest, str) or not self.output_digest.strip()
+        ):
+            raise ValueError("phase outcome output_digest must be non-empty text or None")
+        if self.cache_hit is not None and not isinstance(self.cache_hit, bool):
+            raise TypeError("phase outcome cache_hit must be a boolean or None")
 
 
 @dataclass(frozen=True)
@@ -2366,6 +2386,8 @@ class ReviewJobExecutor:
                     phase.name,
                     input_digest=phase_input_digest,
                 )
+                if can_resume and phase.resume_check is not None:
+                    can_resume = phase.resume_check() is True
             except Exception as error:
                 records[phase.name] = self._record(
                     "failed",
@@ -2497,59 +2519,61 @@ class ReviewJobExecutor:
         phase: PhaseDefinition,
         input_digest: str | None = None,
     ) -> dict[str, Any]:
-        started = False
-        if self.state_store is not None:
-            try:
-                self.state_store.start_phase(
-                    phase.name,
-                    input_digest=input_digest,
-                    item_ids=phase.item_ids,
-                    retry_count=phase.retry_count,
-                )
-                started = True
-            except Exception as error:
-                return self._record(
-                    "failed",
-                    error=f"state start failed: {self._safe_error(error)}",
-                )
-
-        try:
-            result = phase.run()
-        except Exception as error:
-            error_text = self._safe_error(error)
-            if self.state_store is not None and started:
+        for attempt in range(phase.retry_count + 1):
+            started = False
+            if self.state_store is not None:
                 try:
-                    self.state_store.fail_phase(phase.name, error_text)
-                except Exception:
-                    pass
-            return self._record("failed", error=error_text)
+                    self.state_store.start_phase(
+                        phase.name,
+                        input_digest=input_digest,
+                        item_ids=phase.item_ids,
+                        retry_count=attempt,
+                    )
+                    started = True
+                except Exception as error:
+                    return self._record(
+                        "failed",
+                        error=f"state start failed: {self._safe_error(error)}",
+                    )
 
-        try:
-            output_digest = self._result_digest(result)
-        except Exception as error:
-            error_text = self._safe_error(error)
-            if self.state_store is not None and started:
-                try:
-                    self.state_store.fail_phase(phase.name, error_text)
-                except Exception:
-                    pass
-            return self._record("failed", error=error_text)
-        if self.state_store is not None:
             try:
-                self.state_store.complete_phase(
-                    phase.name,
-                    output_digest=output_digest,
-                    cache_hit=False,
-                )
+                raw_result = phase.run()
+                if isinstance(raw_result, PhaseOutcome):
+                    result = raw_result.result
+                    output_digest = raw_result.output_digest or self._result_digest(result)
+                    cache_hit = raw_result.cache_hit
+                else:
+                    result = raw_result
+                    output_digest = self._result_digest(result)
+                    cache_hit = False
             except Exception as error:
-                error_text = f"state completion failed: {self._safe_error(error)}"
-                if started:
+                error_text = self._safe_error(error)
+                if self.state_store is not None and started:
                     try:
                         self.state_store.fail_phase(phase.name, error_text)
                     except Exception:
                         pass
-                return self._record("failed", result=result, error=error_text)
-        return self._record("complete", result=result)
+                if attempt < phase.retry_count:
+                    continue
+                return self._record("failed", error=error_text)
+
+            if self.state_store is not None:
+                try:
+                    self.state_store.complete_phase(
+                        phase.name,
+                        output_digest=output_digest,
+                        cache_hit=cache_hit,
+                    )
+                except Exception as error:
+                    error_text = f"state completion failed: {self._safe_error(error)}"
+                    if started:
+                        try:
+                            self.state_store.fail_phase(phase.name, error_text)
+                        except Exception:
+                            pass
+                    return self._record("failed", result=result, error=error_text)
+            return self._record("complete", result=result)
+        return self._record("failed", error="phase retry loop exhausted")
 
     def _persist_skip(self, phase: PhaseDefinition, reason: str) -> None:
         if self.state_store is None:
@@ -2599,6 +2623,7 @@ __all__ = [
     "CacheIdentity",
     "JobStateStore",
     "PhaseDefinition",
+    "PhaseOutcome",
     "PhaseTimer",
     "ReviewJobExecutor",
     "sha256_file",

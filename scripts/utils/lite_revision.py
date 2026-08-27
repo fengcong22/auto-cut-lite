@@ -17,8 +17,12 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from utils.revision_markers import build_marker_plan, map_marker_plan_to_timeline
 from utils.review_marker_layout_validation import review_marker_top_layout_problems
+from utils.revision_markers import (
+    _label_only_asr_marker_time,
+    build_marker_plan,
+    map_marker_plan_to_timeline,
+)
 from utils.revision_models import (
     RevisionEdit,
     RevisionRequest,
@@ -30,7 +34,6 @@ from utils.revision_models import (
     lite_timing_source,
     review_item_execution_status,
 )
-
 
 LITE_TRACKS = {
     "original_video": "Original Video",
@@ -939,12 +942,28 @@ def _validate_lite_audio_timing_sources(
     edit_by_id: Dict[str, List[RevisionEdit]] = {}
     for edit in request.edits:
         edit_by_id.setdefault(edit.doc_item_id.strip().casefold(), []).append(edit)
+    pause_by_id: Dict[str, List[Any]] = {}
+    for pause in request.pause_adjustments:
+        pause_by_id.setdefault(pause.item_id.strip().casefold(), []).append(pause)
 
     problems: List[str] = []
     for item in authoritative:
         if lite_timing_source(item.kind, item.source_text) != "asr":
             continue
         normalized_id = item.item_id.strip().casefold()
+        if review_item_execution_status(item).casefold().startswith("label_only_"):
+            try:
+                receipt_time = _label_only_asr_marker_time(item)
+            except ValueError as exc:
+                problems.append(str(exc))
+                continue
+            if receipt_time is not None:
+                if pause_by_id.get(normalized_id):
+                    problems.append(
+                        f"Lite audio timing {item.item_id}: item-level label-only ASR "
+                        "must not create pause_adjustments."
+                    )
+                continue
         if lite_pause_change_is_label_only(item.kind, item.source_text):
             edits = edit_by_id.get(normalized_id, [])
             if edits:
@@ -1670,9 +1689,16 @@ def _validate_lite_content(
                 "Lite source video material is missing or duplicated: "
                 f"{expected_source_material_id}."
             )
-        elif source_video_path:
-            saved_path = str(video_materials[0].get("path") or "").strip()
-            expected_path = str(source_video_path).strip()
+        expected_path = str(source_video_path or "").strip()
+        if not expected_path:
+            errors.append("Lite validation requires project.source_video path.")
+        elif len(video_materials) == 1:
+            saved_path = str(
+                video_materials[0].get("path")
+                or video_materials[0].get("media_path")
+                or video_materials[0].get("file_path")
+                or ""
+            ).strip()
             if (
                 not saved_path
                 or os.path.normcase(os.path.abspath(saved_path))
@@ -2298,7 +2324,6 @@ def execute_lite_revision_request(
                     include_at_point=True,
                 )
                 target_track = LITE_TRACKS["cut_segments"]
-                source_path = request.project.source_video
                 if layout == "split_gap":
                     # Merged V2 segments are written before this loop so overlapping
                     # review rows do not create duplicate timeline clips.

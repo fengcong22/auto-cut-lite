@@ -14,7 +14,20 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.release.build_lite_plugin import PLUGIN_NAME, WORKSPACE_NAME, _privacy_scan
+from scripts.release.build_lite_plugin import (
+    PLUGIN_NAME,
+    WORKSPACE_NAME,
+    _privacy_scan,
+    _validate_portable_capabilities,
+)
+
+EXPECTED_WORKSPACE_SKILL_COUNT = 17
+REQUIRED_REVIEW_RUNTIME_PATHS = frozenset(
+    {
+        "runtime/scripts/utils/review_audio_precision.py",
+        "runtime/scripts/utils/review_document_runner.py",
+    }
+)
 
 
 def _sha256(path: Path) -> str:
@@ -50,6 +63,52 @@ def _validate_member(info: zipfile.ZipInfo) -> None:
     file_type = (info.external_attr >> 16) & 0o170000
     if info.is_dir() or file_type not in {0, stat.S_IFREG}:
         raise ValueError(f"ZIP member is not a regular file: {name}")
+
+
+def _validate_deployment_contract(root: Path) -> dict[str, Any]:
+    evidence = _validate_portable_capabilities(root)
+    skill_count = int(evidence["skill_count"])
+    if skill_count != EXPECTED_WORKSPACE_SKILL_COUNT:
+        raise ValueError(
+            "portable workspace skill count is invalid: "
+            f"expected {EXPECTED_WORKSPACE_SKILL_COUNT}, got {skill_count}"
+        )
+
+    payload = _json_object(root / "PORTABLE-CAPABILITIES.json", "portable capabilities")
+    capabilities = payload.get("capabilities")
+    if not isinstance(capabilities, list):
+        raise ValueError("portable capability contract has no capabilities")
+    review_capability = next(
+        (
+            row
+            for row in capabilities
+            if isinstance(row, dict) and row.get("id") == "review_document_and_replacement_timebase"
+        ),
+        None,
+    )
+    if not isinstance(review_capability, dict):
+        raise ValueError("portable review-document capability is missing")
+    declared_paths = review_capability.get("required_paths")
+    if not isinstance(declared_paths, list) or not all(
+        isinstance(path, str) for path in declared_paths
+    ):
+        raise ValueError("portable review-document capability paths are invalid")
+    missing_review_paths = sorted(REQUIRED_REVIEW_RUNTIME_PATHS - set(declared_paths))
+    if missing_review_paths:
+        raise ValueError(
+            "portable review-document capability omits required runtime paths: "
+            + ", ".join(missing_review_paths)
+        )
+
+    return {
+        "status": evidence["status"],
+        "capability_count": int(evidence["capability_count"]),
+        "required_path_count": int(evidence["required_path_count"]),
+        "skill_count": skill_count,
+        "workspace_scope": evidence["workspace_scope"],
+        "workspace_label": evidence["workspace_label"],
+        "review_runtime_required_path_count": len(REQUIRED_REVIEW_RUNTIME_PATHS),
+    }
 
 
 def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[str, Any]:
@@ -109,9 +168,7 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
             raise ValueError(f"inventoried file hash or size mismatch: {row['path']}")
 
     actual = {
-        path.relative_to(root).as_posix().casefold()
-        for path in root.rglob("*")
-        if path.is_file()
+        path.relative_to(root).as_posix().casefold() for path in root.rglob("*") if path.is_file()
     }
     expected = set(inventory) | {"package-manifest.json"}
     if actual != expected:
@@ -119,6 +176,7 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
     privacy_findings = _privacy_scan(root)
     if privacy_findings:
         raise ValueError("package privacy scan failed: " + "; ".join(privacy_findings[:20]))
+    deployment_contract = _validate_deployment_contract(root)
 
     return {
         "status": "pass",
@@ -132,6 +190,18 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
         "zip_path_safety": "pass",
         "tree_manifest": "pass",
         "privacy_scan": "pass",
+        "portable_capability_closure": deployment_contract["status"],
+        "portable_capability_count": deployment_contract["capability_count"],
+        "portable_required_path_count": deployment_contract["required_path_count"],
+        "workspace_skill_count": deployment_contract["skill_count"],
+        "workspace_skill_scope": deployment_contract["workspace_scope"],
+        "workspace_skill_label": deployment_contract["workspace_label"],
+        "plugin_manifest_exposes_skills": False,
+        "plugin_top_level_skills_present": False,
+        "review_runtime_contract": "pass",
+        "review_runtime_required_path_count": deployment_contract[
+            "review_runtime_required_path_count"
+        ],
     }
 
 

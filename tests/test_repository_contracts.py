@@ -1023,11 +1023,10 @@ class TestRepositoryContracts(unittest.TestCase):
             router_contract,
             (
                 "natural-language source-document jobs",
+                "review-document-run",
                 "review-job-compile",
                 "default",
-                "resumable job tooling",
-                "legacy direct scripts",
-                "compatible",
+                "low-level compatibility commands",
                 "cannot claim optimized source-document final acceptance without evidence",
             ),
         )
@@ -1035,7 +1034,7 @@ class TestRepositoryContracts(unittest.TestCase):
             self,
             operator_contract,
             (
-                "review-job-compile",
+                "review-document-run",
                 "review-job-status",
                 "review-job-cache-inspect",
                 "read-only",

@@ -389,6 +389,7 @@ class InstallRepoSkillsTests(unittest.TestCase):
                 (dest / name / "SKILL.md").read_text(encoding="utf-8") for name in selected_names
             )
             for required in (
+                "review-document-run",
                 "review-job-compile",
                 "job_state.json",
                 "job_timing.json",

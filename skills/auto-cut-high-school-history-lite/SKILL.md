@@ -196,9 +196,23 @@ installed runtime or fall back to another checkout.
 ## Final Lite Delivery Boundary
 
 For an explicit full lite workflow, the final acceptance result is not the saved draft directory;
-the workflow ends only after a validated ZIP is published. Run the editable revision and package
-as one unattended offline command after the canonical request and review-document evidence are
-ready:
+the workflow ends only after a validated ZIP is published. For a natural-language source-document
+job, use the public resumable command:
+
+```powershell
+python scripts/jy_wrapper.py review-document-run `
+  --snapshot-json "<document_snapshot.json>" `
+  --project-json "<project.json>" `
+  --job-root "<ignored tmp job directory>" `
+  --drafts-root "<JianYing drafts root>" `
+  --package-zip "<Desktop>\<final-name>.zip" `
+  --json
+```
+
+It compiles, performs source ASR once per strict cache identity, performs one full-candidate
+reverse ASR when spoken cuts exist, writes and validates the editable draft, publishes the ZIP,
+and resumes valid phases after interruption. When a maintained caller already has the canonical
+request and review-document evidence, the low-level compatibility command remains:
 
 ```powershell
 python scripts/jy_wrapper.py revision-run `

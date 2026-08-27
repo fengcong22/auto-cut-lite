@@ -11,7 +11,8 @@ focused visual skill. It overrides full-workflow visual instructions and accepta
 
 ## Workflow
 
-1. Read the current source review document as the user's own identity and preserve one stable ID
+1. Start natural-language review-document tasks with `review-document-run`; do not create a
+   temporary Python runner. Read the current source review document as the user's own identity and preserve one stable ID
    and verbatim source text per item.
 2. Compile `workflow_mode=lite` with explicit source-ledger coverage.
 3. Resolve spoken deletions from word/character ASR. Treat review timestamps as search hints,
@@ -28,6 +29,11 @@ focused visual skill. It overrides full-workflow visual instructions and accepta
 7. Validate root and active timeline content, source coverage, audio evidence, asset start
    alignment, default visual geometry, forbidden Lite outputs, and package integrity when
    delivery was requested.
+
+The public runner persists `job_state.json`, `job_timing.json`, canonical inputs, phase receipts,
+and cache evidence under the job root. Re-run it to resume valid phases. Use `revision-run` only
+as a low-level compatibility command when canonical inputs and equivalent phase evidence already
+exist.
 
 Do not load full pointer-targeting, profile-onboarding, animation-retiming, local-image precision,
 or safe-zone execution rules. Do not require target geometry, profile binding, pointer lifecycle,

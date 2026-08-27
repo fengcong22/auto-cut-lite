@@ -38,6 +38,9 @@ pointer, and animation acceptance.
   duration change, or later-track offset was produced;
 - portable delivery, when requested, passes CRC, isolated extraction, tree-hash, relink-tool,
   local-material, and external-receipt checks.
+- `job_state.json` and `job_timing.json` show every fixed `review-document-run` phase complete or
+  validly resumed, with no failed/skipped phase, stale digest, corrupt receipt, or unresolved
+  executable item.
 
 Do not require profile binding, target/hotspot geometry, pointer lifecycle, cleanup evidence,
 animation stable-frame evidence, opened JianYing screenshots, or target-open proof for ordinary

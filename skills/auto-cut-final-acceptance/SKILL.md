@@ -62,12 +62,17 @@ Generate local evidence windows only for affected regions, including configured 
 
 Local checks never replace global structure and timeline validation, saved root/active-timeline inspection, or the final full-candidate reverse ASR after spoken-audio changes. Cache hits must identify the matching artifact and candidate digest; they satisfy evidence only when that same required gate is actually evaluated.
 
-Acceptance also inspects `job_state.json` and `job_timing.json` for incomplete phases, stale digests, retries, and unresolved item IDs. A legacy direct-script result cannot claim optimized/source-document final acceptance without equivalent evidence.
+Acceptance also inspects `job_state.json` and `job_timing.json` for incomplete phases, stale
+digests, retries, and unresolved item IDs. `review-document-run` is the public source-document
+entrypoint and must finish its fixed phase DAG. A legacy direct-script result cannot claim
+optimized/source-document final acceptance without equivalent evidence.
 
 ## Fixed-Path Native Delivery
 
 When `workflow_mode=lite` and the user requests the complete lite workflow, the final delivery
-boundary is the offline ZIP produced by `revision-run --package-zip` after saved-draft acceptance.
+boundary is the offline ZIP produced by `review-document-run --package-zip` after saved-draft
+acceptance. Direct `revision-run --package-zip` remains the low-level boundary for a caller that
+already owns canonical compiled inputs and equivalent phase evidence.
 Require `completion_boundary=lite_zip_delivery`, `delivery.delivery_mode=lite_zip`, a passing ZIP
 CRC check, a matching extracted-tree SHA-256, `json_rewritten=false`, `ui_invoked=false`, and
 `opened_jianying=false` in the command result/receipt. The ZIP must contain the complete editable

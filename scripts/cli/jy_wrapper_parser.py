@@ -257,6 +257,48 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="Print machine-readable JSON response"
     )
 
+    p_review_document_run = sub.add_parser(
+        "review-document-run",
+        help="Run the maintained resumable Auto-Cut Lite review-document workflow",
+    )
+    p_review_document_run.add_argument("--snapshot-json", required=True)
+    p_review_document_run.add_argument("--project-json", required=True)
+    p_review_document_run.add_argument(
+        "--job-root",
+        "--output-dir",
+        dest="job_root",
+        required=True,
+        help="Directory for resumable state, evidence, and compiled job artifacts",
+    )
+    p_review_document_run.add_argument(
+        "--drafts-root",
+        required=True,
+        help="JianYing custom draft root for the editable Lite draft",
+    )
+    p_review_document_run.add_argument(
+        "--package-zip",
+        required=True,
+        help="Destination for the validated editable Lite delivery ZIP",
+    )
+    p_review_document_run.add_argument(
+        "--relink-tool",
+        default=None,
+        help="Optional path to the Lite material relink executable",
+    )
+    p_review_document_run.add_argument(
+        "--mock-media",
+        action="store_true",
+        help="Use mock JianYing media objects for tests or dry runs",
+    )
+    p_review_document_run.add_argument("--asr-timeout-seconds", type=float, default=60.0)
+    p_review_document_run.add_argument("--asr-poll-interval-seconds", type=float, default=2.0)
+    p_review_document_run.add_argument("--asr-max-wait-seconds", type=float, default=120.0)
+    p_review_document_run.add_argument("--context-before", type=float, default=5.0)
+    p_review_document_run.add_argument("--context-after", type=float, default=5.0)
+    p_review_document_run.add_argument(
+        "--json", action="store_true", help="Print machine-readable JSON response"
+    )
+
     p_review_job_compile = sub.add_parser(
         "review-job-compile",
         help="Compile canonical review-job inputs and a local evidence-window plan",

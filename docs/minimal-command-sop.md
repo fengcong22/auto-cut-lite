@@ -10,10 +10,18 @@ Use this SOP for simple editing requests to minimize noisy exploration.
 
 ## Source-document Review Jobs
 
-This single-script SOP is only for simple jobs without a source review document. For natural-language Feishu/Lark source-document work, use the canonical resumable tooling by default and keep all runtime artifacts under an ignored `tmp/` job directory:
+This single-script SOP is only for simple jobs without a source review document. For
+natural-language Feishu/Lark source-document work, use the maintained resumable runner and keep
+all runtime artifacts under an ignored `tmp/` job directory:
 
 ```powershell
-python scripts/jy_wrapper.py review-job-compile --snapshot-json "tmp/review-job/document_snapshot.json" --project-json "tmp/review-job/project.json" --output-dir "tmp/review-job" --context-before 5 --context-after 5 --json
+python scripts/jy_wrapper.py review-document-run `
+  --snapshot-json "tmp/review-job/document_snapshot.json" `
+  --project-json "tmp/review-job/project.json" `
+  --job-root "tmp/review-job" `
+  --drafts-root "<JianYing draft root>" `
+  --package-zip "<output>\Auto-Cut-Lite.zip" `
+  --json
 ```
 
 After the phase executor has created `job_state.json`, inspect state or one cache entry without changing either:
@@ -23,7 +31,13 @@ python scripts/jy_wrapper.py review-job-status --state-json "tmp/review-job/job_
 python scripts/jy_wrapper.py review-job-cache-inspect --cache-root "tmp/review-job/cache" --namespace "source_asr" --digest "<sha256>" --json
 ```
 
-Compile writes canonical inputs and `local_window_plan.json`; the phase executor or maintained project script creates `job_state.json` and `job_timing.json`. `review-job-status` is read-only and does not mutate the checkpoint or draft. `review-job-cache-inspect` is also read-only: it validates one cache entry and does not mutate the cache, expose identity inputs, or return secrets. Omit `--full-preview` during compile unless the user explicitly requests a full preview or the acceptance profile requires one. Legacy direct scripts remain available for compatibility, but must produce the same resumable evidence before claiming optimized/source-document final acceptance.
+`review-document-run` writes canonical inputs, `job_state.json`, `job_timing.json`, phase receipts,
+the editable draft, and the validated delivery ZIP. Re-running the same command resumes only
+valid completed phases. `review-job-status` is read-only and does not mutate the checkpoint or
+draft. `review-job-cache-inspect` is also read-only: it validates one cache entry and does not
+mutate the cache, expose identity inputs, or return secrets. Legacy compile/direct commands remain
+available for compatibility, but must produce the same resumable evidence before claiming
+optimized/source-document final acceptance.
 
 ## Step 1: Minimal Environment Check (2 commands max)
 

@@ -378,6 +378,51 @@ def cmd_review_job_compile(
     return make_result(True, "ok", "", data)
 
 
+def cmd_review_document_run(
+    snapshot_json: str | os.PathLike[str],
+    project_json: str | os.PathLike[str],
+    job_root: str | os.PathLike[str],
+    *,
+    drafts_root: str | os.PathLike[str],
+    package_zip: str | os.PathLike[str],
+    relink_tool: str | os.PathLike[str] | None = None,
+    mock_media: bool = False,
+    asr_timeout_seconds: float = 60.0,
+    asr_poll_interval_seconds: float = 2.0,
+    asr_max_wait_seconds: float = 120.0,
+    context_before: float = 5.0,
+    context_after: float = 5.0,
+) -> dict[str, Any]:
+    """Run the public, Lite-only source-document workflow."""
+
+    # Keep the heavy media/ASR runner lazy so parser and status commands stay lightweight.
+    from utils.review_document_runner import ReviewDocumentRunError, run_review_document
+
+    try:
+        data = run_review_document(
+            snapshot_json=snapshot_json,
+            project_json=project_json,
+            job_root=job_root,
+            drafts_root=drafts_root,
+            package_zip=package_zip,
+            relink_tool=relink_tool,
+            mock_media=bool(mock_media),
+            asr_timeout_seconds=asr_timeout_seconds,
+            asr_poll_interval_seconds=asr_poll_interval_seconds,
+            asr_max_wait_seconds=asr_max_wait_seconds,
+            context_before=context_before,
+            context_after=context_after,
+            workflow_mode="lite",
+        )
+    except ReviewDocumentRunError as exc:
+        return make_result(False, "review_document_failed", str(exc), exc.result)
+    except (TypeError, ValueError) as exc:
+        raise UserInputError(str(exc)) from exc
+    if not isinstance(data, Mapping):
+        raise RuntimeError("review-document runner returned a non-object result")
+    return make_result(True, "ok", "", dict(data))
+
+
 def _valid_utc_timestamp(value: str) -> bool:
     if not value.endswith("Z"):
         return False

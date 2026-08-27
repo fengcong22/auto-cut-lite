@@ -27,6 +27,7 @@ from utils.revision_models import (
     lite_execution_required,
     lite_pause_change_is_label_only,
     lite_timing_source,
+    resolve_execution_status,
 )
 from utils.revision_validation import derive_acceptance_profile
 
@@ -632,31 +633,10 @@ def _canonical_review_items(
                 inference_text, kind, explicit_kind=explicit_kind
             )
         execution_required = _execution_required_for_kind(kind, execution_required)
-        execution_status_candidates = [
+        execution_status = resolve_execution_status(
             source_row.get("execution_status"),
-            (
-                source_row.get("evidence", {}).get("execution_status")
-                if isinstance(source_row.get("evidence"), dict)
-                else ""
-            ),
-            (
-                source_row.get("validation", {}).get("execution_status")
-                if isinstance(source_row.get("validation"), dict)
-                else ""
-            ),
-        ]
-        normalized_statuses = [
-            str(status or "").strip()
-            for status in execution_status_candidates
-            if str(status or "").strip()
-        ]
-        execution_status = next(
-            (
-                status
-                for status in normalized_statuses
-                if status.casefold().startswith("label_only_")
-            ),
-            normalized_statuses[0] if normalized_statuses else "",
+            source_row.get("evidence"),
+            source_row.get("validation"),
         )
         if workflow_mode == "lite":
             if lite_pause_change_is_label_only(kind, source_text):

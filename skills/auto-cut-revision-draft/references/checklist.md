@@ -4,7 +4,8 @@ Run this checklist before saying the JianYing revision draft is done.
 
 ## Resumable Job Evidence
 
-- Natural-language source-document work has canonical `review-job-compile` outputs under ignored `tmp/` storage.
+- Natural-language source-document work uses `review-document-run` and keeps its canonical
+  outputs, checkpoints, cache, and receipts under ignored `tmp/` storage.
 - The seven ordered phases in `docs/revision-input-spec.md` have valid input/output digests in atomic `job_state.json` checkpoints; corrupt or mismatched phases alone were rerun.
 - Source ASR, reverse ASR, visual frames, local renders, and document snapshots use the complete cache identities from the input spec.
 - Independent read-only preparation is bounded; JianYing writes, saved-draft inspection, ordered Feishu writes, and overlapping timeline repairs obey their serialization rules.

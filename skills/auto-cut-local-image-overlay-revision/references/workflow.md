@@ -4,7 +4,9 @@ Use this workflow after the main skill routes a review item to local PNG/JPG rep
 
 ## 1. Compile The Canonical Source Ledger
 
-For natural-language source-document jobs, run the maintained `review-job-compile` pipeline. Treat the latest `doc_items` read as canonical and preserve `source_text` code-point-for-code-point in the one marker for each stable item ID.
+For natural-language source-document jobs, run the maintained `review-document-run` pipeline.
+Treat the latest `doc_items` read as canonical and preserve `source_text` code-point-for-code-point
+in the one marker for each stable item ID.
 
 For Feishu/Lark documents, use `lark-doc` to fetch the relevant review section with block IDs. Re-read automatically when an internal row lacks source text or image provenance. Recovery failure does not remove the item; mark it unresolved and keep the most complete unmodified source candidate.
 

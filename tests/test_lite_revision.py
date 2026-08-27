@@ -26,7 +26,7 @@ from utils.lite_revision import (
 )
 from utils.review_job_compiler import compile_review_job
 from utils.revision_markers import build_marker_plan
-from utils.revision_models import _classify_review_text
+from utils.revision_models import _classify_review_text, resolve_execution_status
 from utils.revision_runner import (
     execute_revision_request,
     load_revision_request,
@@ -659,6 +659,116 @@ class LiteRevisionTests(unittest.TestCase):
             with open(full["doc_items"], "r", encoding="utf-8") as source_file:
                 full_item = json.load(source_file)["review_items"][0]
         self.assertTrue(full_item["execution_required"])
+
+    def test_lite_nested_label_only_status_wins_in_loader_and_compiler(self):
+        nested_status = {
+            "routing": {
+                "attempts": [
+                    {
+                        "decision": {
+                            "execution_status": "label_only_unresolved",
+                        }
+                    }
+                ]
+            }
+        }
+        self.assertEqual(
+            resolve_execution_status("pending", nested_status),
+            "label_only_unresolved",
+        )
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteNestedLabelOnly",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "nested-evidence",
+                        "kind": "visual_overlay",
+                        "source_text": "02:00 add the supplied image",
+                        "start": 2.0,
+                        "execution_required": True,
+                        "execution_status": "pending",
+                        "evidence": nested_status,
+                    },
+                    {
+                        "id": "nested-validation",
+                        "kind": "visual_overlay",
+                        "source_text": "03:00 add the supplied image",
+                        "start": 3.0,
+                        "execution_required": True,
+                        "execution_status": "pending",
+                        "validation": {
+                            "layers": [
+                                {"status": "label_only_lite_policy"},
+                            ]
+                        },
+                    },
+                ],
+            }
+        )
+        self.assertEqual(
+            [item.execution_status for item in request.review_items],
+            ["label_only_unresolved", "label_only_lite_policy"],
+        )
+        self.assertEqual(
+            [item.execution_required for item in request.review_items],
+            [False, False],
+        )
+
+        rows = [
+            {
+                "id": "compiled-nested",
+                "kind": "visual_overlay",
+                "source_text": "02:00 add the supplied image",
+                "start": 2.0,
+                "execution_required": True,
+                "execution_status": "pending",
+                "evidence": nested_status,
+            },
+            {
+                "id": "signed-before-cn",
+                "kind": "review_only",
+                "source_text": "05:00 +1s 停顿",
+                "execution_required": True,
+            },
+            {
+                "id": "signed-before-en",
+                "kind": "review_only",
+                "source_text": "06:00 -2.5s gap",
+                "execution_required": True,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {"review_items": rows},
+                {
+                    "draft_name": "LiteNestedCompiler",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                items = {
+                    item["id"]: item
+                    for item in json.load(source_file)["review_items"]
+                }
+
+        self.assertEqual(
+            items["compiled-nested"]["execution_status"],
+            "label_only_unresolved",
+        )
+        self.assertFalse(items["compiled-nested"]["execution_required"])
+        for item_id in ("signed-before-cn", "signed-before-en"):
+            self.assertFalse(items[item_id]["execution_required"])
+            self.assertEqual(
+                items[item_id]["execution_status"],
+                "label_only_lite_policy",
+            )
 
     def test_lite_mixed_visual_behavior_passes_strict_acceptance(self):
         request = _load_request(
@@ -1691,6 +1801,61 @@ class LiteRevisionTests(unittest.TestCase):
                 for error in forged_validation["errors"]
             ),
             forged_validation["errors"],
+        )
+
+        forged_v2_content = json.loads(json.dumps(clean_content))
+        forged_v2_segment = json.loads(json.dumps(source_segment))
+        forged_v2_segment["id"] = "forged-v2-segment"
+        forged_v2_segment["material_id"] = "forged-v2-material"
+        forged_v2_segment["target_timerange"] = {
+            "start": 2_000_000,
+            "duration": 1_000_000,
+        }
+        forged_v2_segment["source_timerange"] = {
+            "start": 2_000_000,
+            "duration": 1_000_000,
+        }
+        _track(forged_v2_content, LITE_TRACKS["cut_segments"])["segments"].append(
+            forged_v2_segment
+        )
+        forged_v2_validation = _validate_lite_content(
+            forged_v2_content,
+            total_duration=10.0,
+            marker_plan=[],
+            marker_receipts=[],
+            reused_audio_expected=False,
+            source_video_material_id=source_material_id,
+            source_video_path=request.project.source_video,
+        )
+        self.assertFalse(forged_v2_validation["ok"])
+        self.assertTrue(
+            any(
+                LITE_TRACKS["cut_segments"] in error
+                and "contains non-source video material" in error
+                for error in forged_v2_validation["errors"]
+            ),
+            forged_v2_validation["errors"],
+        )
+
+        wrong_path_content = json.loads(json.dumps(clean_content))
+        next(
+            material
+            for material in wrong_path_content["materials"]["videos"]
+            if material["id"] == source_material_id
+        )["path"] = "C:/media/not-the-source.mp4"
+        wrong_path_validation = _validate_lite_content(
+            wrong_path_content,
+            total_duration=10.0,
+            marker_plan=[],
+            marker_receipts=[],
+            reused_audio_expected=False,
+            source_video_material_id=source_material_id,
+            source_video_path=request.project.source_video,
+        )
+        self.assertFalse(wrong_path_validation["ok"])
+        self.assertIn(
+            "Lite source video material path does not match project.source_video.",
+            wrong_path_validation["errors"],
         )
 
         extended_content = json.loads(json.dumps(clean_content))

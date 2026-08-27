@@ -52,8 +52,24 @@ executing, or validating a review item. Read
 
 ## Execution
 
-Build the canonical request and ledger through the maintained runtime. For strict editable draft
-execution use:
+For a natural-language source-document job, use the maintained public runner:
+
+```powershell
+python scripts/jy_wrapper.py review-document-run `
+  --snapshot-json "<document_snapshot.json>" `
+  --project-json "<project.json>" `
+  --job-root "<workspace>\tmp\<job-name>" `
+  --drafts-root "<JianYing drafts root>" `
+  --package-zip "<output>\<name>.zip" `
+  --json
+```
+
+It owns compilation, strict cache identities, ASR, editable draft writing, final acceptance,
+packaging, and phase recovery. Run the same command again after interruption. A completed phase
+resumes only while its digest and receipt-bound artifacts still validate.
+
+When a maintained caller already has the canonical request and ledger, the low-level strict
+editable-draft command remains:
 
 ```powershell
 python scripts/jy_wrapper.py revision-run `
@@ -65,8 +81,9 @@ python scripts/jy_wrapper.py revision-run `
   --json
 ```
 
-When the user requests a complete portable delivery, add
-`--package-zip "<output>\\<name>.zip"`. A complete Lite delivery ends only after strict saved
+For the low-level command, add `--package-zip "<output>\\<name>.zip"` when the user requests a
+complete portable delivery. The public runner already requires that path. A complete Lite delivery
+ends only after strict saved
 draft validation, ZIP CRC validation, isolated extraction, tree-hash comparison, and an external
 receipt. Packaging stays offline and must not open JianYing or rewrite draft JSON.
 

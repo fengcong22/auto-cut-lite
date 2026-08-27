@@ -2,7 +2,17 @@
 
 ## 0. Compile Or Resume The Canonical Job
 
-For a source-document job, run `review-job-compile` first and resume valid phases from `job_state.json`. Reuse source ASR only when source audio SHA256, preprocessing, provider/model/resource ID, and adapter version all match. Reuse reverse ASR only for the identical complete final candidate audio SHA256 and ASR identity; any spoken-audio change still needs the final full-candidate gate. Every segmented reverse report also binds the normalized plan SHA-256. Its real attributable result rows must match each item's strategy, delete/must-keep phrases, physical cut windows, plan-derived join times, local transcript, delete/keep hits, and semantic-join status; aggregate status counts or a generic item-level pass cannot substitute for rows. Candidate duration must cover the segmented timeline after only pairwise, exactly adjacent two-sided crossfades. Validation hashes and fully decodes the actual candidate, including a full FFmpeg stream decode for non-WAV files. Cache hits never waive `delete`, `must_keep`, semantic-join, or final-acceptance evidence.
+For a source-document job, run `review-document-run` and resume valid phases from
+`job_state.json`. Use `review-job-compile` only as a low-level compatibility step when a maintained
+caller owns the rest of the phase DAG. Reuse source ASR only when source audio SHA256,
+preprocessing, provider/model/resource ID, and adapter version all match. Reuse reverse ASR only
+for the identical complete final candidate audio SHA256, normalized plan SHA-256, and ASR
+identity; any spoken-audio change still needs the final full-candidate gate. Its real attributable
+result rows must match each item's strategy, delete/must-keep phrases, physical cut windows,
+plan-derived join times, local transcript, delete/keep hits, and semantic-join status; aggregate
+status counts or a generic item-level pass cannot substitute for rows. Candidate duration must
+equal the source timeline. Cache hits never waive `delete`, `must_keep`, semantic-join, or final
+acceptance evidence.
 
 The local transcript must contain alphanumeric content, and transcript aliases must agree after normalization. Cross-check each row's hit fields against its normalized local transcript: the transcript must not contain the delete phrase and must support every `must_keep` phrase. A retained same-word occurrence requires exactly one positive `delete_hit` and structured `delete_hit_adjudication` with `classification=kept_recurrence`, `occurrence_role`, `phrase`, `local_context`, `context_anchor`, and `reason`; the local context must occur in the transcript, the context anchor is not a substring of the delete phrase, and that anchor remains after removing the delete phrase from the local context. Multiple positive `delete_hits` or multiple local transcript delete occurrences, including overlapping occurrences, require per-hit adjudication and fail until one-to-many receipts are supported.
 

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.5.5+codex.20260827081110",
+  "plugin_version": "1.6.0+codex.20260827070523",
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"
@@ -59,7 +59,10 @@
       "required_paths": [
         "runtime/scripts/jy_wrapper.py",
         "runtime/scripts/review_job.py",
+        "runtime/scripts/cli/jy_wrapper_parser.py",
         "runtime/scripts/utils/replacement_timebase.py",
+        "runtime/scripts/utils/review_audio_precision.py",
+        "runtime/scripts/utils/review_document_runner.py",
         "runtime/scripts/utils/review_job_compiler.py",
         "runtime/scripts/utils/review_job_pipeline.py"
       ]

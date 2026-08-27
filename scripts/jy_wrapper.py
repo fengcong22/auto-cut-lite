@@ -70,6 +70,7 @@ from utils.revision_runner import (
     validate_saved_revision_draft,
 )
 from review_job import (
+    cmd_review_document_run,
     cmd_review_job_cache_inspect,
     cmd_review_job_compile,
     cmd_review_job_status,
@@ -2490,6 +2491,20 @@ def _build_command_handlers():
             relink_tool=args.relink_tool,
             package_root_name=args.package_root_name,
             package_receipt=args.package_receipt,
+        ),
+        "review-document-run": lambda args: cmd_review_document_run(
+            args.snapshot_json,
+            args.project_json,
+            args.job_root,
+            drafts_root=args.drafts_root,
+            package_zip=args.package_zip,
+            relink_tool=args.relink_tool,
+            mock_media=args.mock_media,
+            asr_timeout_seconds=args.asr_timeout_seconds,
+            asr_poll_interval_seconds=args.asr_poll_interval_seconds,
+            asr_max_wait_seconds=args.asr_max_wait_seconds,
+            context_before=args.context_before,
+            context_after=args.context_after,
         ),
         "review-job-compile": lambda args: cmd_review_job_compile(
             args.snapshot_json,

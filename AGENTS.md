@@ -148,7 +148,12 @@ When returning a revision result, report:
 
 ## Resumable Review Pipeline
 
-- Future natural-language source-document jobs use `review-job-compile` and the resumable job tooling by default. Legacy direct scripts remain compatible, but cannot claim optimized/source-document final acceptance without the same saved evidence.
+- Natural-language source-document jobs use `review-document-run` by default. That maintained
+  command owns compilation, strict content-addressed cache reuse, source ASR, full-candidate
+  reverse ASR, editable draft writing, final acceptance, ZIP publication, and phase recovery.
+- `review-job-compile` and `revision-run` remain low-level compatibility commands for callers that
+  already have canonical intermediate files. They cannot claim optimized/source-document final
+  acceptance without the same saved evidence and completed phase receipts.
 - Keep runtime cache, checkpoints, compiled inputs, and timing artifacts under ignored `tmp/` paths.
 - Each resumable job writes `job_state.json` and `job_timing.json`. Phase reporting includes `started_at`, `finished_at`, `elapsed_seconds`, `active_seconds`, `wait_seconds`, cache hit/miss through `cache_hit`, `retry_count`, `worker_count` where available, `item_ids`, `input_digest`, `output_digest`, and `unresolved_item_ids`. Reports contain no secrets.
 - The final user report separates active compute, external API wait, and application/user blocking. The first optimized real job establishes the baseline; compare later runs by media duration and item/gate mix, not wall clock alone.

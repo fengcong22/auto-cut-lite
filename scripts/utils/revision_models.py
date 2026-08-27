@@ -298,9 +298,10 @@ _LITE_LABEL_ONLY_KINDS = {
 _LITE_PAUSE_CHANGE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改).{0,8}(?:停顿|间隔)",
-        r"(?:停顿|间隔).{0,8}(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改|加\s*\+?\s*\d|减\s*\d)",
-        r"(?:停顿|间隔|pause|gap)\s*[+-]\s*\d",
+        r"(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改).{0,16}(?:停顿|间隔)",
+        r"(?:停顿|间隔).{0,16}(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改|加\s*\+?\s*\d|减\s*\d)",
+        r"(?:停顿|间隔|pause|gap).{0,8}[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?",
+        r"[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?\s*(?:的)?(?:停顿|间隔|pause|gap)",
         r"(?:删除|删掉|去掉|移除).{0,6}(?:这段|这个|该段|该)?(?:停顿|间隔)",
         r"(?:add|increase|extend|shorten|reduce|remove|delete|adjust).{0,16}(?:pause|gap)",
         r"(?:pause|gap).{0,16}(?:add|increase|extend|shorten|reduce|remove|delete|adjust)",
@@ -392,21 +393,54 @@ def lite_pause_change_is_label_only(kind: str, source_text: str) -> bool:
     return any(pattern.search(text) for pattern in _LITE_PAUSE_CHANGE_PATTERNS)
 
 
-def review_item_execution_status(item: RevisionReviewItem) -> str:
-    """Read the authoritative internal execution status from one review item."""
+def _nested_execution_statuses(value: Any, *, status_value: bool = False) -> Iterable[str]:
+    """Yield execution statuses from arbitrarily nested JSON-shaped metadata."""
 
-    statuses = [getattr(item, "execution_status", "")]
-    for payload in (getattr(item, "evidence", None), getattr(item, "validation", None)):
-        if not isinstance(payload, dict):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            normalized_key = str(key or "").strip().casefold()
+            if normalized_key == "execution_status":
+                yield from _nested_execution_statuses(nested, status_value=True)
+            elif normalized_key == "status":
+                for candidate in _nested_execution_statuses(nested, status_value=True):
+                    if candidate.casefold().startswith("label_only_"):
+                        yield candidate
+            if isinstance(nested, (dict, list, tuple)):
+                yield from _nested_execution_statuses(nested)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            yield from _nested_execution_statuses(nested, status_value=status_value)
+        return
+    if status_value and value is not None:
+        candidate = str(value).strip()
+        if candidate:
+            yield candidate
+
+
+def resolve_execution_status(*sources: Any) -> str:
+    """Prefer any nested label-only status, then the first ordinary status."""
+
+    statuses: List[str] = []
+    for source in sources:
+        if isinstance(source, (dict, list, tuple)):
+            statuses.extend(_nested_execution_statuses(source))
             continue
-        status = payload.get("execution_status")
-        statuses.append(status)
-        if str(payload.get("status") or "").strip().casefold() == "label_only_unresolved":
-            statuses.append("label_only_unresolved")
-    normalized = [str(status or "").strip() for status in statuses if str(status or "").strip()]
+        statuses.extend(_nested_execution_statuses(source, status_value=True))
+    normalized = list(dict.fromkeys(status for status in statuses if status))
     return next(
         (status for status in normalized if status.casefold().startswith("label_only_")),
         normalized[0] if normalized else "",
+    )
+
+
+def review_item_execution_status(item: RevisionReviewItem) -> str:
+    """Read the authoritative internal execution status from one review item."""
+
+    return resolve_execution_status(
+        getattr(item, "execution_status", ""),
+        getattr(item, "evidence", None),
+        getattr(item, "validation", None),
     )
 
 
@@ -662,12 +696,11 @@ def _parse_review_item(item: Any, idx: int, field_name: str) -> RevisionReviewIt
         raise ValueError(f"{field_name}[{idx}].evidence must be an object when provided.")
     if not isinstance(validation, dict):
         raise ValueError(f"{field_name}[{idx}].validation must be an object when provided.")
-    execution_status = str(
-        item.get("execution_status")
-        or evidence.get("execution_status")
-        or validation.get("execution_status")
-        or ""
-    ).strip()
+    execution_status = resolve_execution_status(
+        item.get("execution_status"),
+        evidence,
+        validation,
+    )
     return RevisionReviewItem(
         item_id=item_id,
         kind=kind,
