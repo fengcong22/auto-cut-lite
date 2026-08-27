@@ -807,6 +807,7 @@ def test_uninstaller_is_receipt_scoped_and_preserves_unrelated_registrations() -
     fallback_python_index = uninstaller.index("Get-Command 'python'", managed_python_index)
     assert managed_python_index < fallback_python_index
     assert "Remove-OwnedPluginTree -Path $targetRoot" in uninstaller
+    assert "'workspace-staging'" in uninstaller
     assert "'deployment-attempt-report.json'" in uninstaller
     assert "Remove-Item -LiteralPath $stateRoot -Recurse" not in uninstaller
     assert "Deployment report target root does not match" in uninstaller
@@ -873,6 +874,9 @@ def test_uninstaller_uses_managed_python_utf8_and_removes_attempt_report(
     )
     (state_root / "workspace-install-receipt.json").write_text("{}", encoding="utf-8")
     (state_root / "dependency-transaction.json").write_text("{}", encoding="utf-8")
+    workspace_staging = state_root / "workspace-staging"
+    workspace_staging.mkdir()
+    (workspace_staging / "stale-operation.json").write_text("{}", encoding="utf-8")
     attempt_report = state_root / "deployment-attempt-report.json"
     attempt_report.write_text('{"deployment_status":"failed"}', encoding="utf-8")
     (state_root / "deployment-report.json").write_text(
@@ -926,6 +930,7 @@ def test_uninstaller_uses_managed_python_utf8_and_removes_attempt_report(
     assert result.returncode == 0, result.stdout + result.stderr
     assert "PATH Python must not be used" not in result.stdout + result.stderr
     assert not attempt_report.exists()
+    assert not workspace_staging.exists()
     assert not state_root.exists()
     uninstall_report = json.loads(
         (local_app_data / "Auto-Cut" / "auto-cut-lite-uninstall-report.json").read_text(

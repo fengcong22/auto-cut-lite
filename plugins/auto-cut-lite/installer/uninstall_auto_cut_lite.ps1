@@ -342,7 +342,13 @@ try {
     foreach ($backup in @(Get-ChildItem -LiteralPath $targetParent -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith('.auto-cut-lite.backup.', [StringComparison]::Ordinal) })) {
         Remove-OwnedPluginTree -Path $backup.FullName
     }
-    foreach ($ownedDirectory in @('workspace-backups', 'dependency-backups', 'legacy-personal-backups', 'config')) {
+    foreach ($ownedDirectory in @(
+        'workspace-staging',
+        'workspace-backups',
+        'dependency-backups',
+        'legacy-personal-backups',
+        'config'
+    )) {
         $ownedPath = Join-Path $stateRoot $ownedDirectory
         if (Test-Path -LiteralPath $ownedPath) { Remove-Item -LiteralPath $ownedPath -Recurse -Force }
     }
