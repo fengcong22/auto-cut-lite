@@ -1,6 +1,6 @@
 ---
 name: auto-cut-lite
-description: Use for the packaged Auto-Cut Lite compact workflow, including editable JianYing review drafts, fixed trace tracks, source-text-exact two-second labels, simple supplied local overlays, duration-preserving cuts, ASR-located pause labels, and portable ZIP delivery.
+description: Use for the packaged Auto-Cut Lite compact workflow, including editable JianYing review drafts, fixed trace tracks, source-text-exact two-second labels, simple supplied local overlays, duration-preserving cuts, ASR-first timing with review-time fallback, and portable ZIP delivery.
 ---
 
 # Auto-Cut Lite
@@ -16,30 +16,32 @@ executing, or validating a review item. Read
   only.
 - Preserve editable source/cut/audio structure. Deletion does not compress the timeline, and final
   duration always equals source duration.
-- Treat every request to add, extend, shorten, or otherwise adjust a pause, including `+Ns`,
-  `-Ns`, and `semantic_pause_adjustment`, as label-only. Use word/character ASR to resolve its
-  authoritative point, then keep one exact `source_text` label there. Do not create
+- Except for a word/character-ASR-proved spoken deletion, treat every request that can change
+  duration as label-only. This includes pause changes, `+Ns`, `-Ns`, speed changes, holds, still
+  frames, and `semantic_pause_adjustment`. Use a uniquely resolved ASR point when available;
+  otherwise use the time written in the review comment. Keep one exact `source_text` label. Do not create
   `pause_adjustments`, holds, still frames, audio gaps, duration changes, or later-track offsets.
 - Keep exactly one two-second review label per source item, clamped at final project end. Its
   visible text must equal only `source_text` code-point-for-code-point.
 - Keep `execution_status`, `label_only_unresolved`, item IDs, warnings, and diagnostics only in
   internal metadata, receipts, validation output, and reports; never put them in a visible label.
-- Every issue locatable through speech or audio must use authoritative word/character ASR before
-  executable routing or label placement. This includes spoken deletion, pause requests,
-  pronunciation, breath, mouth noise, and speech timing. Place its verbatim label at the final
-  ASR-resolved window or point; the review-document timestamp is only a search hint. Only spoken
-  deletion or another explicitly maintained non-pause operation may execute. Missing ASR fails
-  closed.
-- Only completely non-speech items use the review timestamp. If the comment says
+- Every issue locatable through speech or audio must attempt authoritative word/character ASR
+  before executable routing. Only a uniquely located spoken deletion may change duration. Place a
+  non-executing item's verbatim label at its unique ASR point, or at the review-comment time when
+  ASR cannot locate it.
+- Review-only and ASR-unresolved items use the review timestamp. If the comment says
   `07:14 ... 提前到 07:12`, use the target `07:12`. Accept a point timestamp for the label and
   never fall back to `0:00` for unresolved timing.
-- If a newly encountered issue has a reliable authoritative start but no safe maintained
-  implementation, leave one original-text label, record
+- Every newly encountered or unrecognized issue is label-only by default. If it has a reliable
+  start but no safe maintained implementation, leave one original-text label, record
   `execution_status=label_only_unresolved` internally, skip that execution, and continue
-  independent items. If timing is unreliable, or an audio-identifiable issue lacks authoritative
-  ASR, fail before opening or writing the draft.
+  independent items. If ASR cannot locate it, use the review-comment time. Fail before draft
+  writing only when neither source supplies a valid time; never fall back to `0:00`.
 - Insert supplied pointer or picture files on `Lite Visual Assets` at the requested start using
   JianYing default geometry and no keyframes.
+- When one hand/pointer row omitted its attachment, reuse an attachment only from another row with
+  the same normalized modification name and only when the candidate is unique. Multiple candidates
+  return structured `user_action_required`; never guess.
 - Keep animation/picture-timing, text-position/animation, and existing-hand cleanup requests
   label-only.
 - Keep `Lite Timing Adjusted` empty. Ignore clean-cover/cleanup asset specs.
@@ -89,7 +91,7 @@ receipt. Packaging stays offline and must not open JianYing or rewrite draft JSO
 
 Report the draft path, review-item coverage, editable structure, visual insertions versus
 label-only items, confirmation that final duration equals source duration, pause requests kept as
-ASR-located labels, strict acceptance result, and delivery ZIP/receipt when requested. Before
+ASR-first/review-time-fallback labels, strict acceptance result, and delivery ZIP/receipt when requested. Before
 non-mock execution, validate the deployment report,
 package-manifest anchor, and managed runtime inventory. Runtime drift is a pre-execution hard stop
 that requires redeployment from a verified package; never hot-patch it or use another checkout.

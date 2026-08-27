@@ -13,5 +13,7 @@ Invoke this skill only for an explicit profile-library administration request. S
 administration may inspect or update target-local profile data, but it must not change the fixed
 Lite editing behavior and must not become a prerequisite for inserting a supplied pointer.
 
-For a normal Lite request with no supplied pointer file, retain the review label and report the
-missing insertion. Do not open an onboarding handoff.
+For a normal Lite request with no pointer attachment, first apply the Lite contract's unique
+same-normalized-modification-name reuse rule. Multiple candidates return structured
+`user_action_required`; no candidate retains the review label and reports the missing insertion.
+Do not open an onboarding handoff.

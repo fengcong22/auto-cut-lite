@@ -4,7 +4,9 @@ param(
     [switch]$SkipAudio,
     [switch]$ValidateOnly,
     [switch]$UseChinaMirrors,
-    [string]$WorkspaceRoot
+    [string]$WorkspaceRoot,
+    [string]$LocalAppDataRoot,
+    [string]$UserProfileRoot
 )
 
 Set-StrictMode -Version Latest
@@ -19,8 +21,24 @@ $expectedWorkspaceSkillCount = 17
 $codexNpmPackage = '@openai/codex@0.149.1'
 $startedAt = [DateTime]::UtcNow.ToString('o')
 $packageRoot = [System.IO.Path]::GetFullPath($PSScriptRoot)
-$userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$userProfileCandidate = if (-not [string]::IsNullOrWhiteSpace($UserProfileRoot)) {
+    $UserProfileRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    $env:USERPROFILE
+} else {
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+}
+$localAppDataCandidate = if (-not [string]::IsNullOrWhiteSpace($LocalAppDataRoot)) {
+    $LocalAppDataRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $env:LOCALAPPDATA
+} else {
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+}
+$userProfile = [System.IO.Path]::GetFullPath($userProfileCandidate)
+$localAppData = [System.IO.Path]::GetFullPath($localAppDataCandidate)
+$env:USERPROFILE = $userProfile
+$env:LOCALAPPDATA = $localAppData
 $stateRoot = Join-Path $localAppData 'Auto-Cut\auto-cut-lite'
 $marketplaceRoot = Join-Path $stateRoot 'marketplace'
 $targetParent = Join-Path $marketplaceRoot 'plugins'
@@ -42,6 +60,8 @@ $pluginBackup = $null
 $marketplaceRegistration = $null
 $personalMarketplaceCleanup = $null
 $workspaceInstall = $null
+$dependencyTransaction = $null
+$dependencyTransactionCommitted = $false
 $codexEvidence = $null
 $marketplaceWasConfigured = $false
 $namedPluginWasInstalled = $false
@@ -215,15 +235,26 @@ function Read-AndValidatePackageManifest {
             throw "Package file hash mismatch: $relative"
         }
     }
+    $portableContractPath = Join-Path $packageRoot 'PORTABLE-CAPABILITIES.json'
+    if (-not (Test-Path -LiteralPath $portableContractPath -PathType Leaf)) {
+        throw 'PORTABLE-CAPABILITIES.json is missing.'
+    }
+    $portableContract = Get-Content -LiteralPath $portableContractPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $workspaceContract = $portableContract.workspace_installation
     foreach ($required in @(
         '.codex-plugin/plugin.json',
         'AGENTS.md',
-        'CODEX_NEXT_STEPS.md',
-        'START-AUTO-CUT-LITE.cmd',
+        'PORTABLE-CAPABILITIES.json',
+        [string]$workspaceContract.beginner_guide,
+        [string]$workspaceContract.post_install_guide,
+        [string]$workspaceContract.one_click_launcher,
+        [string]$workspaceContract.one_click_uninstaller,
         'deploy-to-codex.ps1',
         'installer/manage_named_marketplace.py',
         'installer/one_click_deploy.ps1',
+        'installer/manage_runtime_dependencies.py',
         'installer/manage_workspace.py',
+        'installer/uninstall_auto_cut_lite.ps1',
         'workspace-payload/skills/auto-cut/SKILL.md',
         'runtime/requirements.txt',
         'runtime/requirements-audio.lock'
@@ -487,6 +518,15 @@ try {
     if ([string]::IsNullOrWhiteSpace($userProfile) -or [string]::IsNullOrWhiteSpace($localAppData)) {
         throw 'Windows user profile paths could not be resolved.'
     }
+    foreach ($deploymentRoot in @($userProfile, $localAppData)) {
+        if (-not [System.IO.Path]::IsPathRooted($deploymentRoot)) {
+            throw "Deployment roots must be absolute paths: $deploymentRoot"
+        }
+        $deploymentAnchor = [System.IO.Path]::GetPathRoot($deploymentRoot)
+        if ([string]::Equals($deploymentRoot.TrimEnd('\'), $deploymentAnchor.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Deployment roots cannot be filesystem roots: $deploymentRoot"
+        }
+    }
 
     $previousWorkspaceReceipt = $null
     if (Test-Path -LiteralPath $workspaceReceiptPath -PathType Leaf) {
@@ -615,6 +655,8 @@ try {
         Write-Output "marketplace_name=$marketplaceName"
         Write-Output "marketplace_display_name=$marketplaceDisplayName"
         Write-Output "workspace_root=$resolvedWorkspaceRoot"
+        Write-Output "local_app_data_root=$localAppData"
+        Write-Output "user_profile_root=$userProfile"
         Write-Output "workspace_root_source=$workspaceRootSource"
         Write-Output "workspace_root_customizable=true"
         Write-Output "workspace_mode=combined_package_workspace"
@@ -647,48 +689,48 @@ try {
         $targetActivated = $true
     }
 
-    $runtimeVenv = Join-Path $targetRoot '.runtime-venv'
-    if (-not (Test-Path -LiteralPath (Join-Path $runtimeVenv 'Scripts\python.exe') -PathType Leaf)) {
-        & $pythonEvidence.path '-m' 'venv' $runtimeVenv
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to create the isolated Auto-Cut Python environment.'
-        }
+    $dependencyHelper = Join-Path $targetRoot 'installer\manage_runtime_dependencies.py'
+    $dependencyArguments = @(
+        $dependencyHelper,
+        'install',
+        '--plugin-root', $targetRoot,
+        '--base-python', [string]$pythonEvidence.path,
+        '--state-root', $stateRoot,
+        '--json'
+    )
+    if ($oldTargetBackedUp -and $null -ne $pluginBackup) {
+        $dependencyArguments += @('--previous-plugin-root', $pluginBackup)
     }
-    $runtimePython = Join-Path $runtimeVenv 'Scripts\python.exe'
-    & $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\requirements.txt')
+    elseif ($sourceIsTarget) {
+        $dependencyArguments += @('--previous-plugin-root', $targetRoot)
+    }
+    if (-not $audioRequested) {
+        $dependencyArguments += '--skip-audio'
+    }
+    $dependencyOutput = & $pythonEvidence.path @dependencyArguments
     if ($LASTEXITCODE -ne 0) {
-        throw 'Failed to install the Auto-Cut runtime dependencies.'
+        throw "Runtime dependency transaction failed: $dependencyOutput"
     }
-    & $runtimePython '-m' 'pip' 'check'
-    if ($LASTEXITCODE -ne 0) {
-        throw 'The isolated Auto-Cut Python environment failed pip check.'
+    $dependencyTransaction = $dependencyOutput | ConvertFrom-Json
+    if ($dependencyTransaction.status -ne 'prepared') {
+        throw 'Runtime dependency transaction returned an invalid status.'
     }
+    $runtimePython = [string]$dependencyTransaction.environments.main.runtime_path
     $report.components.python.runtime_path = $runtimePython
-    $report.components.python.dependencies = 'installed'
+    $report.components.python.dependencies = [string]$dependencyTransaction.environments.main.action
+    $report.components.python.requirements_sha256 = [string]$dependencyTransaction.environments.main.lock_sha256
+    $report.components.python.pip_check = [string]$dependencyTransaction.environments.main.pip_check
 
-    $audioVenv = Join-Path $targetRoot 'runtime\.venv-audio'
-    $audioPython = Join-Path $audioVenv 'Scripts\python.exe'
-    if ($audioRequested) {
-        if (-not (Test-Path -LiteralPath $audioPython -PathType Leaf)) {
-            & $pythonEvidence.path '-m' 'venv' $audioVenv
-            if ($LASTEXITCODE -ne 0) {
-                throw 'Failed to create the isolated Auto-Cut audio environment.'
-            }
-        }
-        & $audioPython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\requirements-audio.lock')
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Failed to install the isolated audio restoration dependencies.'
-        }
-        & $audioPython '-m' 'pip' 'check'
-        if ($LASTEXITCODE -ne 0) {
-            throw 'The isolated Auto-Cut audio environment failed pip check.'
-        }
-    }
+    $audioResult = $dependencyTransaction.environments.audio
     $report.components.audio_runtime = [ordered]@{
         status = $(if ($audioRequested) { 'installed' } else { 'skipped_by_request' })
-        runtime_path = $(if ($audioRequested) { $audioPython } else { $null })
+        action = [string]$audioResult.action
+        reason = [string]$audioResult.reason
+        runtime_path = $(if ($audioRequested) { [string]$audioResult.runtime_path } else { $null })
         environment = 'separate'
         requirements = 'runtime/requirements-audio.lock'
+        requirements_sha256 = $(if ($audioRequested) { [string]$audioResult.lock_sha256 } else { $null })
+        pip_check = $(if ($audioRequested) { [string]$audioResult.pip_check } else { $null })
     }
 
     $larkEvidence = Get-CommandEvidence -Name 'lark-cli'
@@ -831,6 +873,18 @@ try {
     $report.deployment_status = 'installed'
     $report.readiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
     Write-DeploymentReport -Payload $report
+    $dependencyCommitOutput = & $pythonEvidence.path $dependencyHelper 'commit' `
+        '--receipt-path' ([string]$dependencyTransaction.transaction_receipt_path) `
+        '--state-root' $stateRoot `
+        '--json'
+    if ($LASTEXITCODE -ne 0) {
+        throw "Runtime dependency transaction commit failed: $dependencyCommitOutput"
+    }
+    $dependencyCommit = $dependencyCommitOutput | ConvertFrom-Json
+    if ($dependencyCommit.status -ne 'committed') {
+        throw 'Runtime dependency transaction commit returned an invalid status.'
+    }
+    $dependencyTransactionCommitted = $true
 
     Write-Host ''
     Write-Host "Auto-Cut Lite $($report.plugin_version) has been installed in Codex."
@@ -850,6 +904,18 @@ try {
 catch {
     $originalError = $_.Exception.Message
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+
+    if ($null -ne $dependencyTransaction -and -not $dependencyTransactionCommitted -and $null -ne $pythonEvidence) {
+        try {
+            $dependencyHelperForRollback = Join-Path $packageRoot 'installer\manage_runtime_dependencies.py'
+            & $pythonEvidence.path $dependencyHelperForRollback 'rollback' `
+                '--receipt-path' ([string]$dependencyTransaction.transaction_receipt_path) `
+                '--state-root' $stateRoot `
+                '--json' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'dependency rollback returned a failure code' }
+        }
+        catch { $rollbackErrors.Add("dependency rollback failed: $($_.Exception.Message)") }
+    }
 
     if ($workspaceRollbackNeeded -and $null -ne $pythonEvidence) {
         try {

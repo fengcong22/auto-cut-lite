@@ -3,14 +3,15 @@
 Run this checklist before saying the JianYing revision draft is done.
 
 For the packaged workspace's required `workflow_mode=lite`, every request to add, extend, shorten,
-or otherwise adjust a pause is label-only at its authoritative ASR point. The Lite rules below
-replace any inherited full-workflow pause-mutation gate.
+or otherwise adjust a pause is label-only at a unique ASR point or review-time fallback. The Lite
+rules below replace any inherited full-workflow pause-mutation gate.
 
 ## Resumable Job Evidence
 
 - Natural-language source-document work uses `review-document-run` and keeps its canonical
   outputs, checkpoints, cache, and receipts under ignored `tmp/` storage.
-- The seven ordered phases in `docs/revision-input-spec.md` have valid input/output digests in atomic `job_state.json` checkpoints; corrupt or mismatched phases alone were rerun.
+- The ten ordered public-runner phases in the Lite input spec have valid input/output digests in
+  atomic `job_state.json` checkpoints; corrupt or mismatched phases and their dependents were rerun.
 - Source ASR, reverse ASR, visual frames, local renders, and document snapshots use the complete cache identities from the input spec.
 - Independent read-only preparation is bounded; JianYing writes, saved-draft inspection, ordered Feishu writes, and overlapping timeline repairs obey their serialization rules.
 - `job_timing.json` identifies phase time, wait, cache status, retries, workers where available, item IDs, digests, and unresolved items without secrets.
@@ -48,7 +49,7 @@ For precise spoken-word revision:
 - The processed audible narration is on a distinct replacement-audio track.
 - Exact duck/mute tail-cleanup windows, if used, are recorded in the audio report.
 - Post-delete pause requests are recorded separately from delete-window accuracy as non-executing
-  source-text-only labels at authoritative ASR points.
+  source-text-only labels at unique ASR points or review-time fallbacks.
 - No pause shortening, extension, addition, `semantic_pause_adjustment`, visual-hold repair, or
   other pause mutation is executed in Lite.
 - No pause request creates a hold, still-frame segment, hidden mute, audio gap, duration change, or
@@ -97,9 +98,9 @@ For precise spoken-word revision:
 - The full candidate is fully decoded, binds the normalized segmented plan digest, and covers its timeline after only exactly adjacent two-sided crossfades; isolated fades add no duration allowance, and every spoken-delete row's transcript, cut/join mapping, delete/keep hits, and semantic-join validation match the same item contract rather than a generic pass.
 - Same-word recurrence is only accepted when an adjudication explains why the hit belongs to a later kept phrase.
 - Pause-label validation reports every pause item as `execution_required=false`, with its stable item
-  ID, exact `source_text`, authoritative ASR point, and marker receipt.
-- Every pause item binds current source word/character ASR identity and timing. Utterance-only or
-  transcript-only ASR is insufficient, and the review timestamp remains only a search hint.
+  ID, exact `source_text`, selected ASR or review-time source, and marker receipt.
+- Every pause item attempts current source word/character ASR. A unique ASR point binds its identity
+  and timing; an ASR failure or non-unique result binds `review_timestamp_fallback` instead.
 - The request and saved draft contain no executable `semantic_pause_adjustment` or
   `pause_adjustments` row and no pause-generated media segment.
 - Final duration equals source duration, and all later targets retain their original source-aligned
@@ -115,13 +116,12 @@ For precise spoken-word revision:
 - For an externally written new draft, returning to the draft home page is not a refresh. Only when the target draft is not visible, protect unsaved work, perform one complete JianYing process exit and relaunch, then confirm the exact draft name and timeline ID. Once the target draft is open, do not exit it merely to refresh or repeat evidence capture.
 - Retention was deferred until after validation and final acceptance, so cleanup did not hide an unresolved failure or remove the last accepted fallback.
 
-## Visual Revisions
+## Lite Visual Revisions
 
-- Pointer/highlight rows include overlay segment id, target point, anchor rule, scale rule, in point, out point, duration rule, and out reason.
-- The checklist must reject pointer/highlight scale evidence unless `acceptance.require_pointer_profile_binding=true`, `review_items[*].evidence.subject_profile_receipt` is present, `project-bindings.json` contains the current `project_key`, stored `project_path`, and bound `profile_key`, and `auto-cut-pointer-targeting` provides a fresh exact `stage_id + subject_id` profile check with `status=ready`. The receipt's `project_key`, stored `project_path`, `profile_key`, `stage_id`, and `subject_id` must all match the same binding, and its `profile_path` must match that binding's fresh registry result. The flag is required audit metadata and cannot disable the inferred strict pointer gate when omitted or false.
-- Receipt evidence binds the current asset SHA-256 and current bytes to that profile, and binds `scale_reference_path`, scale reference SHA-256, current-layout confirmed ratio, and approved preview evidence to current verified files.
-- A `text_bottom` item records in-canvas `target_geometry`; `underline_layers` and `clean_layers` are explicit arrays even when empty; any display-safe fallback binds its artifact SHA-256, timeline ID, and exact window.
-- Pointer/highlight out points were checked against spoken target beats, next visual change, next pointer target, page turn, and animation entrances.
-- Animation timing rows include edit mode, first visible frame, stable frame, release, next independent animation, and collision result when applicable.
-- Whole-section advances include evidence that board states align and future content is not revealed early.
-- Local crop overlays are used only when full-screen or whole-section methods are invalid, and include a size/position comparison.
+- A resolved supplied pointer/image has one attributable local material, editable segment, requested
+  start, default geometry, and no keyframes.
+- A missing hand/pointer attachment is reused only from the unique row with the same normalized
+  modification name. Multiple candidates return structured `user_action_required`.
+- Existing-hand cleanup, animation/picture timing, and text movement/animation items are label-only.
+- No pointer profile, target point, hotspot, scale reference, cleanup layer, stable-frame evidence,
+  whole-section advance, crop overlay, or opened-editor evidence is present or required.

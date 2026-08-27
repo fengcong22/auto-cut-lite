@@ -61,6 +61,30 @@ def _label_only_asr_marker_time(source_item: RevisionReviewItem) -> Optional[flo
     ):
         return None
     evidence = source_item.evidence if isinstance(source_item.evidence, Mapping) else {}
+    if str(evidence.get("timing_source") or "").strip().casefold() == (
+        "review_timestamp_fallback"
+    ):
+        if (
+            str(evidence.get("review_timestamp_role") or "").strip().casefold()
+            != "authoritative_fallback"
+        ):
+            raise ValueError(
+                f"Lite label-only audio item {source_item.item_id} has invalid review "
+                "timestamp fallback role."
+            )
+        try:
+            fallback_time = float(evidence.get("resolved_time"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"Lite label-only audio item {source_item.item_id} has no valid review "
+                "timestamp fallback."
+            ) from exc
+        if not math.isfinite(fallback_time) or fallback_time < 0.0:
+            raise ValueError(
+                f"Lite label-only audio item {source_item.item_id} has no valid review "
+                "timestamp fallback."
+            )
+        return fallback_time
     alignment = evidence.get("asr_alignment")
     if alignment is None:
         return None

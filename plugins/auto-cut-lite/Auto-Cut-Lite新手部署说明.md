@@ -5,7 +5,7 @@
 正常安装只有四步：
 
 1. 对 ZIP 使用“全部解压”。
-2. 打开解压后的 `Auto-cut-lite`，双击 `START-AUTO-CUT-LITE.cmd`。
+2. 打开解压后的 `Auto-cut-lite`，双击 `一键安装或升级-Auto-Cut-Lite.cmd`。
 3. 在弹窗中选择你希望长期使用的 `Auto-cut-lite` 工作区位置。
 4. 部署成功后，用 Codex 打开窗口里显示的 `workspace_root`，并新建线程。
 
@@ -36,7 +36,7 @@ pip/npm 镜像，并自动校验解压后的每个受管文件。
 进入解压后的 `Auto-cut-lite` 文件夹，双击：
 
 ```text
-START-AUTO-CUT-LITE.cmd
+一键安装或升级-Auto-Cut-Lite.cmd
 ```
 
 首次部署会弹出文件夹选择框。你可以：
@@ -80,7 +80,7 @@ workspace_label=Auto-cut-lite
 1. 打开 Codex，选择“打开文件夹”。
 2. 粘贴 `workspace_root` 路径并打开。
 3. 在这个工作区新建线程，旧线程不会自动刷新技能。
-4. 打开工作区里的 `CODEX_NEXT_STEPS.md`，把其中的话发给 Codex。
+4. 打开工作区里的 `Auto-Cut-Lite部署成功后操作说明.md`，把其中的话发给 Codex。
 
 技能列表中的 `auto-cut-*` 应显示为 `scope=repo`，右侧标签为 `Auto-cut-lite`，不应再有
 Auto-Cut 的 `Personal` 重复项。
@@ -95,14 +95,26 @@ ASR 本机凭据还需要在新线程中配置。
 ## 三、以后升级
 
 1. 把新 ZIP 解压到任意临时文件夹，不要直接覆盖旧的稳定工作区。
-2. 在新解压包中双击 `START-AUTO-CUT-LITE.cmd`。
+2. 在新解压包中双击 `一键安装或升级-Auto-Cut-Lite.cmd`。
 3. 检测到旧工作区后，选择“是”即可沿用并升级；选择“否”可以迁移到新位置。
 4. 成功后确认输出的 `workspace_root` 正确，再删除这次升级使用的临时解压目录和 ZIP。
 5. 用 Codex 重新打开 `workspace_root` 并新建线程。
 
 迁移时部署器会先校验旧工作区，并使用已有的备份与回滚机制，不需要手工移动 `.codex` 文件。
 
-## 四、失败时怎么做
+## 四、安全卸载
+
+需要卸载时，在稳定 `Auto-cut-lite` 工作区中双击：
+
+```text
+一键卸载-Auto-Cut-Lite.cmd
+```
+
+卸载器只按部署报告、包清单和工作区回执移除 Auto-Cut Lite 自己的运行时、main/audio
+环境、工作区受管文件与 Codex 注册。其他插件、技能和工作区文件会在卸载前后做哈希校验；
+受管文件被修改、路径身份不符或出现重解析点时，卸载器会停止而不是扩大删除范围。
+
+## 五、失败时怎么做
 
 不要反复移动文件或手工复制 `.codex\skills`。保持部署窗口打开，把窗口中的完整错误文字发给
 Codex；若窗口给出了部署报告，也把下面这个文件告诉 Codex：
@@ -113,7 +125,7 @@ Codex；若窗口给出了部署报告，也把下面这个文件告诉 Codex：
 
 部署器会保留失败原因并尽量回滚到升级前状态。
 
-## 五、高级手动入口
+## 六、高级手动入口
 
 只有排错或需要使用官方网络时才需要 PowerShell。在解压后的 `Auto-cut-lite` 文件夹地址栏输入
 `powershell` 并回车，然后运行：

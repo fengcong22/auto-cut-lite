@@ -261,8 +261,22 @@ def build_parser() -> argparse.ArgumentParser:
         "review-document-run",
         help="Run the maintained resumable Auto-Cut Lite review-document workflow",
     )
-    p_review_document_run.add_argument("--snapshot-json", required=True)
-    p_review_document_run.add_argument("--project-json", required=True)
+    review_document_inputs = p_review_document_run.add_mutually_exclusive_group(required=True)
+    review_document_inputs.add_argument(
+        "--doc-url",
+        default=None,
+        help="Feishu/Lark /docx/ or /wiki/ URL read through the maintained user adapter",
+    )
+    review_document_inputs.add_argument(
+        "--snapshot-json",
+        default=None,
+        help="Existing document snapshot JSON for the compatibility input mode",
+    )
+    p_review_document_run.add_argument(
+        "--project-json",
+        default=None,
+        help="Project JSON required with --snapshot-json and forbidden with --doc-url",
+    )
     p_review_document_run.add_argument(
         "--job-root",
         "--output-dir",

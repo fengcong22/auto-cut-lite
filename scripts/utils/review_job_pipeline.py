@@ -34,6 +34,53 @@ _MANIFEST_SCHEMA_VERSION = 1
 _JOB_SCHEMA_VERSION = 2
 _LEGACY_JOB_SCHEMA_VERSION = 1
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+_PUBLIC_URL_PATTERN = re.compile(r"(?i)\bhttps?://[^\s<>'\"]+")
+_PUBLIC_BEARER_PATTERN = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_PUBLIC_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)\b(?:access[_ -]?token|refresh[_ -]?token|authorization|credential|"
+    r"password|client[_ -]?secret|app[_ -]?secret|token|secret)\b\s*[:=]\s*"
+    r"(?:bearer\s+)?[^\s,;]+"
+)
+_PUBLIC_TOKENISH_PATTERN = re.compile(
+    r"(?i)\b(?:[A-Za-z0-9]+[_-])+(?:private|secret|token|credential)"
+    r"(?:[_-][A-Za-z0-9]+)*\b|\b(?:private|secret|token|credential)"
+    r"(?:[_-][A-Za-z0-9]+)+\b"
+)
+_PUBLIC_JWT_PATTERN = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:\.[A-Za-z0-9_-]{8,})?\b"
+)
+_PUBLIC_LARK_ID_PATTERN = re.compile(
+    r"\b(?:doccn|doxcn|wikcn|ou_|cli_)[A-Za-z0-9_-]{6,}\b",
+    flags=re.IGNORECASE,
+)
+_PUBLIC_SENSITIVE_KEYS = frozenset(
+    {
+        "access_token",
+        "app_secret",
+        "asset_token",
+        "asset_url",
+        "authorization",
+        "authorization_url",
+        "client_secret",
+        "credential",
+        "credentials",
+        "doc_token",
+        "doc_url",
+        "document_token",
+        "document_url",
+        "download_url",
+        "file_token",
+        "media_token",
+        "password",
+        "raw_url",
+        "refresh_token",
+        "secret",
+        "signed_url",
+        "temporary_url",
+        "token",
+        "url",
+    }
+)
 _EXTERNAL_WAIT_FIELDS = frozenset(
     {
         "code",
@@ -45,6 +92,70 @@ _EXTERNAL_WAIT_FIELDS = frozenset(
         "started_at",
     }
 )
+
+
+def _public_key_is_sensitive(key: Any, value: Any) -> bool:
+    normalized = str(key).strip().casefold().replace("-", "_")
+    if normalized.endswith(("_sha256", "_digest", "_hash")):
+        return False
+    if normalized in _PUBLIC_SENSITIVE_KEYS or normalized.endswith("_token"):
+        return True
+    if normalized.endswith("_url") and not normalized.endswith("_url_sha256"):
+        return True
+    return False
+
+
+def sanitize_public_text(value: Any, *, maximum_length: int | None = None) -> str:
+    """Remove provider URLs and credential-like values from public persisted text."""
+
+    text = str(value)
+    text = _PUBLIC_URL_PATTERN.sub("[redacted-url]", text)
+    text = _PUBLIC_BEARER_PATTERN.sub("Bearer [redacted]", text)
+    text = _PUBLIC_SECRET_ASSIGNMENT_PATTERN.sub("credential=[redacted]", text)
+    text = _PUBLIC_JWT_PATTERN.sub("[redacted-token]", text)
+    text = _PUBLIC_LARK_ID_PATTERN.sub("[redacted-id]", text)
+    text = _PUBLIC_TOKENISH_PATTERN.sub("[redacted-token]", text)
+    if maximum_length is not None and len(text) > maximum_length:
+        text = f"{text[: max(0, maximum_length - 3)]}..."
+    return text
+
+
+def sanitize_public_value(value: Any) -> Any:
+    """Recursively make phase/result data safe for state, timing, receipts, and JSON output."""
+
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        for key, child in value.items():
+            text_key = str(key)
+            safe[text_key] = (
+                "[redacted]"
+                if _public_key_is_sensitive(text_key, child)
+                else sanitize_public_value(child)
+            )
+        return safe
+    if isinstance(value, (list, tuple)):
+        return [sanitize_public_value(child) for child in value]
+    if isinstance(value, Path):
+        return sanitize_public_text(str(value))
+    if isinstance(value, str):
+        return sanitize_public_text(value)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return sanitize_public_text(value)
+
+
+def safe_error_text(error: BaseException | str) -> str:
+    """Return a bounded, privacy-safe error string for every public persistence boundary."""
+
+    if isinstance(error, BaseException):
+        error_type = type(error).__name__
+        raw_message = str(error)
+    else:
+        error_type = ""
+        raw_message = str(error)
+    message = " ".join(raw_message.splitlines()).strip() or "phase failed"
+    message = sanitize_public_text(message, maximum_length=300)
+    return f"{error_type}: {message}" if error_type else message
 _EXTERNAL_WAIT_CODES = frozenset({"awaiting_subject_profile"})
 _EXTERNAL_WAIT_PHASES = frozenset({"subject_pointer_profile_gate"})
 _EXTERNAL_WAIT_PAYLOAD_FIELDS = frozenset(
@@ -728,12 +839,9 @@ class JobStateStore:
         )
 
     def fail_phase(self, name: str, error: str | BaseException) -> dict[str, Any]:
-        if isinstance(error, BaseException):
-            error_text = f"{type(error).__name__}: {error}"
-        elif isinstance(error, str):
-            error_text = error
-        else:
+        if not isinstance(error, (str, BaseException)):
             raise TypeError("phase error must be text or an exception")
+        error_text = safe_error_text(error)
         if not error_text:
             error_text = "phase failed"
         return self._finish_phase(
@@ -755,7 +863,7 @@ class JobStateStore:
         """Persist a dependency-blocked phase without marking it as executed."""
 
         phase_name = self._require_text(name, "phase name")
-        reason = self._require_text(error, "phase skip reason")
+        reason = safe_error_text(self._require_text(error, "phase skip reason"))
         phase_input = (
             self.input_digest
             if input_digest is None
@@ -2174,6 +2282,7 @@ class ReviewJobExecutor:
         self,
         max_workers: int = 3,
         state_store: JobStateStore | None = None,
+        progress: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> None:
         if not isinstance(max_workers, int) or isinstance(max_workers, bool):
             raise TypeError("max_workers must be an integer")
@@ -2181,6 +2290,8 @@ class ReviewJobExecutor:
             raise ValueError("max_workers must be at least 1")
         self.max_workers = max_workers
         self.state_store = state_store
+        self.progress = progress
+        self._progress_lock = threading.Lock()
 
     def run(self, phases: Any) -> dict[str, dict[str, Any]]:
         """Run *phases* and return one stable status record per input phase."""
@@ -2266,6 +2377,7 @@ class ReviewJobExecutor:
                         reason = "scheduler made no progress"
                         records[phase.name] = self._record("blocked", error=reason)
                         self._persist_skip(phase, reason)
+                        self._emit_progress(phase.name, "blocked")
                     pending.clear()
 
         return {phase.name: records[phase.name] for phase in definitions}
@@ -2393,11 +2505,13 @@ class ReviewJobExecutor:
                     "failed",
                     error=f"state resume check failed: {self._safe_error(error)}",
                 )
+                self._emit_progress(phase.name, "failed")
                 pending.remove(index)
                 progressed = True
                 continue
             if can_resume:
                 records[phase.name] = self._record("resumed")
+                self._emit_progress(phase.name, "resumed")
                 pending.remove(index)
                 progressed = True
         return progressed
@@ -2432,6 +2546,7 @@ class ReviewJobExecutor:
                 reason = "blocked by earlier feishu_write: " f"{previous_feishu_write}"
             records[phase.name] = self._record("skipped", error=reason)
             self._persist_skip(phase, reason)
+            self._emit_progress(phase.name, "skipped")
             pending.remove(index)
             progressed = True
         return progressed
@@ -2531,10 +2646,13 @@ class ReviewJobExecutor:
                     )
                     started = True
                 except Exception as error:
+                    self._emit_progress(phase.name, "failed", attempt=attempt)
                     return self._record(
                         "failed",
                         error=f"state start failed: {self._safe_error(error)}",
                     )
+
+            self._emit_progress(phase.name, "started", attempt=attempt)
 
             try:
                 raw_result = phase.run()
@@ -2554,7 +2672,9 @@ class ReviewJobExecutor:
                     except Exception:
                         pass
                 if attempt < phase.retry_count:
+                    self._emit_progress(phase.name, "retrying", attempt=attempt)
                     continue
+                self._emit_progress(phase.name, "failed", attempt=attempt)
                 return self._record("failed", error=error_text)
 
             if self.state_store is not None:
@@ -2571,9 +2691,27 @@ class ReviewJobExecutor:
                             self.state_store.fail_phase(phase.name, error_text)
                         except Exception:
                             pass
+                    self._emit_progress(phase.name, "failed", attempt=attempt)
                     return self._record("failed", result=result, error=error_text)
+            self._emit_progress(phase.name, "complete", attempt=attempt)
             return self._record("complete", result=result)
         return self._record("failed", error="phase retry loop exhausted")
+
+    def _emit_progress(self, phase: str, status: str, *, attempt: int | None = None) -> None:
+        if self.progress is None:
+            return
+        event: dict[str, Any] = {
+            "event": "phase",
+            "phase": str(phase),
+            "status": str(status),
+        }
+        if attempt is not None:
+            event["attempt"] = int(attempt)
+        try:
+            with self._progress_lock:
+                self.progress(event)
+        except Exception:
+            pass
 
     def _persist_skip(self, phase: PhaseDefinition, reason: str) -> None:
         if self.state_store is None:
@@ -2603,10 +2741,7 @@ class ReviewJobExecutor:
 
     @staticmethod
     def _safe_error(error: BaseException) -> str:
-        message = " ".join(str(error).splitlines()).strip() or "phase failed"
-        if len(message) > 300:
-            message = f"{message[:297]}..."
-        return f"{type(error).__name__}: {message}"
+        return safe_error_text(error)
 
     @staticmethod
     def _record(
@@ -2626,5 +2761,8 @@ __all__ = [
     "PhaseOutcome",
     "PhaseTimer",
     "ReviewJobExecutor",
+    "safe_error_text",
+    "sanitize_public_text",
+    "sanitize_public_value",
     "sha256_file",
 ]

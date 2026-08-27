@@ -2,6 +2,11 @@
 
 Use this shared contract when Auto-Cut cannot continue without a user decision or user-supplied evidence. A `user_action_required` alert is notification-only. The full blocking question stays in the originating Codex task, and Auto-Cut must accept resolution only in the originating Codex task.
 
+In ordinary Lite editing, pointer profiles and onboarding waits are disabled. A missing hand/pointer
+attachment with multiple same-normalized-modification-name candidates uses the interactive-only
+`high_risk_confirmation` action with safe candidate IDs. A unique candidate is reused without a
+question; zero candidates keeps the item label-only and reports the missing insertion.
+
 Ordinary clarification, a progress update, and nonblocking status text do not notify. A question qualifies only when the operation is genuinely blocked and the user has a concrete action to take.
 
 ## Closed Action Codes

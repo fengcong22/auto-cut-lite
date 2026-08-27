@@ -10,17 +10,15 @@ Use this checklist together with the
 - Project duration equals source duration even when a review asks to add, extend, shorten, or
   otherwise adjust a pause. Deletions never compress the Lite timeline.
 - Required editable video/audio/marker tracks and split-gap cut boundaries exist.
-- One start-aligned, at-most-two-second verbatim label exists per source item. Completely
-  non-speech point timestamps are valid; target wording such as `07:14 ... 提前到 07:12`
-  resolves to `07:12`, and unresolved timing never falls back to `0:00`.
+- One start-aligned, at-most-two-second verbatim label exists per source item. Review-only and
+  ASR-unresolved non-executing items use review-comment times; target wording such as
+  `07:14 ... 提前到 07:12` resolves to `07:12`, and timing never falls back to `0:00`.
 
 ## Audio
 
-- Every issue locatable through speech or audio uses word/character ASR boundaries, not review
-  timestamps. This includes spoken cuts, semantic pauses, pronunciation, breath, mouth noise,
-  and speech timing.
-- Audio-related labels start at the ASR-resolved window or point even when the review-document
-  timestamp differs. A pause request has no saved edit; its ASR point is used only for its label.
+- Every issue locatable through speech or audio attempts word/character ASR. Only a uniquely
+  ASR-located spoken deletion may execute. A non-executing item uses the unique ASR point when
+  available and otherwise the review-comment time.
 - Delete and `must_keep` contracts match the physical cut windows.
 - Reverse-ASR, candidate decode, segmented-audio, and semantic-join checks pass when required.
 - A1 equals the complement of logical ASR delete windows. A2 has exactly one independent, audible
@@ -29,7 +27,7 @@ Use this checklist together with the
   true cross-item overlaps fail. Pending, empty, full-length, continuous, muted, extra, or
   differently merged A2 delivery fails.
 - Every pause addition, extension, shortening, or adjustment is `execution_required=false` and has
-  exactly one source-text-only label at its authoritative ASR point.
+  one source-text-only label at its unique ASR point or review-time fallback.
 - No executable `pause_adjustments`, hold, still-frame pause segment, inserted audio gap,
   pause-derived duration change, or offset to a later track, asset, or label exists.
 
@@ -40,6 +38,8 @@ Use this checklist together with the
 - Existing-hand occlusion, removal, clean-cover, cleanup, and residual-cover items are label-only.
 - A supplied pointer/image item has one attributable local material and editable segment at its
   requested start.
+- A hand/pointer row with no attachment may reuse only the unique candidate from another row with
+  the same normalized modification name. Multiple candidates require `user_action_required`.
 - Every supplied visual keeps scale 1, transform 0/0, rotation 0, alpha 1, and no keyframes.
 - `Lite Timing Adjusted` has no segments.
 - No animation overlay, cleanup layer, baked window, pointer motion, calibration, target landing,

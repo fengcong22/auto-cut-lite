@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.6.0+codex.20260827070523"
+PLUGIN_VERSION = "1.6.0+codex.20260827113207"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -236,11 +236,11 @@ def _write_text(path: Path, text: str) -> None:
 def _write_target_setup(stage: Path) -> None:
     _write_text(
         stage / "install.ps1",
-        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio, [switch]$UseChinaMirrors, [string]$WorkspaceRoot)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio -UseChinaMirrors:$UseChinaMirrors -WorkspaceRoot $WorkspaceRoot\nexit $LASTEXITCODE\n""",
+        """[CmdletBinding()]\nparam([switch]$WithAudio, [switch]$SkipAudio, [switch]$UseChinaMirrors, [string]$WorkspaceRoot, [string]$LocalAppDataRoot, [string]$UserProfileRoot)\n$ErrorActionPreference = 'Stop'\n& (Join-Path $PSScriptRoot 'deploy-to-codex.ps1') -WithAudio:$WithAudio -SkipAudio:$SkipAudio -UseChinaMirrors:$UseChinaMirrors -WorkspaceRoot $WorkspaceRoot -LocalAppDataRoot $LocalAppDataRoot -UserProfileRoot $UserProfileRoot\nexit $LASTEXITCODE\n""",
     )
     _write_text(
         stage / "TARGET_SETUP.md",
-        """# Target setup\n\nRead `BEGINNER_DEPLOYMENT.md` before installation.\n\nFirst install: use **Extract All**, open the extracted `Auto-cut-lite` directory, and double-click `START-AUTO-CUT-LITE.cmd`. The launcher asks where the stable workspace should live, validates the extracted package, and uses China mirrors by default. The selected workspace receives the complete managed package, `AGENTS.md`, and `.codex/skills`.\n\nUpgrade: extract the new ZIP into a temporary directory and double-click its `START-AUTO-CUT-LITE.cmd`. Choose the existing workspace when prompted. The installer synchronizes the new package into it with rollback protection. Delete only the temporary upgrade extraction after success. Do not extract a new ZIP directly over the stable workspace.\n\nAdvanced users can run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1` directly. Use `-UseChinaMirrors` when direct pip/npm access is unreliable. Use `-WorkspaceRoot \"<absolute-path>\\Auto-cut-lite\"` only when selecting or relocating the stable workspace. The runtime remains under `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite`; open the reported `workspace_root` in Codex, start a new thread, and follow `CODEX_NEXT_STEPS.md`.\n""",
+        """# Target setup\n\nRead `Auto-Cut-Lite新手部署说明.md` before installation.\n\nFirst install: use **Extract All**, open the extracted `Auto-cut-lite` directory, and double-click `一键安装或升级-Auto-Cut-Lite.cmd`. The launcher asks where the stable workspace should live, validates the extracted package, and uses China mirrors by default. The selected workspace receives the complete managed package, `AGENTS.md`, and `.codex/skills`.\n\nUpgrade: extract the new ZIP into a temporary directory and double-click its `一键安装或升级-Auto-Cut-Lite.cmd`. Choose the existing workspace when prompted. The installer synchronizes the new package into it with rollback protection. Delete only the temporary upgrade extraction after success. Do not extract a new ZIP directly over the stable workspace.\n\nUninstall: double-click `一键卸载-Auto-Cut-Lite.cmd`. It validates deployment receipts and removes only Auto-Cut Lite managed files, environments, and registrations.\n\nAdvanced users can run `powershell -ExecutionPolicy Bypass -File .\\deploy-to-codex.ps1` directly. Use `-UseChinaMirrors` when direct pip/npm access is unreliable. Use `-WorkspaceRoot \"<absolute-path>\\Auto-cut-lite\"` only when selecting or relocating the stable workspace. The runtime remains under `%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite`; open the reported `workspace_root` in Codex, start a new thread, and follow `Auto-Cut-Lite部署成功后操作说明.md`.\n""",
     )
     _write_text(
         stage / "runtime" / "README.md",
@@ -334,9 +334,11 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
         "default_root": "extracted_package_root",
         "custom_root_supported": True,
         "custom_root_parameter": "WorkspaceRoot",
-        "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+        "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
+        "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+        "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
         "one_click_default_network": "china_mirrors",
-        "post_install_guide": "CODEX_NEXT_STEPS.md",
+        "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
         "required_leaf_name": "Auto-cut-lite",
         "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
         "explicit_path_upgrade": "verified_relocation_with_rollback",
@@ -534,15 +536,17 @@ def build(
             "source_git_commit": source_identity["commit"],
             "source_git_clean": source_identity["clean"],
             "one_command_deployer": "deploy-to-codex.ps1",
-            "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+            "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+            "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
             "one_click_default_network": "china_mirrors",
             "one_click_internal_manifest_validation": True,
-            "post_install_codex_guide": "CODEX_NEXT_STEPS.md",
+            "post_install_codex_guide": "Auto-Cut-Lite部署成功后操作说明.md",
             "marketplace_name": "auto-cut-lite-marketplace",
             "marketplace_display_name": "Auto-Cut Lite",
             "named_marketplace_registration": "atomic_structured_helper",
             "legacy_personal_migration": "automatic",
-            "runtime_dependency_installation": "separate_main_and_audio_venvs_automatic",
+            "runtime_dependency_installation": "separate_main_and_audio_transactional_reuse_upgrade_rebuild",
+            "runtime_dependency_rollback": True,
             "audio_runtime_default": "installed",
             "deployment_report": "%LOCALAPPDATA%\\Auto-Cut\\auto-cut-lite\\deployment-report.json",
             "readiness_model": "installed_can_require_user_configuration",

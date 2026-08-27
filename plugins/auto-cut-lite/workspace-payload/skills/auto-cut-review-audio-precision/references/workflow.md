@@ -20,7 +20,7 @@ Every spoken-delete row is checked against a non-empty item contract containing 
 
 The latest canonical doc item kind determines whether the spoken-delete contract applies. In the
 packaged Lite workspace, every pause addition, extension, shortening, or adjustment is validated
-independently as an ASR-located label-only item and never creates executable pause evidence. A
+independently as an ASR-first, review-time-fallback label-only item and never creates executable pause evidence. A
 forbidden semantic-join phrase is waived only by `pass_adjudicated` with a non-empty reason,
 `final_gap` between 0 and 0.2 seconds, and `no_extra_deletion_contract=pass`.
 
@@ -68,7 +68,7 @@ python scripts/portable/volc_setup.py status --json
 .\.venv\Scripts\python.exe scripts/audio/volc_word_align.py "<audio-or-video>" --output "<alignment.json>" --phrase "<delete>" --anchor "START,END"
 ```
 
-Accept a Volcengine adapter run only when the normalized alignment records `input_sha256`, `service_job_id`, `service_result_sha256`, the request-bound `resource_id`, `adapter_version`, and a non-empty `words` list whose timing values are finite, whose intervals have positive duration, and whose rows are monotonic. If authorization is absent, the required state is `status=pending`, `code=requires_user_authorization`, and `service_probe=not_run`; report degraded mode, keep the item unresolved for final acceptance, use conservative listening evidence without weakening `must_keep`, and do not claim the service or adapter ran.
+Accept a Volcengine adapter run only when the normalized alignment records `input_sha256`, `service_job_id`, `service_result_sha256`, the request-bound `resource_id`, `adapter_version`, and a non-empty `words` list whose timing values are finite, whose intervals have positive duration, and whose rows are monotonic. If authorization is absent, the required state is `status=pending`, `code=requires_user_authorization`, and `service_probe=not_run`; do not execute spoken deletion. Use the review-comment time only for non-executing items, keep `must_keep` intact, and do not claim the service or adapter ran.
 
 The bundled adapter produces normalized alignment only. It does not replace the complete candidate's attributable full-candidate reverse-ASR report with rich per-item result rows, and it does not replace final acceptance. This repository still decides `delete`, `must_keep`, strategy, buffers, physical removal, Lite pause-label routing, and acceptance status.
 
@@ -145,7 +145,7 @@ Report:
 - document read status
 - number of clips processed
 - strategy used per clip
-- ASR source used, such as Volc ASR or degraded manual alignment
+- ASR result and any review-time fallback used for non-executing items
 - output paths
 - validation result for removed and kept phrases
 - any accepted listening tradeoffs
@@ -158,7 +158,8 @@ Use this gate when Feishu/Lark review-document audio edits are delivered as an e
 
 - `colored_span_delete`: inspect document markup and keep colored fragments separate. If only `你看。那个`, `它`, and `是不是` are blue, create three delete windows and preserve the uncolored words between them.
 - `gap_delete`: in Lite, keep both anchors as ASR context and create only the exact source-text
-  label at the resolved gap point. Do not delete the gap or filler.
+  label at the unique gap point, or at the review-comment time when ASR fails or is non-unique. Do
+  not delete the gap or filler.
 - `ellipsis_range_delete`: delete the full spoken range between prefix and suffix. Do not match only the suffix phrase.
 - `tail_particle_delete`: protect the next word onset. If the particle tail remains but extending the physical cut would swallow the next word, add a post-splice exact duck/mute window instead.
 
@@ -174,22 +175,22 @@ Use this gate when Feishu/Lark review-document audio edits are delivered as an e
 Run this gate independently from delete accuracy for every request to add, extend, shorten, or
 otherwise adjust a pause, including input named `semantic_pause_adjustment`.
 
-1. Treat the review timestamp only as a search hint. Bind authoritative word/character ASR to the
-   current source audio bytes, provider/model or resource identity, adapter version, and ordered
-   timing rows.
-2. Resolve the real adjacent-utterance point. It must be attributable to the current source,
-   outside spoken words and physical delete windows; utterance-only or transcript-only ASR is
-   insufficient.
+1. Attempt authoritative word/character ASR bound to the current source audio bytes,
+   provider/model or resource identity, adapter version, and ordered timing rows.
+2. If ASR yields one unique adjacent-utterance point, require it to be attributable to the current
+   source and outside spoken words and physical delete windows. Utterance-only or transcript-only
+   ASR is insufficient for claiming an ASR-resolved point.
 3. Set effective `execution_required=false`. Place exactly one visible label equal only to the
-   source item's `source_text` at the resolved point.
+   source item's `source_text` at the unique ASR point, or at the review-comment time when ASR fails
+   or is non-unique.
 4. Do not create executable `pause_adjustments`, split audio for a pause, create a hold or still
    frame, add an audio gap, change project duration, or offset any later video, audio, asset, or
    label target.
 5. Require final duration to equal source duration and all later targets to retain their original
    source-aligned times. Any pause-derived media, duration extension, or offset fails Lite
    acceptance.
-6. If authoritative ASR is unavailable, fail before draft open/write. Never use the rough review
-   timestamp or `0:00` as a fallback.
+6. Fail before draft open/write only when neither ASR nor the review comment supplies a valid time.
+   Never use `0:00`.
 
 ### Reverse-ASR Validation
 

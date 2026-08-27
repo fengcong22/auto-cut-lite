@@ -8,7 +8,7 @@ Auto-Cut Lite uses a combined deployment model:
 - `deployment-report.json` and `workspace-install-receipt.json` connect the workspace to that
   runtime.
 
-For the beginner flow, double-click `START-AUTO-CUT-LITE.cmd`. On a first install it opens a folder
+For the beginner flow, double-click `一键安装或升级-Auto-Cut-Lite.cmd`. On a first install it opens a folder
 picker: selecting an existing directory named exactly `Auto-cut-lite` uses that directory, while
 selecting a parent creates or uses its `Auto-cut-lite` child. The complete managed package is
 synchronized into the selected workspace, so a temporary extraction and the stable workspace may
@@ -36,4 +36,4 @@ The plugin manifest intentionally omits `skills`, and the package has no top-lev
 directory. Repository skills are installed only under `<workspace>\.codex\skills`, so Codex should
 show scope `repo` and label `Auto-cut-lite` rather than duplicate `Personal` entries.
 
-See `BEGINNER_DEPLOYMENT.md` for copyable first-install and upgrade instructions.
+See `Auto-Cut-Lite新手部署说明.md` for copyable first-install and upgrade instructions.

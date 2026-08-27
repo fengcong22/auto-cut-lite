@@ -17,7 +17,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 HELPER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "manage_named_marketplace.py"
 DEPLOYER_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "deploy-to-codex.ps1"
 ONE_CLICK_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "one_click_deploy.ps1"
-ONE_CLICK_LAUNCHER = REPO_ROOT / "plugins" / "auto-cut-lite" / "START-AUTO-CUT-LITE.cmd"
+UNINSTALL_PATH = (
+    REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "uninstall_auto_cut_lite.ps1"
+)
+ONE_CLICK_LAUNCHER = (
+    REPO_ROOT / "plugins" / "auto-cut-lite" / "一键安装或升级-Auto-Cut-Lite.cmd"
+)
+ONE_CLICK_UNINSTALLER = REPO_ROOT / "plugins" / "auto-cut-lite" / "一键卸载-Auto-Cut-Lite.cmd"
 
 
 def _load_helper():
@@ -195,6 +201,41 @@ def test_remove_personal_entry_preserves_other_plugins_and_can_rollback(tmp_path
     assert marketplace.read_bytes() == original_bytes
 
 
+def test_remove_named_entry_preserves_unrelated_plugin_objects(tmp_path: Path) -> None:
+    helper = _load_helper()
+    marketplace = tmp_path / "marketplace.json"
+    unrelated = {
+        "name": "kept-plugin",
+        "source": {"source": "local", "path": "./plugins/kept-plugin"},
+        "policy": {"installation": "AVAILABLE", "authentication": "ON_USE"},
+        "category": "Developer Tools",
+        "custom": {"bytes": "must-stay-identical"},
+    }
+    marketplace.write_text(
+        json.dumps(
+            {
+                "name": "auto-cut-lite-marketplace",
+                "interface": {"displayName": "Auto-Cut Lite"},
+                "plugins": [
+                    unrelated,
+                    {
+                        "name": "auto-cut-lite",
+                        "source": {"source": "local", "path": "./plugins/auto-cut-lite"},
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = helper.remove_named_entry(marketplace)
+
+    updated = json.loads(marketplace.read_text(encoding="utf-8"))
+    assert updated["plugins"] == [unrelated]
+    assert result["remaining_plugin_count"] == 1
+    assert result["unrelated_plugins_unchanged"] is True
+
+
 def test_deployer_has_valid_windows_powershell_syntax() -> None:
     command = (
         "$errors=$null; "
@@ -230,10 +271,26 @@ def test_one_click_launcher_has_valid_powershell_and_beginner_contract() -> None
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
+    uninstall_command = (
+        "$errors=$null; "
+        f"[System.Management.Automation.Language.Parser]::ParseFile('{UNINSTALL_PATH}',"
+        "[ref]$null,[ref]$errors)|Out-Null; "
+        "if($errors.Count){$errors|ForEach-Object{$_.ToString()};exit 1}"
+    )
+    uninstall_syntax = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", uninstall_command],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert uninstall_syntax.returncode == 0, uninstall_syntax.stdout + uninstall_syntax.stderr
+
     launcher = ONE_CLICK_LAUNCHER.read_text(encoding="utf-8")
     wrapper = ONE_CLICK_PATH.read_text(encoding="utf-8")
     beginner = (
-        REPO_ROOT / "plugins" / "auto-cut-lite" / "BEGINNER_DEPLOYMENT.md"
+        REPO_ROOT / "plugins" / "auto-cut-lite" / "Auto-Cut-Lite新手部署说明.md"
     ).read_text(encoding="utf-8")
     assert "installer\\one_click_deploy.ps1" in launcher
     assert "PACKAGE-MANIFEST.json" in launcher
@@ -247,7 +304,12 @@ def test_one_click_launcher_has_valid_powershell_and_beginner_contract() -> None
     assert "workspace_scope -ne 'repo'" in wrapper
     assert "workspace_label -ne 'Auto-cut-lite'" in wrapper
     assert "Set-Clipboard -Value $installedWorkspace" in wrapper
-    assert "START-AUTO-CUT-LITE.cmd" in beginner
+    assert "一键安装或升级-Auto-Cut-Lite.cmd" in beginner
+    assert "一键卸载-Auto-Cut-Lite.cmd" in beginner
+    assert ONE_CLICK_UNINSTALLER.is_file()
+    assert "installer\\uninstall_auto_cut_lite.ps1" in ONE_CLICK_UNINSTALLER.read_text(
+        encoding="utf-8"
+    )
     assert "不需要先打开 PowerShell" in beginner
 
 
@@ -283,12 +345,25 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
         "$workspaceInstall = $workspaceOutput | ConvertFrom-Json"
     )
     assert "$audioRequested = -not $SkipAudio" in deployer
-    assert "$audioVenv = Join-Path $targetRoot 'runtime\\.venv-audio'" in deployer
-    assert "& $audioPython '-m' 'pip' 'install'" in deployer
-    assert (
-        "& $runtimePython '-m' 'pip' 'install' '--disable-pip-version-check' '--upgrade' '-r' (Join-Path $targetRoot 'runtime\\requirements-audio.lock')"
-        not in deployer
-    )
+    assert "manage_runtime_dependencies.py" in deployer
+    assert "--previous-plugin-root" in deployer
+    assert "requirements_sha256" in deployer
+    assert "dependency rollback returned a failure code" in deployer
+    assert "'-m' 'pip' 'install'" not in deployer
+    assert "$env:LOCALAPPDATA" in deployer
+    assert "$env:USERPROFILE" in deployer
+
+
+def test_uninstaller_is_receipt_scoped_and_preserves_unrelated_registrations() -> None:
+    uninstaller = UNINSTALL_PATH.read_text(encoding="utf-8")
+
+    assert "'uninstall'" in uninstaller
+    assert "'remove-named'" in uninstaller
+    assert "unrelated_plugins_unchanged" in uninstaller
+    assert "unrelated_unchanged" in uninstaller
+    assert "Remove-OwnedPluginTree -Path $targetRoot" in uninstaller
+    assert "Remove-Item -LiteralPath $stateRoot -Recurse" not in uninstaller
+    assert "Deployment report target root does not match" in uninstaller
 
 
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
@@ -300,11 +375,25 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
             {"name": "auto-cut-lite", "version": "1.3.0"}
         ).encode(),
         "AGENTS.md": b"# Portable workspace rules\n",
-        "CODEX_NEXT_STEPS.md": b"# Next steps\n",
-        "START-AUTO-CUT-LITE.cmd": b"@exit /b 0\n",
+        "PORTABLE-CAPABILITIES.json": json.dumps(
+            {
+                "workspace_installation": {
+                    "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
+                    "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
+                    "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+                    "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
+                }
+            }
+        ).encode(),
+        "Auto-Cut-Lite新手部署说明.md": b"# Beginner\n",
+        "Auto-Cut-Lite部署成功后操作说明.md": b"# Next steps\n",
+        "一键安装或升级-Auto-Cut-Lite.cmd": b"@exit /b 0\n",
+        "一键卸载-Auto-Cut-Lite.cmd": b"@exit /b 0\n",
         "installer/manage_named_marketplace.py": b"# validation fixture\n",
         "installer/one_click_deploy.ps1": b"# validation fixture\n",
+        "installer/manage_runtime_dependencies.py": b"# validation fixture\n",
         "installer/manage_workspace.py": b"# validation fixture\n",
+        "installer/uninstall_auto_cut_lite.ps1": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
         "runtime/requirements-audio.lock": b"# validation fixture\n",
     }
@@ -338,6 +427,8 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     (command_bin / "codex.cmd").write_text("@exit /b 0\n", encoding="ascii")
     process_environment = os.environ.copy()
     process_environment["PATH"] = str(command_bin) + os.pathsep + process_environment["PATH"]
+    process_environment["LOCALAPPDATA"] = str(tmp_path / "IsolatedLocalAppData")
+    process_environment["USERPROFILE"] = str(tmp_path / "IsolatedUserProfile")
 
     custom_workspace = tmp_path / "OtherWorkspaceParent" / "Auto-cut-lite"
     result = subprocess.run(
@@ -383,6 +474,8 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert "plugin_top_level_skills_present=false" in result.stdout
     assert "china_mirrors_enabled=True" in result.stdout
     assert "codex_invocation=direct" in result.stdout
+    assert f"local_app_data_root={tmp_path / 'IsolatedLocalAppData'}" in result.stdout
+    assert f"user_profile_root={tmp_path / 'IsolatedUserProfile'}" in result.stdout
 
     invalid_workspace = subprocess.run(
         [
@@ -466,19 +559,24 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
     )
     assert receipt["workspace_package_sync"] == "manifest_verified_transactional"
     assert receipt["workspace_package_rollback"] is True
-    assert receipt["one_click_launcher"] == "START-AUTO-CUT-LITE.cmd"
+    assert receipt["one_click_launcher"] == "一键安装或升级-Auto-Cut-Lite.cmd"
+    assert receipt["one_click_uninstaller"] == "一键卸载-Auto-Cut-Lite.cmd"
     assert receipt["one_click_default_network"] == "china_mirrors"
     assert receipt["one_click_internal_manifest_validation"] is True
-    assert receipt["post_install_codex_guide"] == "CODEX_NEXT_STEPS.md"
+    assert receipt["post_install_codex_guide"] == "Auto-Cut-Lite部署成功后操作说明.md"
     assert len(receipt["source_git_commit"]) == 40
     assert isinstance(receipt["source_git_clean"], bool)
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
     assert names
     assert {name.split("/", 1)[0] for name in names} == {"Auto-cut-lite"}
-    assert "Auto-cut-lite/BEGINNER_DEPLOYMENT.md" in names
-    assert "Auto-cut-lite/CODEX_NEXT_STEPS.md" in names
-    assert "Auto-cut-lite/START-AUTO-CUT-LITE.cmd" in names
+    assert "Auto-cut-lite/Auto-Cut-Lite新手部署说明.md" in names
+    assert "Auto-cut-lite/Auto-Cut-Lite部署成功后操作说明.md" in names
+    assert "Auto-cut-lite/一键安装或升级-Auto-Cut-Lite.cmd" in names
+    assert "Auto-cut-lite/一键卸载-Auto-Cut-Lite.cmd" in names
+    assert "Auto-cut-lite/START-AUTO-CUT-LITE.cmd" not in names
+    assert "Auto-cut-lite/BEGINNER_DEPLOYMENT.md" not in names
+    assert "Auto-cut-lite/CODEX_NEXT_STEPS.md" not in names
     assert "Auto-cut-lite/installer/one_click_deploy.ps1" in names
     assert "Auto-cut-lite/PACKAGE-MANIFEST.json" in names
     assert not any(name.startswith("auto-cut-lite/") for name in names)

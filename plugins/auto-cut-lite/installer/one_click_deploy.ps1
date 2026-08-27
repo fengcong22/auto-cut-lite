@@ -3,7 +3,9 @@ param(
     [switch]$OfficialNetwork,
     [switch]$SkipAudio,
     [switch]$ChooseWorkspace,
-    [string]$WorkspaceRoot
+    [string]$WorkspaceRoot,
+    [string]$LocalAppDataRoot,
+    [string]$UserProfileRoot
 )
 
 Set-StrictMode -Version Latest
@@ -12,7 +14,23 @@ $ErrorActionPreference = 'Stop'
 $packageRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $deployer = Join-Path $packageRoot 'deploy-to-codex.ps1'
 $manifestPath = Join-Path $packageRoot 'PACKAGE-MANIFEST.json'
-$localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+$localAppDataCandidate = if (-not [string]::IsNullOrWhiteSpace($LocalAppDataRoot)) {
+    $LocalAppDataRoot
+} elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $env:LOCALAPPDATA
+} else {
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+}
+$localAppData = [System.IO.Path]::GetFullPath($localAppDataCandidate)
+$env:LOCALAPPDATA = $localAppData
+$resolvedUserProfile = if (-not [string]::IsNullOrWhiteSpace($UserProfileRoot)) {
+    [System.IO.Path]::GetFullPath($UserProfileRoot)
+} elseif (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
+    [System.IO.Path]::GetFullPath($env:USERPROFILE)
+} else {
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+}
+$env:USERPROFILE = $resolvedUserProfile
 $reportPath = Join-Path $localAppData 'Auto-Cut\auto-cut-lite\deployment-report.json'
 $workspaceReceiptPath = Join-Path $localAppData 'Auto-Cut\auto-cut-lite\workspace-install-receipt.json'
 
@@ -108,6 +126,8 @@ try {
     Write-Step "Selected workspace: $selectedWorkspace"
 
     $deployArguments = @{ WorkspaceRoot = $selectedWorkspace }
+    $deployArguments.LocalAppDataRoot = $localAppData
+    $deployArguments.UserProfileRoot = $resolvedUserProfile
     if (-not $OfficialNetwork) {
         $deployArguments.UseChinaMirrors = $true
         Write-Step 'Using China pip/npm mirrors.'
@@ -159,7 +179,7 @@ try {
     if ($clipboardCopied) {
         Write-Host 'The workspace path was copied to the clipboard.'
     }
-    Write-Host 'Next: open this workspace in Codex, start a new thread, and read CODEX_NEXT_STEPS.md.'
+    Write-Host 'Next: open this workspace in Codex, start a new thread, and read the post-install guide named in PORTABLE-CAPABILITIES.json.'
 
     try {
         $explorerArgument = '"' + $installedWorkspace + '"'

@@ -17,7 +17,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
-from utils.revision_models import lite_pause_change_is_label_only, lite_timing_source
+from utils.revision_models import (
+    lite_pause_change_is_label_only,
+    lite_timing_source,
+    resolve_execution_status,
+)
 
 from audio_sound.volc_asr import (
     PROCESSING_STATUS_CODES,
@@ -330,6 +334,9 @@ def _phrase_supported(transcript: str, phrase: str) -> bool:
 def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
     start = item.get("start")
     end = item.get("end")
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    if start is None:
+        start = evidence.get("review_search_hint_seconds")
     try:
         start_value = float(start) if start is not None else None
         end_value = float(end) if end is not None else None
@@ -340,6 +347,32 @@ def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
     if end_value is None or end_value <= start_value:
         return max(0.0, start_value - 3.0), start_value + 3.0
     return max(0.0, start_value), end_value
+
+
+def _review_timestamp(item: Mapping[str, Any]) -> float | None:
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    text_match = re.match(
+        r"^\s*(?P<minutes>\d{1,3})\s*[:：]\s*(?P<seconds>\d{1,2}(?:\.\d+)?)",
+        str(item.get("source_text") or ""),
+    )
+    text_time = (
+        float(text_match.group("minutes")) * 60.0 + float(text_match.group("seconds"))
+        if text_match is not None
+        else None
+    )
+    for candidate in (
+        evidence.get("review_search_hint_seconds"),
+        evidence.get("resolved_review_timestamp_seconds"),
+        text_time,
+        item.get("start"),
+    ):
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value >= 0:
+            return value
+    return None
 
 
 def _extract_delete_phrase(item: Mapping[str, Any]) -> str:
@@ -436,6 +469,7 @@ def _alignment_receipt(
         "granularity": "word",
         **identity,
         "input_sha256": str(source_asr.get("input_sha256") or ""),
+        "authoritative_timing": True,
         "authoritative_cut_boundary": authoritative_cut_boundary,
         "matches": [
             {
@@ -483,7 +517,15 @@ def resolve_lite_audio_items(
         )
         delete_phrase = _extract_delete_phrase(item)
         pause_label_only = lite_pause_change_is_label_only(kind, source_text)
-        requested_execute = bool(item.get("execution_required")) and not pause_label_only
+        routed_status = resolve_execution_status(
+            item.get("execution_status"),
+            item.get("evidence"),
+            item.get("validation"),
+        )
+        routed_label_only = routed_status.casefold().startswith("label_only_")
+        requested_execute = (
+            bool(item.get("execution_required")) and not pause_label_only and not routed_label_only
+        )
         executable_kind = kind in _AUDIO_KINDS
         selected: dict[str, Any] | None = None
         match_method = ""
@@ -579,24 +621,39 @@ def resolve_lite_audio_items(
                 )
                 continue
 
-        nearest = _nearest_word(words, anchor)
         if selected is not None:
             start_index = int(selected.get("word_start_index", 0))
             end_index = int(selected.get("word_end_index", start_index))
             label_matches = [dict(row) for row in words[start_index : end_index + 1]]
             resolved_time = float(selected["start"])
-        elif nearest is not None:
-            label_matches = [nearest]
-            resolved_time = float(nearest["start"])
-        else:
-            raise ValueError(
-                f"Lite audio item {item_id} has no ASR-resolved label time; refusing 0:00 fallback"
+            timing_source = "asr"
+            alignment = _alignment_receipt(
+                source_asr,
+                matches=label_matches,
+                resolved_time=resolved_time,
+                authoritative_cut_boundary=False,
             )
+        else:
+            review_time = _review_timestamp(item)
+            if review_time is None:
+                raise ValueError(
+                    f"Lite audio item {item_id} could not be ASR-located and has no review timestamp"
+                )
+            label_matches = []
+            resolved_time = review_time
+            timing_source = "review_timestamp_fallback"
+            alignment = None
         reason = (
             "pause_duration_change_is_label_only"
             if pause_label_only
             else match_method or "no_unique_executable_phrase_match"
         )
+        if routed_label_only:
+            label_only_status = routed_status
+        elif pause_label_only:
+            label_only_status = "label_only_lite_policy"
+        else:
+            label_only_status = "label_only_unresolved"
         rows.append(
             {
                 "item_id": item_id,
@@ -604,7 +661,7 @@ def resolve_lite_audio_items(
                 "source_text": source_text,
                 "status": "label_only",
                 "execution_required": False,
-                "execution_status": "label_only_unresolved",
+                "execution_status": label_only_status,
                 "strategy": str(explicit_evidence.get("strategy") or "precision_first"),
                 "delete": delete_phrase,
                 "must_keep": must_keep,
@@ -612,12 +669,8 @@ def resolve_lite_audio_items(
                 "reason": reason,
                 "match_method": match_method,
                 "matches": label_matches,
-                "asr_alignment": _alignment_receipt(
-                    source_asr,
-                    matches=label_matches,
-                    resolved_time=resolved_time,
-                    authoritative_cut_boundary=False,
-                ),
+                "timing_source": timing_source,
+                "asr_alignment": alignment,
             }
         )
 
@@ -777,15 +830,20 @@ def apply_audio_plan_to_compiled_payloads(
             evidence = dict(item.get("evidence") or {})
             evidence.update(
                 {
-                    "review_timestamp_role": "search_hint",
                     "strategy": row["strategy"],
                     "delete": row["delete"],
                     "must_keep": list(row.get("must_keep") or []),
-                    "asr_alignment": deepcopy(row["asr_alignment"]),
                     "match_method": row.get("match_method"),
                     "resolved_time": row.get("resolved_time"),
                 }
             )
+            if row.get("timing_source") == "review_timestamp_fallback":
+                evidence["timing_source"] = "review_timestamp_fallback"
+                evidence["review_timestamp_role"] = "authoritative_fallback"
+                evidence.pop("asr_alignment", None)
+            else:
+                evidence["review_timestamp_role"] = "search_hint"
+                evidence["asr_alignment"] = deepcopy(row["asr_alignment"])
             if row["execution_required"]:
                 evidence["cut_windows"] = [[row["start"], row["end"]]]
                 evidence["resolved_cut_window"] = [row["start"], row["end"]]

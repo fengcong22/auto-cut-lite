@@ -5,7 +5,7 @@ import os
 import uuid
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from utils.env_setup import setup_env
 from utils.formatters import get_duration_ffprobe_cached
@@ -1166,10 +1166,15 @@ def execute_revision_request(
         Callable[[Any, RevisionRequest, Dict[str, Any]], RevisionRequest]
     ] = None,
     localize_materials: bool = False,
+    runtime_integrity_receipt: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     if request.workflow_mode == "lite":
-        runtime_integrity = None
-        if not mock_media:
+        runtime_integrity = (
+            dict(runtime_integrity_receipt)
+            if isinstance(runtime_integrity_receipt, Mapping)
+            else None
+        )
+        if not mock_media and runtime_integrity is None:
             from utils.runtime_integrity import validate_current_lite_runtime
 
             runtime_integrity = validate_current_lite_runtime()

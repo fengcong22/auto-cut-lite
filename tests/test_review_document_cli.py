@@ -49,6 +49,9 @@ class ReviewDocumentCliTests(unittest.TestCase):
         )
 
         self.assertEqual(args.cmd, "review-document-run")
+        self.assertIsNone(args.doc_url)
+        self.assertEqual(args.snapshot_json, "snapshot.json")
+        self.assertEqual(args.project_json, "project.json")
         self.assertEqual(args.job_root, "tmp/job-42")
         self.assertEqual(args.drafts_root, "drafts")
         self.assertEqual(args.package_zip, "delivery.zip")
@@ -86,6 +89,41 @@ class ReviewDocumentCliTests(unittest.TestCase):
         self.assertEqual(args.context_before, 5.0)
         self.assertEqual(args.context_after, 5.0)
 
+    def test_parser_exposes_mutually_exclusive_document_url_mode(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "review-document-run",
+                "--doc-url",
+                "https://example.feishu.cn/wiki/wiki_token",
+                "--job-root",
+                "tmp/job",
+                "--drafts-root",
+                "drafts",
+                "--package-zip",
+                "delivery.zip",
+            ]
+        )
+
+        self.assertEqual(args.doc_url, "https://example.feishu.cn/wiki/wiki_token")
+        self.assertIsNone(args.snapshot_json)
+        self.assertIsNone(args.project_json)
+        with self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "review-document-run",
+                    "--doc-url",
+                    "https://example.feishu.cn/wiki/wiki_token",
+                    "--snapshot-json",
+                    "snapshot.json",
+                    "--job-root",
+                    "tmp/job",
+                    "--drafts-root",
+                    "drafts",
+                    "--package-zip",
+                    "delivery.zip",
+                ]
+            )
+
     def test_command_wrapper_forces_lite_and_returns_protocol_result(self) -> None:
         calls = []
 
@@ -121,6 +159,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
                 {
                     "snapshot_json": "snapshot.json",
                     "project_json": "project.json",
+                    "doc_url": None,
                     "job_root": "tmp/job",
                     "drafts_root": "drafts",
                     "package_zip": "delivery.zip",
@@ -132,6 +171,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
                     "context_before": 8.0,
                     "context_after": 6.0,
                     "workflow_mode": "lite",
+                    "progress": None,
                 }
             ],
         )
@@ -165,6 +205,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
             "snapshot.json",
             "project.json",
             "tmp/job",
+            doc_url=None,
             drafts_root="drafts",
             package_zip="delivery.zip",
             relink_tool=None,
@@ -174,7 +215,27 @@ class ReviewDocumentCliTests(unittest.TestCase):
             asr_max_wait_seconds=120.0,
             context_before=5.0,
             context_after=5.0,
+            progress=None,
         )
+
+    def test_command_wrapper_rejects_incomplete_or_mixed_input_modes(self) -> None:
+        with self.assertRaisesRegex(Exception, "requires both"):
+            review_job.cmd_review_document_run(
+                "snapshot.json",
+                None,
+                "tmp/job",
+                drafts_root="drafts",
+                package_zip="delivery.zip",
+            )
+        with self.assertRaisesRegex(Exception, "mutually exclusive"):
+            review_job.cmd_review_document_run(
+                "snapshot.json",
+                "project.json",
+                "tmp/job",
+                doc_url="https://example.feishu.cn/wiki/wiki_token",
+                drafts_root="drafts",
+                package_zip="delivery.zip",
+            )
 
     def test_runner_failure_keeps_structured_diagnostics(self) -> None:
         class FakeRunError(RuntimeError):

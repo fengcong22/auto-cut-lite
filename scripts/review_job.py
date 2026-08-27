@@ -12,7 +12,7 @@ import stat
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 _SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(_SCRIPTS_ROOT) not in sys.path:
@@ -379,10 +379,11 @@ def cmd_review_job_compile(
 
 
 def cmd_review_document_run(
-    snapshot_json: str | os.PathLike[str],
-    project_json: str | os.PathLike[str],
+    snapshot_json: str | os.PathLike[str] | None,
+    project_json: str | os.PathLike[str] | None,
     job_root: str | os.PathLike[str],
     *,
+    doc_url: str | None = None,
     drafts_root: str | os.PathLike[str],
     package_zip: str | os.PathLike[str],
     relink_tool: str | os.PathLike[str] | None = None,
@@ -392,8 +393,22 @@ def cmd_review_document_run(
     asr_max_wait_seconds: float = 120.0,
     context_before: float = 5.0,
     context_after: float = 5.0,
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Run the public, Lite-only source-document workflow."""
+
+    has_doc_url = bool(str(doc_url or "").strip())
+    has_snapshot = bool(str(snapshot_json or "").strip())
+    has_project = bool(str(project_json or "").strip())
+    if has_doc_url:
+        if has_snapshot or has_project:
+            raise UserInputError(
+                "--doc-url is mutually exclusive with --snapshot-json and --project-json"
+            )
+    elif not (has_snapshot and has_project):
+        raise UserInputError(
+            "JSON input mode requires both --snapshot-json and --project-json"
+        )
 
     # Keep the heavy media/ASR runner lazy so parser and status commands stay lightweight.
     from utils.review_document_runner import ReviewDocumentRunError, run_review_document
@@ -402,6 +417,7 @@ def cmd_review_document_run(
         data = run_review_document(
             snapshot_json=snapshot_json,
             project_json=project_json,
+            doc_url=doc_url,
             job_root=job_root,
             drafts_root=drafts_root,
             package_zip=package_zip,
@@ -413,6 +429,7 @@ def cmd_review_document_run(
             context_before=context_before,
             context_after=context_after,
             workflow_mode="lite",
+            progress=progress,
         )
     except ReviewDocumentRunError as exc:
         return make_result(False, "review_document_failed", str(exc), exc.result)

@@ -3,7 +3,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field, replace
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -283,14 +283,28 @@ _VISUAL_KINDS = {
     "overlay",
 }
 
-_LITE_LABEL_ONLY_KINDS = {
-    "animation_timing",
+_LITE_PAUSE_LABEL_ONLY_KINDS = {
+    "gap_add",
+    "gap_adjustment",
     "gap_delete",
+    "gap_extend",
+    "gap_remove",
+    "gap_shorten",
     "page_turn",
+    "pause_add",
+    "pause_adjustment",
     "pause_delete",
+    "pause_extend",
+    "pause_extension",
+    "pause_remove",
+    "pause_shorten",
     "pause_timing_review",
-    "release_boundary",
     "semantic_pause_adjustment",
+}
+_LITE_LABEL_ONLY_KINDS = _LITE_PAUSE_LABEL_ONLY_KINDS | {
+    "animation_timing",
+    "page_turn",
+    "release_boundary",
     "state_release",
     "state_reveal",
     "timing",
@@ -298,11 +312,13 @@ _LITE_LABEL_ONLY_KINDS = {
 _LITE_PAUSE_CHANGE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
-        r"(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改).{0,16}(?:停顿|间隔)",
-        r"(?:停顿|间隔).{0,16}(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改|加\s*\+?\s*\d|减\s*\d)",
-        r"(?:停顿|间隔|pause|gap).{0,8}[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?",
-        r"[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?\s*(?:的)?(?:停顿|间隔|pause|gap)",
-        r"(?:删除|删掉|去掉|移除).{0,6}(?:这段|这个|该段|该)?(?:停顿|间隔)",
+        r"(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改).{0,16}(?:停顿|间隔|空白)",
+        r"(?:停顿|间隔|空白).{0,16}(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改|删除|删掉|去掉|移除|取消|加\s*\+?\s*\d|减\s*\d)",
+        r"(?:停顿|间隔|空白|pause|gap).{0,8}[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?",
+        r"[+-]\s*\d+(?:\.\d+)?\s*(?:s|秒|秒钟)?\s*(?:的)?(?:停顿|间隔|空白|pause|gap)",
+        r"(?:停顿|间隔|空白|pause|gap).{0,12}\d+(?:\.\d+)?\s*(?:s|秒|秒钟)",
+        r"\d+(?:\.\d+)?\s*(?:s|秒|秒钟).{0,6}(?:的)?(?:停顿|间隔|空白|pause|gap)",
+        r"(?:删除|删掉|去掉|移除|取消).{0,6}(?:这段|这个|该段|该)?(?:停顿|间隔|空白)",
         r"(?:add|increase|extend|shorten|reduce|remove|delete|adjust).{0,16}(?:pause|gap)",
         r"(?:pause|gap).{0,16}(?:add|increase|extend|shorten|reduce|remove|delete|adjust)",
     )
@@ -353,6 +369,34 @@ _LITE_POINTER_INSERT_HINTS = (
     "插入",
     "替换成",
 )
+_LITE_DURATION_CHANGE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:视频|画面|镜头|片段|整体|时长).{0,16}(?:延长|缩短|增加|减少|加速|减速|变速|快放|慢放|补长)",
+        r"(?:延长|缩短|增加|减少|加速|减速|变速|快放|慢放|补长).{0,16}(?:视频|画面|镜头|片段|整体|时长)",
+        r"(?:插入|增加|补|删除|删掉|去掉).{0,10}\d+(?:\.\d+)?\s*(?:s|秒|秒钟).{0,8}(?:空白|画面|视频|时长|静帧|停留)?",
+        r"(?:duration|freeze|hold|speed|time[ _-]?stretch|slow[ _-]?motion)",
+    )
+)
+_LITE_PRECISION_DELETE_KINDS = {
+    "audio_delete",
+    "colored_span_delete",
+    "ellipsis_range_delete",
+    "phrase_delete",
+    "range_delete",
+    "speech_delete",
+    "speech_tail_cleanup",
+    "spoken_delete",
+    "tail_cleanup",
+    "tail_particle_delete",
+}
+_LITE_KNOWN_VISUAL_KINDS = _LITE_POINTER_KINDS | {
+    "image_overlay",
+    "overlay",
+    "visual_insert",
+    "visual_overlay",
+    "visual_replace",
+}
 
 
 def lite_execution_required(
@@ -363,12 +407,14 @@ def lite_execution_required(
     """Return the effective execution flag for the fixed Lite visual contract."""
 
     normalized_kind = str(kind or "").strip().casefold()
-    if lite_pause_change_is_label_only(normalized_kind, source_text):
+    if lite_duration_change_is_label_only(normalized_kind, source_text):
         return False
     if normalized_kind in _LITE_LABEL_ONLY_KINDS:
         return False
-    if normalized_kind not in _LITE_POINTER_KINDS:
+    if normalized_kind in _LITE_PRECISION_DELETE_KINDS:
         return bool(requested)
+    if normalized_kind not in _LITE_KNOWN_VISUAL_KINDS:
+        return False
 
     folded = str(source_text or "").casefold()
     cleanup_only = any(hint.casefold() in folded for hint in _LITE_POINTER_CLEANUP_HINTS)
@@ -382,24 +428,66 @@ def lite_pause_change_is_label_only(kind: str, source_text: str) -> bool:
     """Return whether a Lite item requests a duration-changing pause edit."""
 
     normalized_kind = str(kind or "").strip().casefold()
-    if normalized_kind in {
-        "gap_delete",
-        "pause_delete",
-        "pause_timing_review",
-        "semantic_pause_adjustment",
-    }:
+    if normalized_kind in _LITE_PAUSE_LABEL_ONLY_KINDS:
+        return True
+    if any(token in normalized_kind for token in ("pause", "gap")) and any(
+        action in normalized_kind
+        for action in (
+            "add",
+            "adjust",
+            "change",
+            "delete",
+            "extend",
+            "extension",
+            "increase",
+            "remove",
+            "shorten",
+            "timing",
+        )
+    ):
         return True
     text = str(source_text or "")
     return any(pattern.search(text) for pattern in _LITE_PAUSE_CHANGE_PATTERNS)
 
 
+def lite_duration_change_is_label_only(kind: str, source_text: str) -> bool:
+    """Fail closed for every Lite duration edit except ASR-proved speech deletion."""
+
+    normalized_kind = str(kind or "").strip().casefold()
+    if lite_pause_change_is_label_only(normalized_kind, source_text):
+        return True
+    if any(
+        token in normalized_kind
+        for token in (
+            "duration",
+            "freeze",
+            "hold",
+            "slow_motion",
+            "speed",
+            "time_stretch",
+        )
+    ):
+        return True
+    return any(pattern.search(str(source_text or "")) for pattern in _LITE_DURATION_CHANGE_PATTERNS)
+
+
+def _canonical_execution_status(value: Any) -> str:
+    candidate = str(value or "").strip()
+    normalized = re.sub(r"[\s-]+", "_", candidate).casefold()
+    if normalized == "label_only":
+        return "label_only_unresolved"
+    if normalized.startswith("label_only_"):
+        return normalized
+    return candidate
+
+
 def _nested_execution_statuses(value: Any, *, status_value: bool = False) -> Iterable[str]:
     """Yield execution statuses from arbitrarily nested JSON-shaped metadata."""
 
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, nested in value.items():
-            normalized_key = str(key or "").strip().casefold()
-            if normalized_key == "execution_status":
+            normalized_key = re.sub(r"[^a-z0-9]+", "", str(key or "").casefold())
+            if normalized_key == "executionstatus":
                 yield from _nested_execution_statuses(nested, status_value=True)
             elif normalized_key == "status":
                 for candidate in _nested_execution_statuses(nested, status_value=True):
@@ -413,7 +501,7 @@ def _nested_execution_statuses(value: Any, *, status_value: bool = False) -> Ite
             yield from _nested_execution_statuses(nested, status_value=status_value)
         return
     if status_value and value is not None:
-        candidate = str(value).strip()
+        candidate = _canonical_execution_status(value)
         if candidate:
             yield candidate
 
@@ -423,7 +511,7 @@ def resolve_execution_status(*sources: Any) -> str:
 
     statuses: List[str] = []
     for source in sources:
-        if isinstance(source, (dict, list, tuple)):
+        if isinstance(source, (Mapping, list, tuple)):
             statuses.extend(_nested_execution_statuses(source))
             continue
         statuses.extend(_nested_execution_statuses(source, status_value=True))
@@ -460,7 +548,9 @@ def lite_timing_source(kind: str, source_text: str = "") -> str:
     """Choose the authoritative Lite timing source for one review item."""
 
     normalized_kind = str(kind or "").strip().casefold()
-    if normalized_kind in _LITE_ASR_TIMING_KINDS:
+    if normalized_kind in _LITE_ASR_TIMING_KINDS or lite_pause_change_is_label_only(
+        normalized_kind, source_text
+    ):
         return "asr"
     folded = str(source_text or "").casefold()
     if any(hint.casefold() in folded for hint in _LITE_AUDIO_TIMING_TEXT_HINTS):
@@ -619,8 +709,8 @@ def _classify_review_text(text: str) -> str:
         return "phrase_delete"
     if _contains_any(normalized, _DELETE_KEYWORDS):
         return "spoken_delete"
-    if _contains_any(normalized, _EXECUTION_KEYWORDS):
-        return "visual_overlay"
+    # Unrecognized instructions are intentionally review-only in Lite. New
+    # execution behavior must be added to the maintained allowlist explicitly.
     return "review_only"
 
 

@@ -944,6 +944,85 @@ def rollback_workspace(*, receipt_path: Path) -> dict[str, Any]:
     }
 
 
+def _unrelated_workspace_inventory(details: dict[str, Any]) -> dict[str, str]:
+    workspace_root = details["workspace_root"]
+    if not workspace_root.is_dir():
+        return {}
+    managed_package = {
+        relative.casefold() for relative in details["installed_package_files"]
+    }
+    managed_skills = {name.casefold() for name in details["installed_names"]}
+    inventory: dict[str, str] = {}
+    for path in workspace_root.rglob("*"):
+        if _is_reparse(path):
+            raise ValueError(f"workspace contains a reparse point: {path}")
+        if not path.is_file():
+            continue
+        relative = path.relative_to(workspace_root).as_posix()
+        parts = PurePosixPath(relative).parts
+        if relative.casefold() == PACKAGE_AGENT_PATH.casefold():
+            continue
+        if relative.casefold() in managed_package:
+            continue
+        if (
+            len(parts) >= 4
+            and parts[0].casefold() == ".codex"
+            and parts[1].casefold() == "skills"
+            and parts[2].casefold() in managed_skills
+        ):
+            continue
+        inventory[relative] = _sha256(path)
+    return inventory
+
+
+def _inventory_digest(inventory: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for relative, file_hash in sorted(inventory.items()):
+        encoded = relative.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+        digest.update(bytes.fromhex(file_hash))
+    return digest.hexdigest()
+
+
+def uninstall_workspace(*, receipt_path: Path) -> dict[str, Any]:
+    receipt_path = _lexical(receipt_path)
+    state_root = _expected_state_root()
+    _validate_state_destinations(state_root, receipt_path)
+    payload = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict) or payload.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        raise ValueError("workspace receipt is invalid")
+    if payload.get("status") != "installed":
+        return {"status": "uninstalled", "action": "already_not_installed", "rollback_count": 0}
+
+    details = _receipt_details(payload, state_root, verify_installed_files=True)
+    workspace_root = details["workspace_root"]
+    unrelated_before = _unrelated_workspace_inventory(details)
+    rollback_count = 0
+    while True:
+        active = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+        if active.get("status") != "installed":
+            break
+        rollback_workspace(receipt_path=receipt_path)
+        rollback_count += 1
+        if rollback_count > 100:
+            raise ValueError("workspace receipt rollback chain is unexpectedly deep")
+
+    for relative, expected_hash in unrelated_before.items():
+        path = _package_path(workspace_root, relative)
+        if not path.is_file() or _is_reparse(path) or _sha256(path) != expected_hash:
+            raise RuntimeError(f"unrelated workspace file changed during uninstall: {relative}")
+    return {
+        "status": "uninstalled",
+        "action": "restored_pre_install_workspace",
+        "workspace_root": str(workspace_root),
+        "rollback_count": rollback_count,
+        "unrelated_file_count": len(unrelated_before),
+        "unrelated_tree_sha256": _inventory_digest(unrelated_before),
+        "unrelated_unchanged": True,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -956,6 +1035,9 @@ def _parser() -> argparse.ArgumentParser:
     rollback = subparsers.add_parser("rollback")
     rollback.add_argument("--receipt-path", type=Path, required=True)
     rollback.add_argument("--json", action="store_true")
+    uninstall = subparsers.add_parser("uninstall")
+    uninstall.add_argument("--receipt-path", type=Path, required=True)
+    uninstall.add_argument("--json", action="store_true")
     return parser
 
 
@@ -969,8 +1051,10 @@ def main() -> int:
                 state_root=args.state_root,
                 receipt_path=args.receipt_path,
             )
-        else:
+        elif args.command == "rollback":
             result = rollback_workspace(receipt_path=args.receipt_path)
+        else:
+            result = uninstall_workspace(receipt_path=args.receipt_path)
     except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False))
         return 1

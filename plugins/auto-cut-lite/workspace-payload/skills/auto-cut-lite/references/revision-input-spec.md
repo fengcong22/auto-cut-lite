@@ -5,8 +5,9 @@ This document defines the repository-scoped input format for review-driven JianY
 For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.md) is
 authoritative and overrides every full-workflow example or field described below. In particular,
 animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
-default geometry, every audio-identifiable item uses its ASR-resolved boundary for label placement,
-and only completely non-speech items use review timestamps. Spoken deletion remains executable;
+default geometry, and every audio-identifiable item attempts ASR first. Only uniquely ASR-located
+spoken deletion remains executable; non-executing items use the review timestamp when ASR cannot
+locate a unique point. Every new or unrecognized instruction is label-only by default;
 every pause addition, extension, shortening, or adjustment is label-only. A visible JianYing label
 always equals only the ledger item's `source_text`; execution status and diagnostic wording remain
 internal metadata and never become label text.
@@ -93,33 +94,36 @@ Missing versions, a hash mismatch, a changed cut, or changed preprocessing inval
 
 ## Atomic Phases And Resume
 
-Checkpoint these atomic phases in order:
+Checkpoint these public-runner phases in order:
 
-1. `document_snapshot_ledger`
-2. `source_materials_hashes`
-3. `source_asr_visual_index`
-4. `classified_edit_acceptance_plans`
-5. `processed_local_media_evidence`
-6. `saved_editable_draft_marker_receipts`
-7. `final_acceptance`
+1. `preflight`
+2. `document_fetch`
+3. `asset_download`
+4. `input_compile`
+5. `source_hash`
+6. `source_asr`
+7. `classification`
+8. `reverse_asr`
+9. `draft_write_validate`
+10. `package_publish`
 
 Write an atomic `job_state.json` checkpoint only after validating a phase's input/output digests and artifacts. A corrupt or mismatched checkpoint reruns only that phase; completed independent phases remain reusable. Missing source text recovery never cancels unrelated phases or draft generation.
 
-## Pointer-profile external wait and return
+## Pointer attachment ambiguity
 
-When a source-document review job reaches the pointer-profile gate without an exact ready profile and confirmed current-project binding, persist a nullable `external_wait` in `job_state.json` and mirror it in `job_timing.json`. The closed wait uses `code=awaiting_subject_profile`, `phase=pointer_profile_gate`, the exact unique pending item IDs, the job `input_digest`, relative artifact path `pointer_profile_onboarding.json`, its `artifact_sha256`, and the UTC `started_at` time. Interactive work retains the same pending request in the originating Codex task even when it has no persisted review-job wait.
-
-The sidecar preserves the project identity, pending pointer item IDs and source-ledger IDs, requested asset roles, current layout names, explicit identity values, current profile problems, and the mapped user action. It does not contain source text, inferred identity, a fallback profile, or secrets. The artifact must be a regular JSON file reached through a relative path contained by the ignored job directory. On status, restart, resume, replacement, and resolution, verify the current sidecar SHA-256 against `external_wait.artifact_sha256`; a missing, changed, non-regular, symlinked, out-of-root, or non-JSON artifact rejects stale resume instead of reconstructing context from process memory.
-
-The `external_wait.item_ids` values are the pending pointer item IDs, not completed edit receipts. Preserve them and their source-ledger mappings unchanged through every onboarding question. Independent non-pointer phases may continue, but pointer-dependent phases remain pending and must not write pointer overlays or a pointer-dependent draft. Cancellation or incomplete evidence leaves those items traceable as pending and cannot be reported as executed edits.
-
-After the exact profile is ready and the user has confirmed the applicable bind or rebind, return to `auto-cut-pointer-targeting`. Reload the current project binding, run a fresh registry `check` for the exact stage and subject, recalculate current asset, scale-reference, and approved-preview hashes, and verify every requested role and current layout carried by the pending items. Only then resolve the external wait by compare-and-swap with its current `input_digest` and `artifact_sha256` plus the current project key, draft path, and draft root. Resolution clears `external_wait`, attributes the elapsed duration to application/user wait, leaves `pointer_profile_gate` pending, and must rerun `pointer_profile_gate` from its normal entry before any pointer draft write. A changed project identity, input digest, sidecar hash, role, layout, or profile hash opens a new handoff instead of using the earlier check as a ready receipt.
+Ordinary Lite editing never opens a pointer-profile gate or onboarding wait. Use the current row's
+structurally associated attachment. When a hand/pointer row omitted its attachment, reuse only the
+unique attachment from another row with the same compiler-normalized modification name. One
+candidate binds its source row and asset identity to the intake receipt; multiple candidates return
+structured `user_action_required` with safe candidate IDs; zero candidates leaves the item
+label-only and reports the missing insertion. Never infer a candidate from filenames, OCR, ASR,
+subject identity, or repository search.
 
 ## JSON Shape
 
 ```json
 {
-  "workflow_mode": "full",
+  "workflow_mode": "lite",
   "project": {
     "draft_name": "ReviewDraft",
     "source_video": "<media-root>/source.mp4",
@@ -209,21 +213,21 @@ After the exact profile is ready and the user has confirmed the applicable bind 
   `Lite Reused Audio`, and simple downloaded assets to `Lite Visual Assets`. It keeps
   `Lite Timing Adjusted` empty. `lite_cut_layout=copy` is historical read/validation compatibility
   for older full-V1/A1 reference drafts and must be rejected for every new execution.
-- Lite deletion does not compress the timeline. Every request to add, extend, shorten, or otherwise
-  adjust a pause, including `+Ns`, `-Ns`, and `semantic_pause_adjustment`, is label-only at its
-  ASR-resolved point. It creates no `pause_adjustments`, hold, still frame, audio gap, duration
-  change, or offset for later video/audio/visual/label targets.
+- Lite deletion does not compress the timeline. Except for uniquely ASR-proved spoken deletion,
+  every duration-changing request is label-only. This includes pause, speed, hold, still-frame,
+  `+Ns`, `-Ns`, and `semantic_pause_adjustment` requests. Its label uses a unique ASR point when
+  available, otherwise the review-comment time. It creates no timeline duration change or offset.
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
 - Lite review labels use source text verbatim, start at the authoritative item time, remain in the
   top safe band, and last `2s` unless clamped by the source-length project end. For every issue
-  locatable through speech or audio, authoritative time means the final ASR-resolved window or
-  point, never the rough review timestamp. Only completely non-speech items use review timestamps;
+  locatable through speech or audio, attempt the final ASR-resolved window or point first. A
+  non-executing item uses the review timestamp when ASR cannot locate a unique point;
   a requested target after `提前到`/`推迟到`/`移到`/`调到` wins over an earlier current time.
   A non-speech point timestamp is valid without an end. Unresolved timing never maps to `0:00`.
-- Lite mode does not weaken audio timing evidence. Audio-related review-document timestamps are
-  `search_hint` values only. A spoken delete must carry a passing word/character `asr_alignment`
+- Lite mode does not weaken executable cut evidence. A spoken delete must carry a passing
+  word/character `asr_alignment`
   receipt whose `resolved_cut_window` equals the edit start/end, together with `delete`, explicit
   `must_keep`, and `strategy`. The receipt must bind the source-audio SHA-256, provider plus
   model/resource identity, adapter version, ordered positive-duration matched word/character
@@ -301,7 +305,9 @@ Each item should include:
 - `id`: stable review id, such as `修改02` or `校对05`
 - `kind`: routed kinds such as `spoken_delete`, `pause_delete`, `pause_timing_review`, `pointer_overlay`, `animation_timing`, `visual_delete`, `visual_overlay`, `bgm_replace`, `audio_level`, `noise_cleanup`, or `review_only`
 - `source_text`: original review-document wording
-- `execution_required`: `true` when the item is an actual change request
+- `execution_required`: `true` only for a closed-list Lite executor, currently a uniquely
+  ASR-proved precise spoken deletion or an attributable supplied local visual insertion; new,
+  unknown, and duration-changing non-delete requests default to `false`
 - `evidence`: proof that the request was executed
 - `validation`: proof that the output was checked
 
@@ -311,17 +317,22 @@ safe maintained implementation exists: set effective `execution_required=false`,
 one original-text label, skip ad-hoc execution, and continue independent items. Persist this value
 only in request/evidence metadata, marker receipts, validation output, and reports. Never insert it
 into `source_text` or visible JianYing text. An unresolved authoritative time is not this status;
-it fails before draft open/write. An audio-identifiable item also fails pre-write when authoritative
-ASR is missing.
+it fails before draft open/write only when neither ASR nor the review comment supplies a valid
+time. An audio-identifiable non-executing item falls back to its review-comment time when ASR fails
+or is non-unique; an executable spoken deletion still requires unique ASR evidence.
 
 Evidence examples:
 
 - audio deletion: `cut_window`, ASR source, strategy, deleted phrase, must-keep phrase, reverse-ASR `status`
 - Lite pause request: non-executing source item with authoritative ASR point and one exact
-  `source_text` marker receipt; executable `semantic_pause_adjustment` and `pause_adjustments`
+  `source_text` marker receipt at a unique ASR point or review-time fallback; executable
+  `semantic_pause_adjustment` and `pause_adjustments`
   evidence are forbidden
-- pointer/hand/underline: overlay `track_name`, `segment_id`, `asset_path`, target point, placement method, scale rule, and source-video/reference frame when available
-- animation timing: overlay or shifted segment ids, edit mode, first visible frame, stable frame, release time
+- pointer/hand/underline: overlay `track_name`, `segment_id`, `asset_path`, default geometry, start
+  time, and same-name reuse receipt when applicable; multiple reuse candidates require
+  `user_action_required`
+- animation timing: non-executing source item and one exact `source_text` marker receipt; overlay,
+  shifted-segment, stable-frame, and release evidence are forbidden in Lite
 - visual deletion: mask/overlay/patch segment ids or the exact local baked window
 
 ### Source-ledger marker identity and recovery
@@ -355,7 +366,8 @@ Use `acceptance` to make the final gate explicit. For Feishu/Lark review documen
 - `require_audio_validation: true` when spoken deletion/audio repair exists
 - In Lite, keep `require_visual_evidence: false` and `require_pointer_profile_binding: false`.
   Supplied visual execution is validated by the fixed Lite asset/start/default-geometry checks.
-- strict validation always enforces the canonical pointer-profile receipt for pointer items; omitting or setting this field to false is not an opt-out
+- Lite never enforces a pointer-profile receipt. Supplied visual insertion uses default geometry;
+  cleanup-only pointer items remain label-only.
 - In Lite, keep `require_pause_validation: false`; pause additions, extensions, shortenings, and
   adjustments are label-only. Strict Lite acceptance instead rejects any executable
   `pause_adjustments`, pause hold/still, duration change, or later-target offset.
@@ -368,7 +380,12 @@ operations. Lite pause requests route only to ASR-label and forbidden-output che
 executable pause gate. BGM replacement, level/loudness, and noise-only work skips reverse ASR
 unless a true acceptance flag explicitly requires it.
 
-An explicitly true conditional gate requires attributable evidence on an execution-required source item. A false flag cannot disable a gate required by detected work, including the canonical pointer-profile gate. Unknown execution-required types produce a structured review/failure instead of silently skipping validation. Strict final CLI validation fails when the named draft does not exist; source-text recovery during active editing remains nonblocking.
+An explicitly true conditional gate requires attributable evidence on an execution-required source
+item. A false flag cannot disable a gate required by an allowlisted executed operation. New or
+unknown types default to `execution_required=false` and one exact source-text label; an explicitly
+malformed request that still declares an unknown type executable produces structured review rather
+than being run. Strict final CLI validation fails when the named draft does not exist; source-text
+recovery during active editing remains nonblocking.
 
 `expected_review_item_count` and `expected_review_item_ids` may also come from a separate `--doc-items-json` file produced directly from the source document. This is the preferred way to catch items lost while translating the document into an edit request.
 
@@ -422,8 +439,9 @@ The local transcript must contain alphanumeric content, and transcript aliases m
 Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 
 The latest canonical doc item kind determines whether the spoken-delete contract applies. A pause
-request is validated independently as an ASR-located label-only item and must not create executable
-pause evidence. A forbidden semantic-join phrase is waived only by `pass_adjudicated` with a
+request is validated independently as an ASR-first, review-time-fallback label-only item and must
+not create executable pause evidence. A forbidden semantic-join phrase is waived only by
+`pass_adjudicated` with a
 non-empty reason, `final_gap` between 0 and 0.2 seconds, and
 `no_extra_deletion_contract=pass`.
 
@@ -453,22 +471,23 @@ The repair callback must not mutate the live project and must not write saved dr
 ### ASR-bound Lite pause labels
 
 For every request to add, extend, shorten, or otherwise adjust a pause, including input named
-`semantic_pause_adjustment`, the rough timestamp is only a search hint. Resolve the real adjacent
-utterance point with authoritative word/character ASR and bind the ASR path, current SHA-256,
+`semantic_pause_adjustment`, attempt to resolve the real adjacent utterance point with authoritative
+word/character ASR. When ASR returns a unique point, bind the ASR path, current SHA-256,
 provider/model or resource identity, adapter version, source-media identity, and ordered timing
-rows. Utterance-only or transcript-only ASR is insufficient.
+rows. Utterance-only or transcript-only ASR is insufficient for an ASR-resolved point.
 
-The resolved point must be inside the real adjacent-utterance gap, outside spoken words and
+An ASR-resolved point must be inside the real adjacent-utterance gap, outside spoken words and
 physical delete windows, and attributable to the current source bytes. Place exactly one visible
-label equal only to the item's `source_text` at that point. Keep the requested time as internal
-search-hint evidence only.
+label equal only to the item's `source_text` at that point. If ASR fails or cannot locate one unique
+point, place the label at the time written in the review comment and record
+`review_timestamp_fallback` evidence instead of guessing an ASR word.
 
 Set effective `execution_required=false` for the pause request. Do not add it to executable edits
 or `pause_adjustments`; do not split audio for a pause, create a hold or still-frame segment, add
 an audio gap, change project duration, or offset any later track, asset, or label. Strict Lite
 validation requires project duration to equal source duration and rejects every such prohibited
-pause output. Missing authoritative ASR fails before draft open/write rather than falling back to
-the review timestamp or `0:00`.
+pause output. Fail before draft open/write only when neither ASR nor the review comment supplies a
+valid time; never fall back to `0:00`.
 
 ### UI execution modes
 
@@ -516,8 +535,10 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 10. A reliable-time item that cannot be executed safely may use internal
     `execution_status=label_only_unresolved` and one exact `source_text` label while other items
     continue. Do not improvise the edit or expose that status in the label.
-11. Reject unreliable timing before draft writing. For an audio-identifiable item, the authoritative
-    time must come from configured ASR; a review timestamp cannot substitute for missing ASR.
+11. Reject unreliable timing before draft writing. Attempt configured ASR for every
+    audio-identifiable item. A uniquely located spoken deletion requires ASR and may execute;
+    a non-executing item falls back to its review timestamp when ASR fails or is non-unique. Reject
+    the item only when neither source supplies a valid time.
 12. Reject `lite_cut_layout=copy` for new execution. It may be recognized only when reading or
     validating historical drafts.
 

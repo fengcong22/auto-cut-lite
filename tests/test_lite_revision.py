@@ -26,7 +26,11 @@ from utils.lite_revision import (
 )
 from utils.review_job_compiler import compile_review_job
 from utils.revision_markers import build_marker_plan
-from utils.revision_models import _classify_review_text, resolve_execution_status
+from utils.revision_models import (
+    _classify_review_text,
+    lite_execution_required,
+    resolve_execution_status,
+)
 from utils.revision_runner import (
     execute_revision_request,
     load_revision_request,
@@ -2840,6 +2844,23 @@ class LiteRevisionTests(unittest.TestCase):
         colors = ReviewMarkerOpsMixin.REVIEW_MARKER_BACKGROUND_COLORS
         self.assertNotEqual(colors["ellipsis_range_delete"], colors["colored_span_delete"])
         self.assertNotEqual(colors["colored_span_delete"], colors["gap_delete"])
+
+    def test_lite_unknown_and_duration_changing_instructions_are_label_only(self):
+        self.assertEqual(
+            _classify_review_text("00:01 新增从未支持过的镜头旋转效果"),
+            "review_only",
+        )
+        for kind, source_text in (
+            ("brand_new_effect", "00:01 执行新的效果"),
+            ("speed_change", "00:02 画面加速到两倍"),
+            ("visual_overlay", "00:03 把视频延长 2 秒"),
+            ("freeze_frame", "00:04 插入 1 秒静帧"),
+        ):
+            with self.subTest(kind=kind):
+                self.assertFalse(lite_execution_required(kind, source_text, True))
+        self.assertTrue(
+            lite_execution_required("spoken_delete", "00:05 删除“重复词”", True)
+        )
 
 
 if __name__ == "__main__":

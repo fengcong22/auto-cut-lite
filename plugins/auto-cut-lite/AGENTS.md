@@ -60,24 +60,24 @@
   label-only. Do not create cleanup media or layers.
 - Do not start pointer-profile onboarding or require bindings, target geometry, lifecycle,
   hotspot, opened-editor, or screenshot evidence for a Lite editing request.
-- Every issue that can be located through speech or audio retains authoritative ASR timing;
-  executable spoken deletion also retains must-keep, reverse-validation, and editable-cut
-  requirements. This includes spoken deletion, pause requests, pronunciation, breath, mouth
-  noise, and speech timing. Review timestamps are search hints only. Spoken deletion uses the
-  final word/character ASR-resolved boundary for execution and its label; every pause request uses
-  that boundary only for a verbatim label and is never executed in Lite. Missing authoritative
-  ASR fails before the draft is opened or written.
-- Only completely non-speech items use review-comment timestamps. When a comment names an old
-  time and a requested target such as `07:14 ... 提前到 07:12`, place the label at `07:12`.
-  Point timestamps are valid label starts; unresolved timing must never fall back to `0:00`.
+- Every issue that can be located through speech or audio attempts authoritative ASR first.
+  Executable spoken deletion also retains must-keep, reverse-validation, and editable-cut
+  requirements. Only a uniquely word/character-ASR-located spoken deletion may execute, and its
+  label uses the resolved cut start. Every other audio or speech item is non-executing: use its
+  unique ASR point when available, otherwise use the time written in the review comment.
+- Review-only, newly encountered, unrecognized, and ASR-unresolved non-executing items use
+  review-comment timestamps. When a comment names an old time and a requested target such as
+  `07:14 ... 提前到 07:12`, place the label at `07:12`. Point timestamps are valid label starts;
+  fail only when neither ASR nor the review comment supplies a valid time, and never use `0:00`.
 - If a new issue cannot be solved safely but has a reliable authoritative start, create exactly
   one visible label equal only to its `source_text`, record
   `execution_status=label_only_unresolved` only in internal metadata/receipts/reports, and continue
-  independent items. Do not improvise an edit. If its time is unreliable, or it is
-  audio-identifiable and lacks authoritative ASR, fail before opening or writing a draft.
+  independent items. Do not improvise an edit. If ASR cannot uniquely locate a non-executing
+  item, use its review-comment time. Fail before opening or writing only when neither source
+  supplies a valid time.
 - Lite deletion never compresses the timeline, and final duration always equals source duration.
   Every request to add, extend, shorten, or otherwise adjust a pause, including `+Ns`, `-Ns`, and
-  `semantic_pause_adjustment`, is label-only at its ASR-resolved point. Do not create a
+  `semantic_pause_adjustment`, is label-only at its unique ASR point or review-time fallback. Do not create a
   `pause_adjustments` row, hold, still frame, audio gap, duration change, or offset for any later
   video, audio, visual, or label target.
 - In `split_gap`, A2 is one track containing one independent, audible source-aligned clip per

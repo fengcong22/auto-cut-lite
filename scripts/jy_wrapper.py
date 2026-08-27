@@ -10,7 +10,9 @@ import json
 import os
 import shutil
 import stat
+import sys
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
@@ -2186,6 +2188,12 @@ def _dispatch_search_assets(args) -> Dict[str, Any]:
     return cmd_search_assets(args.query, args.category, args.limit)
 
 
+def _emit_review_document_progress(event: Mapping[str, Any]) -> None:
+    payload = {"type": "progress", **dict(event)}
+    sys.stderr.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    sys.stderr.flush()
+
+
 def cmd_revision_summary(request_json: str) -> Dict[str, Any]:
     try:
         summary = summarize_revision_request(request_json)
@@ -2496,6 +2504,7 @@ def _build_command_handlers():
             args.snapshot_json,
             args.project_json,
             args.job_root,
+            doc_url=args.doc_url,
             drafts_root=args.drafts_root,
             package_zip=args.package_zip,
             relink_tool=args.relink_tool,
@@ -2505,6 +2514,7 @@ def _build_command_handlers():
             asr_max_wait_seconds=args.asr_max_wait_seconds,
             context_before=args.context_before,
             context_after=args.context_after,
+            progress=_emit_review_document_progress if args.json else None,
         ),
         "review-job-compile": lambda args: cmd_review_job_compile(
             args.snapshot_json,

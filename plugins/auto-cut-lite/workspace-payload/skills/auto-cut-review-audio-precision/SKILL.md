@@ -1,6 +1,6 @@
 ---
 name: auto-cut-review-audio-precision
-description: Use when processing Feishu/Lark review-document audio edits that require precise spoken-word deletion, Chinese word/character ASR alignment, must-keep phrase protection, ASR-located label-only pause requests, reverse validation, and serial upload of finished audio/video back to the review document.
+description: Use when processing Feishu/Lark review-document audio edits that require precise spoken-word deletion, Chinese word/character ASR alignment, must-keep phrase protection, ASR-first review-time-fallback labels for non-executing audio items, reverse validation, and serial upload of finished audio/video back to the review document.
 ---
 
 # Auto-Cut Review Audio Precision
@@ -22,8 +22,8 @@ Use this skill when the request includes any of these signals:
 
 - Feishu/Lark document review comments with audio or video attachments
 - spoken-word deletion such as deleting filler words, repeated phrases, false starts, or tail phrases
-- post-delete pause requests that need an ASR-located source-text-only label without changing the
-  timeline
+- post-delete pause requests that need an ASR-first, review-time-fallback source-text-only label
+  without changing the timeline
 - review feedback such as "第二条", "第三条", "所以没有找回来", "语言被吞音"
 - a need to upload processed audio/video back to the bottom of the same document
 - a need to choose between literal precision and cleaner listening flow
@@ -69,10 +69,11 @@ Classify each review item before matching ASR. Do not flatten every item into on
 - `ellipsis_range_delete`: when the reviewer writes `...` or `……`, delete the full spoken range between the matched prefix and suffix, not only the suffix phrase.
 - `colored_span_delete`: when the Feishu/Lark document uses colored spans, preserve span boundaries and create one delete window per colored fragment. Do not join uncolored words between colored spans into the deletion.
 - `gap_delete`: in Lite, when the note says delete the pause between two anchors, keep both anchors
-  as ASR context but create only the source-text label; do not delete the gap or filler.
-- `pause_timing_review`: in Lite, resolve the authoritative adjacent-utterance point with ASR and
-  keep the request as a source-text-only label; never choose or execute shortening, extension,
-  `semantic_pause_adjustment`, or visual-hold repair.
+  as ASR context when available but create only the source-text label; do not delete the gap or
+  filler. Fall back to the review-comment time when ASR fails or is non-unique.
+- `pause_timing_review`: in Lite, attempt the adjacent-utterance point with ASR and fall back to the
+  review-comment time. Keep only a source-text label; never choose or execute shortening,
+  extension, `semantic_pause_adjustment`, or visual-hold repair.
 - `tail_particle_delete`: for particles such as `吧`, `啊`, `哈`, `哎`, protect the following word onset and use a precise non-destructive duck/mute pass if the tail remains.
 
 If the review document contains blue or red deletion text, inspect the document markup for the colored spans instead of relying on the plain-text rendering. Treat `text-color="rgb(36,91,219)"` as blue-span evidence and `text-color="rgb(216,57,49)"` as red-span evidence when present. Preserve every marked fragment independently and never absorb uncolored words between two marked spans.
@@ -82,7 +83,9 @@ If the review document contains blue or red deletion text, inspect the document 
 - Prefer configured Volcengine ASR word/character timing for Chinese spoken-word deletion.
 - When the project has Volcengine/Doubao ASR connected, treat it as the primary timing alignment source. Feishu Minutes/Miaojì transcripts may be used only as semantic context or a search aid, not as proof of final cut boundaries.
 - Whisper may be used as a fallback transcript aid, but do not treat it as authoritative for Chinese character-level cut boundaries when Volc ASR is available.
-- If ASR credentials or resource ID are missing, say the workflow is degraded before cutting and rely on narrower manual listening windows.
+- If ASR credentials or resource ID are missing, do not execute a spoken deletion. Non-executing
+  audio items use their review-comment time; manual listening may supplement review but cannot
+  authorize a duration-changing cut.
 - When importing ASR capability from another local repository, adapt it as an alignment dependency
   only. Keep this repository's review-item schema, must-keep contract, Lite pause-label gate,
   reverse validation, and editable-draft evidence rules as the controlling workflow.
@@ -98,12 +101,11 @@ If the review document contains blue or red deletion text, inspect the document 
 
 ## Cutting Rules
 
-- In Lite mode, use source word/character ASR as the authoritative time source for every issue
-  locatable through speech or audio, not only deletion. Semantic pauses, pronunciation, breath,
-  mouth noise, and speech timing use the resolved ASR window or adjacent-utterance point for their
-  verbatim label. Spoken deletion remains executable; every pause addition, extension, shortening,
-  or adjustment is non-executing. The review timestamp remains a search hint. Fail before draft
-  writing when the ASR identity or boundary evidence is missing.
+- In Lite mode, attempt source word/character ASR for every issue locatable through speech or
+  audio. Only a uniquely ASR-located precise spoken deletion may execute. Semantic pauses,
+  pronunciation, breath, mouth noise, speech timing, and every pause addition, extension,
+  shortening, or adjustment are non-executing: use the unique ASR point when available and
+  otherwise the review-comment time. Fail only when neither source supplies a valid time.
 
 - Use physical segment removal for spoken-word deletion, not denoise or hard mute, unless the target is pure breath/noise.
 - When a reviewer marks a whole sentence/range for deletion, automatically include tightly adjacent oral fillers and discourse particles that belong to that removed range even if the written note did not spell them out. Examples include `啊`, `嗯`, `呃`, `呢`, `哈`, `这个`, `就是`, `然后`, `那`, `对吧`, and short phrases such as `坦率地讲哈` when they sit between the deleted sentence anchors. Record these as `auto_absorbed_fillers` in evidence.
@@ -133,16 +135,18 @@ Route every Lite pause request separately from deletion correctness:
 
 - cover every request to add, extend, shorten, or otherwise adjust a pause, including input named
   `semantic_pause_adjustment`;
-- treat the rough review timestamp only as a search hint and resolve the real adjacent-utterance
-  point from word/character ASR bound to the current source bytes and provider/model identity;
-- require the resolved point to fall in the attributable utterance gap, outside spoken words and
-  physical delete windows; utterance-only or transcript-only ASR is insufficient;
+- attempt the adjacent-utterance point from word/character ASR bound to the current source bytes
+  and provider/model identity;
+- when ASR yields a unique point, require it to fall in the attributable utterance gap, outside
+  spoken words and physical delete windows; utterance-only or transcript-only ASR is insufficient
+  for claiming an ASR-resolved point;
 - set effective `execution_required=false` and place exactly one visible label equal only to
-  `source_text` at the resolved point;
+  `source_text` at the unique ASR point, or at the review-comment time when ASR fails or is
+  non-unique;
 - do not emit `pause_adjustments`, split audio for a pause, create a hold or still frame, add an
   audio gap, alter project duration, or offset any later track, asset, or label;
-- fail before draft open/write when authoritative ASR is unavailable rather than using the review
-  timestamp or `0:00`.
+- fail before draft open/write only when neither ASR nor the review comment supplies a valid time;
+  never use `0:00`.
 
 ## Validation Rules
 
@@ -155,12 +159,12 @@ After processing every clip:
 - The local transcript must contain alphanumeric content, and transcript aliases must agree after normalization. Cross-check hit fields against the normalized local transcript: it must not contain the delete phrase and must support every `must_keep` phrase. A retained same-word occurrence passes only with exactly one positive `delete_hit` and structured `delete_hit_adjudication` fields `classification=kept_recurrence`, `occurrence_role`, `phrase`, `local_context`, `context_anchor`, and `reason`; the local context must occur in the transcript, the context anchor is not a substring of the delete phrase, and that anchor remains after removing the delete phrase from the local context. Multiple positive `delete_hits` or multiple local transcript delete occurrences, including overlapping occurrences, require per-hit adjudication and fail until one-to-many receipts are supported.
 - Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 - The latest canonical doc item kind determines whether the spoken-delete contract applies. Pause
-  requests are validated independently as ASR-located, label-only items and must not produce
+  requests are validated independently as ASR-first, review-time-fallback label-only items and must not produce
   executable pause evidence. A forbidden semantic-join phrase is waived only by
   `pass_adjudicated` with a non-empty reason, `final_gap` between 0 and 0.2 seconds, and
   `no_extra_deletion_contract=pass`.
 - Local seam, `must_keep`, and visual-context windows remain targeted; they supplement the full-candidate pass instead of expanding every check to the whole file.
-- Re-run ASR or do a manual transcript check on the output.
+- Re-run ASR on the output; manual transcript review may supplement but cannot replace that gate.
 - Confirm each `delete` phrase is gone.
 - Confirm every `must_keep` phrase is still present and audible.
 - Run a semantic-join scan on the local reverse-ASR text around every join. Delete-absent is not enough. Fail and iterate when the joined text contains residual fragments, duplicated characters, dangling predicates, or broken noun phrases such as `阶段性。成就`, `发发明`, `禅让制。于`, `它说明。`, or `夏朝。立的`.
@@ -180,8 +184,8 @@ For multi-edit JianYing review jobs, use the V4-style validation gate:
 - iterate with a new version when reverse ASR exposes residue, especially ultra-short colored-span words such as `它`
 - record `pass`, `review`, `fail`, and any `pass_adjudicated` items in the report
 - validate every pause request separately from delete accuracy as `execution_required=false`, with
-  current source ASR identity, an authoritative word/character-resolved point, exact `source_text`,
-  and one marker receipt;
+  a current unique source-ASR point or `review_timestamp_fallback`, exact `source_text`, and one
+  marker receipt;
 - reject any executable `semantic_pause_adjustment`, `pause_adjustments` row, pause-generated media,
   duration change, or later-target offset;
 - require final duration to equal source duration and keep all later target times source-aligned.

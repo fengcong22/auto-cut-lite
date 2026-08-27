@@ -93,7 +93,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             ["口头", "赘词"],
         )
 
-    def test_ambiguous_phrase_downgrades_to_asr_located_label(self):
+    def test_ambiguous_phrase_uses_review_timestamp_label(self):
         result = resolve_lite_audio_items(
             [
                 {
@@ -120,7 +120,9 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertFalse(row["execution_required"])
         self.assertEqual(row["execution_status"], "label_only_unresolved")
         self.assertEqual(row["reason"], "ambiguous_near_anchor")
-        self.assertFalse(row["asr_alignment"]["authoritative_cut_boundary"])
+        self.assertEqual(row["resolved_time"], 5.0)
+        self.assertEqual(row["timing_source"], "review_timestamp_fallback")
+        self.assertIsNone(row["asr_alignment"])
         self.assertEqual(result["executable_cuts"], [])
 
     def test_apply_audio_plan_touches_only_asr_items_and_keeps_source_text_exact(self):
@@ -190,11 +192,16 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(by_id["audio-label"]["source_text"], audio_text)
         self.assertEqual(ledger_by_id["audio-label"]["source_text"], audio_text)
         self.assertEqual(by_id["audio-label"]["execution_status"], "label_only_unresolved")
-        self.assertEqual(by_id["audio-label"]["start"], 5.25)
+        self.assertEqual(by_id["audio-label"]["start"], 5.0)
         self.assertEqual(
-            by_id["audio-label"]["evidence"]["asr_alignment"]["resolved_time"],
-            5.25,
+            by_id["audio-label"]["evidence"]["resolved_time"],
+            5.0,
         )
+        self.assertEqual(
+            by_id["audio-label"]["evidence"]["timing_source"],
+            "review_timestamp_fallback",
+        )
+        self.assertNotIn("asr_alignment", by_id["audio-label"]["evidence"])
         self.assertTrue(by_id["visual-exec"]["execution_required"])
         self.assertEqual(by_id["visual-exec"]["evidence"], review_items[1]["evidence"])
         self.assertEqual([edit["doc_item_id"] for edit in updated["edits"]], ["visual-exec"])

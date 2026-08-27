@@ -15,14 +15,13 @@ pointer, and animation acceptance.
 - the saved draft and declared active timeline exist and agree;
 - source media, editable tracks, split-gap cut structure, separated/reused audio, and the Lite
   duration contract satisfy the draft contract: final duration always equals source duration;
-- every source review item has one start-aligned verbatim marker; every audio-identifiable item
-  is aligned to its final ASR-resolved window or point, not the rough review timestamp; only a
-  completely non-speech item may use the review timestamp or requested target;
+- every source review item has one start-aligned verbatim marker; an audio-identifiable item first
+  attempts ASR, then a non-executing item falls back to its review timestamp when ASR fails or is
+  non-unique;
 - no unresolved item falls back to `0:00`;
 - spoken deletions retain ASR boundary, delete/must-keep, reverse-ASR, and semantic-join evidence;
-- pause additions, extensions, shortenings, and adjustments retain authoritative source-ASR
-  identity and boundary evidence for their labels, remain `execution_required=false`, and create
-  no executable pause edit;
+- pause additions, extensions, shortenings, and adjustments remain `execution_required=false`,
+  use a unique ASR point or review-time fallback for their labels, and create no executable edit;
 - A2 contains exactly one independent, audible source-aligned clip per logical ASR/V2 delete
   window, with no pending/empty plan and no full-length, continuous, muted, or cross-item-merged
   A2 segment;
@@ -30,6 +29,8 @@ pointer, and animation acceptance.
   `label_only_unresolved` is kept in receipts/reports and never appears in the label;
 - supplied pointer/image items have a saved local material and editable segment at the requested
   start, with default geometry and no keyframes;
+- a missing hand/pointer attachment is reused only from a unique row with the same normalized
+  modification name; multiple candidates return structured `user_action_required`;
 - animation/picture-timing, text-position/animation, and cleanup-only pointer items are
   `execution_required=false` and represented by their labels;
 - no `Lite Timing Adjusted`, animation overlay, clean-cover/cleanup layer, pointer movement,

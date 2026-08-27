@@ -91,7 +91,10 @@ def test_visual_skills_share_one_authoritative_lite_execution_contract() -> None
     assert "Lite Timing Adjusted" in contract_text
     assert "execution_required" in contract_text
     assert "word/character ASR-resolved cut start" in contract_text
-    assert "rough review timestamp" in contract_text
+    assert "otherwise at the review-comment time" in contract_text
+    assert "New or unrecognized issue" in contract_text
+    assert "same normalized modification name" in contract_text
+    assert "user_action_required" in contract_text
 
     agents_text = (PLUGIN_ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
     assert "Lite Execution Precedence" in agents_text
@@ -131,13 +134,36 @@ def test_lite_audio_timing_and_a2_acceptance_contract_is_packaged() -> None:
     agents = (PLUGIN_ROOT / "AGENTS.md").read_text(encoding="utf-8-sig")
 
     combined = "\n".join((contract, router, audio, acceptance, agents))
-    assert "completely non-speech" in combined
-    assert "review timestamp" in combined
+    assert "Only a uniquely ASR-located spoken deletion" in combined
+    assert "review-comment time" in combined
+    assert "ASR fails or is non-unique" in combined
     assert "0:00" in combined
     assert "one independent" in combined
     assert "merged ASR" in combined
     assert "full-length" in combined
     assert "pending" in combined
+
+
+def test_lite_packaged_rules_do_not_restore_old_asr_or_visual_execution_contracts() -> None:
+    markdown = "\n".join(
+        path.read_text(encoding="utf-8-sig")
+        for path in sorted(SKILLS_ROOT.rglob("*.md"))
+    )
+    stale_rules = (
+        "Only completely non-speech items use the review timestamp",
+        "Missing authoritative ASR fails before",
+        "a review timestamp cannot substitute for missing ASR",
+        "whole-section advance or full-screen video advance",
+        "strict validation always enforces the canonical pointer-profile receipt",
+    )
+    for rule in stale_rules:
+        assert rule not in markdown
+
+    assert "every duration-changing request is label-only" in markdown
+    assert "Every newly encountered or unrecognized issue is label-only" in markdown
+    assert "review_timestamp_fallback" in markdown
+    assert "same normalized modification name" in markdown
+    assert "user_action_required" in markdown
 
 
 def test_active_lite_visual_prompts_do_not_reenable_full_visual_execution() -> None:
@@ -249,9 +275,11 @@ def test_portable_capability_contract_requires_named_marketplace_and_split_runti
         "default_root": "extracted_package_root",
         "custom_root_supported": True,
         "custom_root_parameter": "WorkspaceRoot",
-        "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+        "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
+        "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+        "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
         "one_click_default_network": "china_mirrors",
-        "post_install_guide": "CODEX_NEXT_STEPS.md",
+        "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
         "required_leaf_name": "Auto-cut-lite",
         "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
         "explicit_path_upgrade": "verified_relocation_with_rollback",

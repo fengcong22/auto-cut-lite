@@ -1,0 +1,1380 @@
+"""Privacy-safe Feishu/Lark URL intake for the maintained Lite runner."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+INTAKE_SCHEMA_VERSION = 1
+READINESS_SCHEMA_VERSION = 1
+LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v1"
+
+_MAX_DOCUMENT_XML_BYTES = 16 * 1024 * 1024
+_MAX_DOCUMENT_XML_ELEMENTS = 50_000
+_MAX_DOCUMENT_XML_DEPTH = 64
+_MAX_DOCUMENT_XML_ATTRIBUTES = 64
+_MAX_DOCUMENT_XML_ATTRIBUTE_CHARS = 64 * 1024
+_MAX_DOCUMENT_XML_TEXT_CHARS = 8 * 1024 * 1024
+_MAX_ASSET_DOWNLOAD_BYTES = 8 * 1024 * 1024 * 1024
+_MAX_TOTAL_ASSET_DOWNLOAD_BYTES = 16 * 1024 * 1024 * 1024
+_LARK_HOST_SUFFIXES = ("feishu.cn", "larksuite.com", "larkoffice.com")
+_VIDEO_SUFFIXES = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
+_AUDIO_SUFFIXES = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
+_IMAGE_SUFFIXES = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".webp"})
+_SOURCE_VIDEO_CUES = (
+    "录屏",
+    "源视频",
+    "原视频",
+    "原始视频",
+    "待剪",
+    "待修改",
+    "source",
+)
+_VISUAL_NAME_CUES = (
+    "小手",
+    "手指",
+    "箭头",
+    "指针",
+    "pointer",
+    "hand",
+    "arrow",
+)
+_IMAGE_REPLACEMENT_CUES = (
+    "formula",
+    "icon",
+    "image",
+    "label",
+    "replace",
+    "公式",
+    "图标",
+    "图片",
+    "标签",
+    "替换",
+)
+_SENSITIVE_IDENTITY_KEYS = (
+    "token",
+    "secret",
+    "credential",
+    "authorization",
+    "url",
+    "code",
+)
+_SENSITIVE_SNAPSHOT_FIELDS = frozenset(
+    {
+        "access_token",
+        "app_secret",
+        "asset_token",
+        "asset_url",
+        "authorization_url",
+        "credential",
+        "credentials",
+        "doc_token",
+        "document_id",
+        "document_token",
+        "document_url",
+        "download_url",
+        "file_token",
+        "media_token",
+        "refresh_token",
+        "signed_url",
+        "temporary_url",
+        "token",
+        "url",
+    }
+)
+_XML_DECLARATION = re.compile(r"^\s*<\?xml[^>]*\?>", re.IGNORECASE)
+
+
+class ReviewDocumentIntakeError(RuntimeError):
+    """A sanitized intake failure suitable for a machine-readable response."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        user_action: Mapping[str, Any] | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code)
+        self.user_action = dict(user_action or {})
+        self.details = dict(details or {})
+
+    def public_data(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"code": self.code, "message": str(self)}
+        if self.user_action:
+            payload["user_action_required"] = self.user_action
+        if self.details:
+            payload["details"] = self.details
+        return payload
+
+
+CommandRunner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return _sha256_bytes(value.encode("utf-8"))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def validate_document_url(raw_url: str) -> str:
+    value = str(raw_url or "").strip()
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ReviewDocumentIntakeError(
+            "invalid_document_url", "doc_url contains unsupported control characters"
+        )
+    parsed = urlsplit(value)
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ReviewDocumentIntakeError(
+            "invalid_document_url", "doc_url contains an invalid port"
+        ) from exc
+    host = str(parsed.hostname or "").rstrip(".").casefold()
+    trusted_host = any(host == suffix or host.endswith(f".{suffix}") for suffix in _LARK_HOST_SUFFIXES)
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or not trusted_host
+    ):
+        raise ReviewDocumentIntakeError(
+            "invalid_document_url", "doc_url must be an absolute HTTPS Feishu/Lark URL"
+        )
+    route_parts = {part.casefold() for part in parsed.path.split("/") if part}
+    if not route_parts.intersection({"docx", "wiki"}):
+        raise ReviewDocumentIntakeError(
+            "invalid_document_url", "doc_url must identify a /docx/ or /wiki/ document"
+        )
+    return value
+
+
+def document_url_digest(raw_url: str) -> str:
+    value = validate_document_url(raw_url)
+    parsed = urlsplit(value)
+    canonical = urlunsplit(
+        (
+            parsed.scheme.casefold(),
+            parsed.netloc.casefold(),
+            parsed.path.rstrip("/"),
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+    return _sha256_text(canonical)
+
+
+def sanitize_document_snapshot(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove provider secrets from a compatibility snapshot before job persistence."""
+
+    identity_values: list[str] = []
+    document = snapshot.get("document")
+    if isinstance(document, Mapping):
+        for key, value in document.items():
+            normalized = str(key).strip().casefold().replace("-", "_")
+            if normalized in _SENSITIVE_SNAPSHOT_FIELDS and str(value or "").strip():
+                identity_values.append(str(value).strip())
+
+    def visit(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            cleaned: dict[str, Any] = {}
+            for key, child in value.items():
+                normalized = str(key).strip().casefold().replace("-", "_")
+                if normalized in _SENSITIVE_SNAPSHOT_FIELDS:
+                    continue
+                cleaned[str(key)] = visit(child)
+            return cleaned
+        if isinstance(value, list):
+            return [visit(child) for child in value]
+        if isinstance(value, tuple):
+            return [visit(child) for child in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
+
+    sanitized = visit(snapshot)
+    if not isinstance(sanitized, dict):
+        raise ReviewDocumentIntakeError(
+            "document_snapshot_invalid", "The compatibility document snapshot is invalid"
+        )
+    sanitized_document = sanitized.get("document")
+    if not isinstance(sanitized_document, dict):
+        sanitized_document = {}
+        sanitized["document"] = sanitized_document
+    sanitized_document.pop("id", None)
+    existing_digest = str(sanitized_document.get("document_identity_sha256") or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", existing_digest):
+        identity_payload = identity_values or [
+            str(document.get("id") or "") if isinstance(document, Mapping) else "",
+            str(document.get("revision") or "") if isinstance(document, Mapping) else "",
+        ]
+        sanitized_document["document_identity_sha256"] = _sha256_bytes(
+            _canonical_json(identity_payload)
+        )
+    return sanitized
+
+
+def _node_executable(shim_directory: Path) -> Path:
+    adjacent = shim_directory / ("node.exe" if os.name == "nt" else "node")
+    if adjacent.is_file():
+        return adjacent.resolve(strict=True)
+    discovered = shutil.which("node.exe") or shutil.which("node")
+    if not discovered:
+        raise ReviewDocumentIntakeError(
+            "lark_cli_unavailable", "The Node.js runtime required by lark-cli is unavailable"
+        )
+    return Path(discovered).resolve(strict=True)
+
+
+def _lark_command_prefix(
+    explicit: str | os.PathLike[str] | None = None,
+) -> tuple[str, ...]:
+    if explicit is not None:
+        candidate = Path(explicit).expanduser().resolve(strict=True)
+        if not candidate.is_file():
+            raise ReviewDocumentIntakeError(
+                "lark_cli_unavailable", "The configured lark-cli executable is unavailable"
+            )
+    else:
+        executable = shutil.which("lark-cli.cmd") or shutil.which("lark-cli")
+        if not executable:
+            raise ReviewDocumentIntakeError(
+                "lark_cli_unavailable",
+                "lark-cli is not installed",
+                user_action={
+                    "action_code": "authorization",
+                    "reason_code": "lark_cli_unavailable",
+                },
+            )
+        candidate = Path(executable).resolve(strict=True)
+
+    suffix = candidate.suffix.casefold()
+    if suffix == ".exe":
+        return (str(candidate),)
+    if suffix == ".js":
+        return (str(_node_executable(candidate.parent)), str(candidate))
+    if suffix in {".cmd", ".bat", ".ps1"} or (os.name == "nt" and not suffix):
+        script = candidate.parent / "node_modules" / "@larksuite" / "cli" / "scripts" / "run.js"
+        if not script.is_file():
+            raise ReviewDocumentIntakeError(
+                "lark_cli_unavailable",
+                "The lark-cli Windows shim does not have a verified JavaScript entrypoint",
+            )
+        return (str(_node_executable(candidate.parent)), str(script.resolve(strict=True)))
+    if os.name != "nt" and os.access(candidate, os.X_OK):
+        return (str(candidate),)
+    raise ReviewDocumentIntakeError(
+        "lark_cli_unavailable",
+        "The configured lark-cli executable type is not supported safely",
+    )
+
+
+def _lark_executable(explicit: str | os.PathLike[str] | None = None) -> tuple[str, ...]:
+    try:
+        return _lark_command_prefix(explicit)
+    except (FileNotFoundError, OSError) as exc:
+        raise ReviewDocumentIntakeError(
+            "lark_cli_unavailable",
+            "The configured lark-cli executable is unavailable",
+            user_action={
+                "action_code": "authorization",
+                "reason_code": "lark_cli_unavailable",
+            },
+        ) from exc
+
+
+def _default_command_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        list(command),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+
+def _run_json_command(
+    command: Sequence[str],
+    *,
+    runner: CommandRunner | None,
+    failure_code: str,
+    failure_message: str,
+) -> dict[str, Any]:
+    completed = (runner or _default_command_runner)(command)
+    if completed.returncode != 0:
+        raise ReviewDocumentIntakeError(
+            failure_code,
+            failure_message,
+            user_action={
+                "action_code": "authorization",
+                "reason_code": failure_code,
+            },
+            details={"provider_exit_code": int(completed.returncode)},
+        )
+    try:
+        payload = json.loads(completed.stdout)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ReviewDocumentIntakeError(
+            failure_code,
+            f"{failure_message}; the provider response was not valid JSON",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ReviewDocumentIntakeError(
+            failure_code, f"{failure_message}; the provider response was not an object"
+        )
+    return payload
+
+
+def lark_cli_version(
+    *,
+    lark_cli: str | os.PathLike[str] | None = None,
+    runner: CommandRunner | None = None,
+) -> str:
+    executable = _lark_executable(lark_cli)
+    completed = (runner or _default_command_runner)([*executable, "--version"])
+    if completed.returncode != 0:
+        raise ReviewDocumentIntakeError(
+            "lark_cli_unavailable", "lark-cli version detection failed"
+        )
+    match = re.search(r"\bversion\s+([^\s]+)", completed.stdout, flags=re.IGNORECASE)
+    if not match:
+        raise ReviewDocumentIntakeError(
+            "lark_cli_unavailable", "lark-cli returned an unsupported version response"
+        )
+    return match.group(1)
+
+
+def lark_whoami(
+    *,
+    lark_cli: str | os.PathLike[str] | None = None,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    executable = _lark_executable(lark_cli)
+    payload = _run_json_command(
+        [*executable, "whoami"],
+        runner=runner,
+        failure_code="lark_user_identity_unavailable",
+        failure_message="The current Feishu/Lark user identity is unavailable",
+    )
+    identity = str(payload.get("identity") or "").strip().casefold()
+    default_as = str(payload.get("defaultAs") or payload.get("default_as") or "").strip().casefold()
+    if payload.get("available") is not True or identity != "user" or default_as != "user":
+        raise ReviewDocumentIntakeError(
+            "lark_user_identity_unavailable",
+            "Feishu/Lark must be configured for the current user with strict user identity",
+            user_action={
+                "action_code": "authorization",
+                "reason_code": "lark_user_identity_unavailable",
+            },
+        )
+    return payload
+
+
+def fetch_lark_document(
+    doc_url: str,
+    *,
+    lark_cli: str | os.PathLike[str] | None = None,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    value = validate_document_url(doc_url)
+    executable = _lark_executable(lark_cli)
+    payload = _run_json_command(
+        [
+            *executable,
+            "docs",
+            "+fetch",
+            "--doc",
+            value,
+            "--scope",
+            "full",
+            "--detail",
+            "full",
+            "--doc-format",
+            "xml",
+            "--format",
+            "json",
+            "--as",
+            "user",
+        ],
+        runner=runner,
+        failure_code="document_fetch_failed",
+        failure_message="The Feishu/Lark document could not be read as the current user",
+    )
+    if payload.get("ok") is not True or str(payload.get("identity") or "").casefold() != "user":
+        raise ReviewDocumentIntakeError(
+            "document_fetch_failed",
+            "The Feishu/Lark document read did not use the current user identity",
+            user_action={
+                "action_code": "authorization",
+                "reason_code": "document_fetch_failed",
+            },
+        )
+    data = payload.get("data")
+    document = data.get("document") if isinstance(data, Mapping) else None
+    if not isinstance(document, Mapping):
+        raise ReviewDocumentIntakeError(
+            "document_fetch_failed", "The Feishu/Lark response did not contain a document"
+        )
+    content = document.get("content")
+    document_id = document.get("document_id")
+    revision_id = document.get("revision_id")
+    if (
+        not isinstance(content, str)
+        or not content.strip()
+        or not isinstance(document_id, str)
+        or not document_id.strip()
+        or isinstance(revision_id, bool)
+        or not isinstance(revision_id, (int, str))
+    ):
+        raise ReviewDocumentIntakeError(
+            "document_fetch_failed", "The Feishu/Lark document response was incomplete"
+        )
+    return {
+        "content": content,
+        "document_id": document_id,
+        "revision_id": revision_id,
+        "identity": "user",
+    }
+
+
+def _safe_extension(name: str, mime: str) -> str:
+    suffix = Path(str(name or "")).suffix.casefold()
+    if not re.fullmatch(r"\.[a-z0-9]{1,10}", suffix):
+        suffix = str(mimetypes.guess_extension(str(mime or "").split(";", 1)[0]) or "").casefold()
+    return suffix if re.fullmatch(r"\.[a-z0-9]{1,10}", suffix) else ".bin"
+
+
+def _asset_token(element: ET.Element) -> str:
+    direct = str(element.get("token") or "").strip()
+    if direct:
+        return direct
+    source = str(element.get("src") or "").strip()
+    return source if source and "://" not in source else ""
+
+
+def _wrap_document_xml(content: str) -> ET.Element:
+    encoded_size = len(content.encode("utf-8"))
+    if encoded_size > _MAX_DOCUMENT_XML_BYTES:
+        raise ReviewDocumentIntakeError(
+            "document_too_large", "The Feishu/Lark document exceeds the maintained intake limit"
+        )
+    if "<!DOCTYPE" in content.upper() or "<!ENTITY" in content.upper():
+        raise ReviewDocumentIntakeError(
+            "document_xml_unsafe", "The Feishu/Lark document contains unsupported XML declarations"
+        )
+    normalized = _XML_DECLARATION.sub("", content, count=1)
+    parser = ET.XMLPullParser(events=("start", "end"))
+    root: ET.Element | None = None
+    depth = 0
+    element_count = 0
+    text_chars = 0
+    try:
+        document = f"<auto-cut-document>{normalized}</auto-cut-document>"
+        for offset in range(0, len(document), 64 * 1024):
+            parser.feed(document[offset : offset + 64 * 1024])
+            for event, element in parser.read_events():
+                if event == "start":
+                    depth += 1
+                    element_count += 1
+                    if root is None:
+                        root = element
+                    if depth > _MAX_DOCUMENT_XML_DEPTH:
+                        raise ReviewDocumentIntakeError(
+                            "document_xml_too_complex",
+                            "The Feishu/Lark document XML exceeds the maintained depth limit",
+                        )
+                    if element_count > _MAX_DOCUMENT_XML_ELEMENTS:
+                        raise ReviewDocumentIntakeError(
+                            "document_xml_too_complex",
+                            "The Feishu/Lark document XML exceeds the maintained element limit",
+                        )
+                    if len(element.attrib) > _MAX_DOCUMENT_XML_ATTRIBUTES or any(
+                        len(str(key)) + len(str(value)) > _MAX_DOCUMENT_XML_ATTRIBUTE_CHARS
+                        for key, value in element.attrib.items()
+                    ):
+                        raise ReviewDocumentIntakeError(
+                            "document_xml_too_complex",
+                            "The Feishu/Lark document XML exceeds the maintained attribute limit",
+                        )
+                else:
+                    text_chars += len(element.text or "") + len(element.tail or "")
+                    if text_chars > _MAX_DOCUMENT_XML_TEXT_CHARS:
+                        raise ReviewDocumentIntakeError(
+                            "document_xml_too_complex",
+                            "The Feishu/Lark document XML exceeds the maintained text limit",
+                        )
+                    depth -= 1
+        parser.close()
+    except ET.ParseError as exc:
+        raise ReviewDocumentIntakeError(
+            "document_xml_invalid", "The Feishu/Lark document XML could not be parsed"
+        ) from exc
+    if root is None or depth != 0:
+        raise ReviewDocumentIntakeError(
+            "document_xml_invalid", "The Feishu/Lark document XML could not be parsed"
+        )
+    return root
+
+
+def _top_level_index(root: ET.Element) -> dict[int, int]:
+    indexes: dict[int, int] = {}
+    for index, top in enumerate(list(root)):
+        for element in top.iter():
+            indexes[id(element)] = index
+    return indexes
+
+
+def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
+    content = str(fetch.get("content") or "")
+    raw_document_id = str(fetch.get("document_id") or "").strip()
+    if not raw_document_id:
+        raise ReviewDocumentIntakeError(
+            "document_fetch_failed", "The Feishu/Lark document identity was missing"
+        )
+    document_identity_sha256 = _sha256_text(raw_document_id)
+    root = _wrap_document_xml(content)
+    top_indexes = _top_level_index(root)
+    review_rows: list[dict[str, Any]] = []
+    checkbox_positions: list[tuple[int, int]] = []
+    for checkbox in root.iter("checkbox"):
+        source_text = "".join(checkbox.itertext())
+        if not source_text.strip():
+            continue
+        raw_block_id = str(checkbox.get("id") or "").strip()
+        block_digest = _sha256_text(
+            f"{document_identity_sha256}\0{raw_block_id or len(review_rows)}"
+        )
+        row: dict[str, Any] = {
+            "block_id": f"block_{block_digest[:24]}",
+            "source_text": source_text,
+        }
+        colored_spans: list[dict[str, str]] = []
+        for span in checkbox.iter("span"):
+            color = str(span.get("text-color") or "").strip()
+            text = "".join(span.itertext())
+            if color and text:
+                colored_spans.append({"text": text, "color": color})
+        if colored_spans:
+            row["colored_spans"] = colored_spans
+        review_rows.append(row)
+        checkbox_positions.append((top_indexes.get(id(checkbox), -1), len(review_rows) - 1))
+
+    if not review_rows:
+        raise ReviewDocumentIntakeError(
+            "review_items_missing", "The Feishu/Lark document contains no review checkbox items"
+        )
+
+    assets: list[dict[str, Any]] = []
+    for asset_index, element in enumerate(
+        candidate for candidate in root.iter() if candidate.tag in {"img", "source"}
+    ):
+        token = _asset_token(element)
+        if not token:
+            continue
+        name = str(element.get("name") or element.get("alt") or "").strip()
+        mime = str(element.get("mime") or "application/octet-stream").strip().casefold()
+        extension = _safe_extension(name, mime)
+        asset_digest = _sha256_text(
+            "\0".join(
+                (
+                    document_identity_sha256,
+                    element.tag,
+                    str(asset_index),
+                    token,
+                    name,
+                    mime,
+                )
+            )
+        )
+        top_index = top_indexes.get(id(element), -1)
+        associated_item_index: int | None = None
+        preceding = [row for row in checkbox_positions if row[0] < top_index]
+        if preceding:
+            nearest_top, nearest_item = preceding[-1]
+            intervening = [row for row in checkbox_positions if nearest_top < row[0] < top_index]
+            if not intervening and top_index - nearest_top <= 1:
+                associated_item_index = nearest_item
+        expected_size: int | None = None
+        raw_size = str(element.get("size") or "").strip()
+        if raw_size.isdigit():
+            expected_size = int(raw_size)
+        assets.append(
+            {
+                "asset_id": f"asset_{asset_digest[:24]}",
+                "tag": element.tag,
+                "token": token,
+                "name": name,
+                "mime": mime,
+                "extension": extension,
+                "expected_size": expected_size,
+                "associated_item_index": associated_item_index,
+            }
+        )
+
+    safe_asset_identity = [
+        {
+            "asset_id": row["asset_id"],
+            "tag": row["tag"],
+            "mime": row["mime"],
+            "extension": row["extension"],
+            "expected_size": row["expected_size"],
+            "associated_item_index": row["associated_item_index"],
+        }
+        for row in assets
+    ]
+    return {
+        "document_identity_sha256": document_identity_sha256,
+        "revision_id": fetch.get("revision_id"),
+        "content_sha256": _sha256_text(content),
+        "asset_identity_sha256": _sha256_bytes(_canonical_json(safe_asset_identity)),
+        "review_items": review_rows,
+        "assets": assets,
+        "safe_asset_identity": safe_asset_identity,
+    }
+
+
+def download_lark_assets(
+    parsed: Mapping[str, Any],
+    output_dir: str | os.PathLike[str],
+    *,
+    lark_cli: str | os.PathLike[str] | None = None,
+    runner: CommandRunner | None = None,
+    progress: Callable[[Mapping[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    root = Path(output_dir).expanduser().resolve(strict=False)
+    root.mkdir(parents=True, exist_ok=True)
+    receipt_root = root / ".receipts"
+    receipt_root.mkdir(parents=True, exist_ok=True)
+    executable = _lark_executable(lark_cli)
+    rows: list[dict[str, Any]] = []
+    raw_assets = parsed.get("assets")
+    if not isinstance(raw_assets, list):
+        raise ReviewDocumentIntakeError(
+            "asset_index_invalid", "The document asset index is invalid"
+        )
+    normalized_assets: list[tuple[int, Mapping[str, Any], int | None]] = []
+    declared_total_size = 0
+    for index, raw in enumerate(raw_assets):
+        if not isinstance(raw, Mapping):
+            raise ReviewDocumentIntakeError(
+                "asset_index_invalid", "The document asset index contains an invalid row"
+            )
+        asset_id = str(raw.get("asset_id") or "")
+        raw_expected_size = raw.get("expected_size")
+        if raw_expected_size is None:
+            expected_size = None
+        elif (
+            isinstance(raw_expected_size, bool)
+            or not isinstance(raw_expected_size, int)
+            or raw_expected_size < 0
+        ):
+            raise ReviewDocumentIntakeError(
+                "asset_index_invalid",
+                "The document asset index contains an invalid expected size",
+                details={"asset_id": asset_id},
+            )
+        else:
+            expected_size = raw_expected_size
+        if expected_size is not None and expected_size > _MAX_ASSET_DOWNLOAD_BYTES:
+            raise ReviewDocumentIntakeError(
+                "asset_download_size_limit_exceeded",
+                "A Feishu/Lark document material exceeds the download size limit",
+                details={
+                    "asset_id": asset_id,
+                    "byte_size": expected_size,
+                    "maximum_byte_size": _MAX_ASSET_DOWNLOAD_BYTES,
+                },
+            )
+        declared_total_size += expected_size or 0
+        if declared_total_size > _MAX_TOTAL_ASSET_DOWNLOAD_BYTES:
+            raise ReviewDocumentIntakeError(
+                "asset_download_total_limit_exceeded",
+                "The Feishu/Lark document materials exceed the total download size limit",
+                details={
+                    "declared_byte_size": declared_total_size,
+                    "maximum_byte_size": _MAX_TOTAL_ASSET_DOWNLOAD_BYTES,
+                },
+            )
+        normalized_assets.append((index, raw, expected_size))
+
+    total_asset_size = 0
+    revision_id = parsed.get("revision_id")
+    normalized_revision_id = None if revision_id is None else str(revision_id)
+    for index, raw, expected_size in normalized_assets:
+        asset_id = str(raw.get("asset_id") or "")
+        extension = str(raw.get("extension") or ".bin")
+        token = str(raw.get("token") or "")
+        target = root / f"{asset_id}{extension}"
+        receipt_path = receipt_root / f"{asset_id}.json"
+        input_digest = _sha256_bytes(
+            _canonical_json(
+                {
+                    "document_identity_sha256": str(
+                        parsed.get("document_identity_sha256") or ""
+                    ),
+                    "revision_id": normalized_revision_id,
+                    "content_sha256": str(parsed.get("content_sha256") or ""),
+                    "asset_identity_sha256": str(
+                        parsed.get("asset_identity_sha256") or ""
+                    ),
+                    "asset_id": asset_id,
+                    "token_sha256": _sha256_text(token),
+                    "expected_size": expected_size,
+                    "adapter_version": LARK_ADAPTER_VERSION,
+                }
+            )
+        )
+        receipt: dict[str, Any] = {}
+        try:
+            loaded = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+            if isinstance(loaded, dict):
+                receipt = loaded
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            receipt = {}
+        target_size = target.stat().st_size if target.is_file() else None
+        cache_metadata_matches = bool(
+            target_size is not None
+            and target_size > 0
+            and receipt.get("schema_version") == INTAKE_SCHEMA_VERSION
+            and receipt.get("asset_id") == asset_id
+            and receipt.get("input_digest") == input_digest
+            and receipt.get("byte_size") == target_size
+        )
+        if (
+            cache_metadata_matches
+            and target_size is not None
+            and target_size > _MAX_ASSET_DOWNLOAD_BYTES
+        ):
+            raise ReviewDocumentIntakeError(
+                "asset_download_size_limit_exceeded",
+                "A cached Feishu/Lark document material exceeds the download size limit",
+                details={
+                    "asset_id": asset_id,
+                    "byte_size": target_size,
+                    "maximum_byte_size": _MAX_ASSET_DOWNLOAD_BYTES,
+                },
+            )
+        cache_hit = bool(
+            cache_metadata_matches
+            and target_size is not None
+            and (expected_size is None or target_size == expected_size)
+            and receipt.get("sha256") == _sha256_file(target)
+        )
+        if (
+            cache_hit
+            and target_size is not None
+            and total_asset_size + target_size > _MAX_TOTAL_ASSET_DOWNLOAD_BYTES
+        ):
+            raise ReviewDocumentIntakeError(
+                "asset_download_total_limit_exceeded",
+                "The cached Feishu/Lark document materials exceed the total download size limit",
+                details={
+                    "aggregate_byte_size": total_asset_size + target_size,
+                    "maximum_byte_size": _MAX_TOTAL_ASSET_DOWNLOAD_BYTES,
+                },
+            )
+        if not cache_hit:
+            if target.exists():
+                target.unlink()
+            if receipt_path.exists():
+                receipt_path.unlink()
+            if progress is not None:
+                progress(
+                    {
+                        "event": "asset_download",
+                        "status": "started",
+                        "asset_id": asset_id,
+                        "asset_index": index,
+                    }
+                )
+            descriptor, temporary_name = tempfile.mkstemp(
+                prefix=f".{asset_id}.", suffix=f".part{extension}", dir=root
+            )
+            os.close(descriptor)
+            temporary = Path(temporary_name)
+            temporary.unlink()
+            try:
+                completed = (runner or _default_command_runner)(
+                    [
+                        *executable,
+                        "docs",
+                        "+media-download",
+                        "--token",
+                        token,
+                        "--output",
+                        str(temporary),
+                        "--as",
+                        "user",
+                    ]
+                )
+            except Exception:
+                if temporary.exists():
+                    temporary.unlink()
+                raise
+            if (
+                completed.returncode != 0
+                or not temporary.is_file()
+                or temporary.stat().st_size <= 0
+            ):
+                if temporary.exists():
+                    temporary.unlink()
+                raise ReviewDocumentIntakeError(
+                    "asset_download_failed",
+                    "A Feishu/Lark document material could not be downloaded",
+                    user_action={
+                        "action_code": "authorization",
+                        "reason_code": "asset_download_failed",
+                    },
+                    details={"asset_id": asset_id, "provider_exit_code": completed.returncode},
+                )
+            downloaded_size = temporary.stat().st_size
+            if downloaded_size > _MAX_ASSET_DOWNLOAD_BYTES:
+                temporary.unlink()
+                raise ReviewDocumentIntakeError(
+                    "asset_download_size_limit_exceeded",
+                    "A downloaded Feishu/Lark document material exceeds the download size limit",
+                    details={
+                        "asset_id": asset_id,
+                        "byte_size": downloaded_size,
+                        "maximum_byte_size": _MAX_ASSET_DOWNLOAD_BYTES,
+                    },
+                )
+            if total_asset_size + downloaded_size > _MAX_TOTAL_ASSET_DOWNLOAD_BYTES:
+                temporary.unlink()
+                raise ReviewDocumentIntakeError(
+                    "asset_download_total_limit_exceeded",
+                    (
+                        "The downloaded Feishu/Lark document materials exceed the total "
+                        "download size limit"
+                    ),
+                    details={
+                        "aggregate_byte_size": total_asset_size + downloaded_size,
+                        "maximum_byte_size": _MAX_TOTAL_ASSET_DOWNLOAD_BYTES,
+                    },
+                )
+            if expected_size is not None and downloaded_size != expected_size:
+                temporary.unlink()
+                raise ReviewDocumentIntakeError(
+                    "asset_download_incomplete",
+                    "A downloaded Feishu/Lark document material failed its size check",
+                    details={"asset_id": asset_id},
+                )
+            os.replace(temporary, target)
+            receipt = {
+                "schema_version": INTAKE_SCHEMA_VERSION,
+                "asset_id": asset_id,
+                "input_digest": input_digest,
+                "sha256": _sha256_file(target),
+                "byte_size": target.stat().st_size,
+            }
+            _atomic_write_json(receipt_path, receipt)
+            target_size = downloaded_size
+        if target_size is None:
+            raise ReviewDocumentIntakeError(
+                "asset_download_failed",
+                "A Feishu/Lark document material could not be downloaded",
+                details={"asset_id": asset_id},
+            )
+        total_asset_size += target_size
+        row = {
+            "asset_id": asset_id,
+            "path": str(target),
+            "relative_path": target.name,
+            "sha256": str(receipt.get("sha256") or _sha256_file(target)),
+            "byte_size": target_size,
+            "mime": str(raw.get("mime") or "application/octet-stream"),
+            "extension": extension,
+            "name": str(raw.get("name") or ""),
+            "associated_item_index": raw.get("associated_item_index"),
+            "cache_hit": cache_hit,
+        }
+        rows.append(row)
+        if progress is not None:
+            progress(
+                {
+                    "event": "asset_download",
+                    "status": "resumed" if cache_hit else "complete",
+                    "asset_id": asset_id,
+                    "asset_index": index,
+                }
+            )
+    return rows
+
+
+def _name_has_source_cue(name: str) -> bool:
+    folded = str(name or "").casefold()
+    return any(cue.casefold() in folded for cue in _SOURCE_VIDEO_CUES)
+
+
+def _explicit_visual_match(name: str, source_text: str) -> bool:
+    folded_name = str(name or "").casefold()
+    folded_text = str(source_text or "").casefold()
+    return any(
+        cue.casefold() in folded_name and cue.casefold() in folded_text
+        for cue in _VISUAL_NAME_CUES
+    )
+
+
+def _is_image_asset(row: Mapping[str, Any]) -> bool:
+    return str(row.get("mime") or "").casefold().startswith("image/") or str(
+        row.get("extension") or ""
+    ).casefold() in _IMAGE_SUFFIXES
+
+
+def _pointer_review_item(item: Mapping[str, Any]) -> bool:
+    text = str(item.get("source_text") or "").casefold()
+    kind = str(item.get("kind") or "").casefold()
+    return any(cue.casefold() in text or cue.casefold() in kind for cue in _VISUAL_NAME_CUES)
+
+
+def _known_image_replacement_item(item: Mapping[str, Any]) -> bool:
+    text = str(item.get("source_text") or "").casefold()
+    kind = str(item.get("kind") or "").casefold()
+    return _pointer_review_item(item) or any(
+        cue.casefold() in text or cue.casefold() in kind for cue in _IMAGE_REPLACEMENT_CUES
+    )
+
+
+def _same_name_key(item: Mapping[str, Any]) -> str:
+    for field in ("material_name", "name", "title"):
+        value = str(item.get(field) or "").strip()
+        if value:
+            return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+    text = str(item.get("source_text") or "")
+    text = re.sub(
+        r"^\s*(?:\d{1,2}\s*[:：]\s*\d{1,2}(?:\.\d+)?)\s*",
+        "",
+        text,
+    )
+    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE).casefold()
+
+
+def _visual_ambiguity(item: Mapping[str, Any], candidates: Sequence[Mapping[str, Any]]) -> None:
+    item_id = str(item.get("block_id") or item.get("id") or item.get("item_id") or "")
+    safe_candidates = [
+        {
+            "asset_id": str(row.get("asset_id") or ""),
+            "sha256": str(row.get("sha256") or ""),
+            "byte_size": int(row.get("byte_size") or 0),
+            "extension": str(row.get("extension") or ""),
+        }
+        for row in candidates
+    ]
+    raise ReviewDocumentIntakeError(
+        "visual_asset_ambiguous",
+        "A review item has multiple possible local visual materials",
+        user_action={
+            "action_code": "high_risk_confirmation",
+            "reason_code": "visual_asset_ambiguous",
+            "item_ids": [item_id] if item_id else [],
+            "candidate_ids": [row["asset_id"] for row in safe_candidates],
+        },
+        details={"candidates": safe_candidates},
+    )
+
+
+def compile_url_inputs(
+    parsed: Mapping[str, Any],
+    downloaded_assets: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    review_items = [dict(row) for row in parsed.get("review_items") or []]
+    asset_rows = [dict(row) for row in downloaded_assets]
+    videos = [
+        row
+        for row in asset_rows
+        if str(row.get("mime") or "").casefold().startswith("video/")
+        or str(row.get("extension") or "").casefold() in _VIDEO_SUFFIXES
+    ]
+    if len(videos) == 1:
+        source_video = videos[0]
+    else:
+        cued = [row for row in videos if _name_has_source_cue(str(row.get("name") or ""))]
+        if len(cued) == 1:
+            source_video = cued[0]
+        else:
+            candidates = [
+                {
+                    "asset_id": str(row.get("asset_id") or ""),
+                    "sha256": str(row.get("sha256") or ""),
+                    "byte_size": int(row.get("byte_size") or 0),
+                    "extension": str(row.get("extension") or ""),
+                }
+                for row in videos
+            ]
+            raise ReviewDocumentIntakeError(
+                "source_video_ambiguous" if videos else "source_video_missing",
+                (
+                    "The document contains multiple possible source videos; select one candidate"
+                    if videos
+                    else "The document contains no downloadable source video"
+                ),
+                user_action={
+                    "action_code": "high_risk_confirmation",
+                    "reason_code": "source_video_ambiguous" if videos else "source_video_missing",
+                    "candidate_ids": [row["asset_id"] for row in candidates],
+                },
+                details={"candidates": candidates},
+            )
+
+    visual_asset_ids: set[str] = set()
+    direct_by_item: dict[int, list[dict[str, Any]]] = {}
+    for asset in asset_rows:
+        if not _is_image_asset(asset):
+            continue
+        item_index = asset.get("associated_item_index")
+        if isinstance(item_index, bool) or not isinstance(item_index, int):
+            continue
+        if 0 <= item_index < len(review_items):
+            direct_by_item.setdefault(item_index, []).append(asset)
+
+    pointer_by_name: dict[str, list[dict[str, Any]]] = {}
+    for item_index, candidates in direct_by_item.items():
+        item = review_items[item_index]
+        if not _known_image_replacement_item(item):
+            continue
+        if len(candidates) > 1:
+            _visual_ambiguity(item, candidates)
+        selected = candidates[0]
+        item["asset_paths"] = [str(selected["path"])]
+        item["kind"] = "pointer_overlay" if _pointer_review_item(item) else "visual_overlay"
+        item["execution_required"] = True
+        visual_asset_ids.add(str(selected.get("asset_id") or ""))
+        if _pointer_review_item(item):
+            pointer_by_name.setdefault(_same_name_key(item), []).append(selected)
+
+    # A missing hand/pointer attachment may reuse a unique material already
+    # attached to another review row with the same modification name.
+    for item in review_items:
+        if item.get("asset_paths") or not _pointer_review_item(item):
+            continue
+        candidates = pointer_by_name.get(_same_name_key(item), [])
+        unique = {
+            str(candidate.get("asset_id") or ""): candidate for candidate in candidates
+        }
+        if len(unique) > 1:
+            _visual_ambiguity(item, list(unique.values()))
+        if len(unique) == 1:
+            selected = next(iter(unique.values()))
+            item["asset_paths"] = [str(selected["path"])]
+            item["kind"] = "pointer_overlay"
+            item["execution_required"] = True
+            visual_asset_ids.add(str(selected.get("asset_id") or ""))
+
+    document_identity = str(parsed.get("document_identity_sha256") or "")
+    revision_id = parsed.get("revision_id")
+    content_sha256 = str(parsed.get("content_sha256") or "")
+    asset_identity_sha256 = str(parsed.get("asset_identity_sha256") or "")
+    snapshot = {
+        "document": {
+            "document_identity_sha256": document_identity,
+            "revision": revision_id,
+            "content_sha256": content_sha256,
+            "asset_identity_sha256": asset_identity_sha256,
+            "extraction_schema_version": INTAKE_SCHEMA_VERSION,
+        },
+        "review_items": review_items,
+    }
+    project = {
+        "draft_name": f"AutoCutLite-{document_identity[:12]}",
+        "source_video": str(source_video["path"]),
+        "source_audio": "",
+        "replacement_audio": "",
+        "project_key": document_identity[:32],
+        "workflow_mode": "lite",
+        "lite_cut_layout": "split_gap",
+    }
+    manifest_rows: list[dict[str, Any]] = []
+    for row in asset_rows:
+        asset_id = str(row.get("asset_id") or "")
+        if asset_id == source_video.get("asset_id"):
+            role = "source_video"
+        elif asset_id in visual_asset_ids:
+            role = "visual_asset"
+        else:
+            role = "document_attachment"
+        manifest_rows.append(
+            {
+                "asset_id": asset_id,
+                "relative_path": str(row.get("relative_path") or ""),
+                "sha256": str(row.get("sha256") or ""),
+                "byte_size": int(row.get("byte_size") or 0),
+                "mime": str(row.get("mime") or ""),
+                "extension": str(row.get("extension") or ""),
+                "role": role,
+            }
+        )
+    asset_manifest = {
+        "schema_version": INTAKE_SCHEMA_VERSION,
+        "document_identity_sha256": document_identity,
+        "revision": revision_id,
+        "content_sha256": content_sha256,
+        "asset_identity_sha256": asset_identity_sha256,
+        "assets": manifest_rows,
+    }
+    return {
+        "snapshot": snapshot,
+        "project": project,
+        "asset_manifest": asset_manifest,
+    }
+
+
+def default_readiness_path() -> Path:
+    explicit = os.environ.get("AUTOCUT_LITE_READINESS_PATH", "").strip()
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.is_absolute():
+            raise ReviewDocumentIntakeError(
+                "readiness_path_invalid", "AUTOCUT_LITE_READINESS_PATH must be absolute"
+            )
+        return path.resolve(strict=False)
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_app_data:
+        raise ReviewDocumentIntakeError(
+            "readiness_path_invalid", "LOCALAPPDATA is unavailable"
+        )
+    return (
+        Path(local_app_data) / "Auto-Cut" / "auto-cut-lite" / "runtime-readiness.json"
+    ).resolve(strict=False)
+
+
+def _read_readiness(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {
+            "schema_version": READINESS_SCHEMA_VERSION,
+            "lark": {"status": "pending_validation"},
+            "asr": {"status": "pending_validation"},
+        }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {
+            "schema_version": READINESS_SCHEMA_VERSION,
+            "lark": {"status": "pending_validation"},
+            "asr": {"status": "pending_validation"},
+        }
+    if not isinstance(payload, dict) or payload.get("schema_version") != READINESS_SCHEMA_VERSION:
+        return {
+            "schema_version": READINESS_SCHEMA_VERSION,
+            "lark": {"status": "pending_validation"},
+            "asr": {"status": "pending_validation"},
+        }
+    return payload
+
+
+def _safe_identity_digest(payload: Mapping[str, Any]) -> str:
+    safe: dict[str, Any] = {}
+    for key, value in payload.items():
+        folded = str(key).casefold()
+        if any(fragment in folded for fragment in _SENSITIVE_IDENTITY_KEYS):
+            continue
+        if value is None or isinstance(value, (str, int, float, bool)):
+            safe[str(key)] = value
+        elif isinstance(value, Mapping):
+            nested = {
+                str(child_key): child_value
+                for child_key, child_value in value.items()
+                if child_value is None
+                or isinstance(child_value, (str, int, float, bool))
+                if not any(
+                    fragment in str(child_key).casefold()
+                    for fragment in _SENSITIVE_IDENTITY_KEYS
+                )
+            }
+            if nested:
+                safe[str(key)] = nested
+    return _sha256_bytes(_canonical_json(safe))
+
+
+def evaluate_runtime_readiness(
+    *,
+    path: str | os.PathLike[str] | None = None,
+    runtime_version: str,
+    lark_version: str,
+    asr_adapter_version: str,
+) -> dict[str, Any]:
+    target = Path(path).expanduser().resolve(strict=False) if path else default_readiness_path()
+    payload = _read_readiness(target)
+    expected = {
+        "runtime_version": str(runtime_version),
+        "lark_adapter_version": LARK_ADAPTER_VERSION,
+        "lark_cli_version": str(lark_version),
+        "asr_adapter_version": str(asr_adapter_version),
+    }
+    changed = False
+    if payload.get("versions") != expected:
+        payload["versions"] = expected
+        payload["lark"] = {
+            "status": "pending_validation",
+            "reason_code": "runtime_or_adapter_changed",
+        }
+        payload["asr"] = {
+            "status": "pending_validation",
+            "reason_code": "runtime_or_adapter_changed",
+        }
+        changed = True
+    payload["schema_version"] = READINESS_SCHEMA_VERSION
+    if changed or not target.is_file():
+        _atomic_write_json(target, payload)
+    return payload
+
+
+def mark_lark_verified(
+    whoami: Mapping[str, Any],
+    *,
+    path: str | os.PathLike[str] | None = None,
+    runtime_version: str,
+    lark_version: str,
+    asr_adapter_version: str,
+) -> dict[str, Any]:
+    target = Path(path).expanduser().resolve(strict=False) if path else default_readiness_path()
+    payload = evaluate_runtime_readiness(
+        path=target,
+        runtime_version=runtime_version,
+        lark_version=lark_version,
+        asr_adapter_version=asr_adapter_version,
+    )
+    payload["lark"] = {
+        "status": "verified",
+        "verified_at": _utc_now(),
+        "identity_sha256": _safe_identity_digest(whoami),
+    }
+    _atomic_write_json(target, payload)
+    return payload
+
+
+def invalidate_lark_readiness(
+    reason_code: str,
+    *,
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    target = Path(path).expanduser().resolve(strict=False) if path else default_readiness_path()
+    payload = _read_readiness(target)
+    payload["lark"] = {
+        "status": "pending_validation",
+        "invalidated_at": _utc_now(),
+        "reason_code": str(reason_code),
+    }
+    _atomic_write_json(target, payload)
+    return payload
+
+
+def mark_asr_verified(
+    *,
+    provider: str,
+    model_or_resource: str,
+    adapter_version: str,
+    path: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
+    target = Path(path).expanduser().resolve(strict=False) if path else default_readiness_path()
+    payload = _read_readiness(target)
+    identity = {
+        "provider": str(provider),
+        "model_or_resource": str(model_or_resource),
+        "adapter_version": str(adapter_version),
+    }
+    versions = payload.get("versions")
+    expected_adapter = (
+        str(versions.get("asr_adapter_version") or "")
+        if isinstance(versions, Mapping)
+        else ""
+    )
+    if (
+        not expected_adapter
+        or identity["adapter_version"] != expected_adapter
+        or not identity["provider"].strip()
+        or not identity["model_or_resource"].strip()
+    ):
+        payload["asr"] = {
+            "status": "pending_validation",
+            "reason_code": "asr_adapter_identity_mismatch",
+        }
+        _atomic_write_json(target, payload)
+        return payload
+    payload["asr"] = {
+        "status": "verified",
+        "verified_at": _utc_now(),
+        "identity_sha256": _sha256_bytes(_canonical_json(identity)),
+        "adapter_version": str(adapter_version),
+    }
+    _atomic_write_json(target, payload)
+    return payload
+
+
+__all__ = [
+    "INTAKE_SCHEMA_VERSION",
+    "LARK_ADAPTER_VERSION",
+    "READINESS_SCHEMA_VERSION",
+    "ReviewDocumentIntakeError",
+    "compile_url_inputs",
+    "default_readiness_path",
+    "document_url_digest",
+    "download_lark_assets",
+    "evaluate_runtime_readiness",
+    "fetch_lark_document",
+    "invalidate_lark_readiness",
+    "lark_cli_version",
+    "lark_whoami",
+    "mark_asr_verified",
+    "mark_lark_verified",
+    "parse_lark_document",
+    "sanitize_document_snapshot",
+    "validate_document_url",
+]

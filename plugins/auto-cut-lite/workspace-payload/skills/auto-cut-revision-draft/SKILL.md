@@ -19,10 +19,12 @@ focused visual skill. It overrides full-workflow visual instructions and accepta
    protect declared `must_keep` phrases, run reverse validation, and start the verbatim label at
    the final ASR-resolved cut start rather than the review timestamp.
 4. Insert only supplied local pointer/image assets, at their requested starts, with default
-   geometry and no keyframes.
+   geometry and no keyframes. If a hand/pointer row omitted its attachment, reuse only the unique
+   asset from another row with the same normalized modification name; multiple candidates return
+   structured `user_action_required`.
 5. Keep animation/picture-timing, text-position/animation, existing-hand cleanup, and every pause
-   addition/extension/shortening/adjustment item label-only. Resolve a pause label with ASR; never
-   create a pause edit.
+   addition/extension/shortening/adjustment item label-only. Attempt ASR for a pause label, then use
+   its review-comment time when ASR fails or is non-unique; never create a pause edit.
 6. Save the editable split-gap draft with final duration equal to source duration. Do not create
    `pause_adjustments`, holds, still frames, audio gaps, duration changes, or later-track offsets.
    Keep isolated marker families.

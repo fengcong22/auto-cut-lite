@@ -29,9 +29,11 @@ Existing-hand occlusion, removal, clean-cover, cleanup, and residual-cover comme
 `execution_required=false` and label-only. Do not create cover media, clean layers, baked
 windows, or source-hand removal.
 
-If no usable local asset was supplied for an insertion request, keep the label and report that
-the asset was not inserted. Do not start profile onboarding, choose a substitute, or synthesize
-one.
+If a hand/pointer row omitted its attachment, reuse an attachment only from another row with the
+same normalized modification name and only when that candidate is unique. Record the source row
+and asset identity in the receipt. Multiple candidates return structured `user_action_required`;
+never guess. If there is no such candidate, keep the label and report the missing insertion. Do not
+start profile onboarding or synthesize a substitute.
 
 Lite acceptance requires only the local material, editable segment, requested start, default
 geometry, and absence of keyframes for an executed insertion. It never requires a profile,

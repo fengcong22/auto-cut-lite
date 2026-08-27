@@ -583,3 +583,55 @@ def test_upgrade_receipt_failure_restores_previous_package_tree(
     assert (workspace / "obsolete.txt").read_text(encoding="utf-8") == "restore me\n"
     assert not (workspace / "new.txt").exists()
     assert (workspace / "PACKAGE-MANIFEST.json").read_bytes() == old_manifest
+
+
+def test_uninstall_unwinds_upgrade_chain_and_preserves_unrelated_files_byte_for_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = _load_helper()
+    workspace, state, receipt = _paths(tmp_path, monkeypatch)
+    old_skill = workspace / ".codex" / "skills" / "auto-cut"
+    old_skill.mkdir(parents=True)
+    (old_skill / "pre-install.bin").write_bytes(b"original-auto-cut-skill")
+    unrelated_skill = workspace / ".codex" / "skills" / "other-skill"
+    unrelated_skill.mkdir(parents=True)
+    unrelated_bytes = b"\x00unrelated-skill\xff"
+    (unrelated_skill / "keep.bin").write_bytes(unrelated_bytes)
+    workspace.mkdir(parents=True, exist_ok=True)
+    notes = workspace / "notes.bin"
+    notes_bytes = b"workspace-user-data\x00"
+    notes.write_bytes(notes_bytes)
+    (workspace / "AGENTS.md").write_text("# Pre-install rules\n", encoding="utf-8")
+
+    first_plugin = _plugin(tmp_path, parent="first-uninstall-package")
+    helper.install_workspace(
+        plugin_root=first_plugin,
+        workspace_root=workspace,
+        state_root=state,
+        receipt_path=receipt,
+    )
+    second_plugin = tmp_path / "second-uninstall-package" / "auto-cut-lite"
+    shutil.copytree(first_plugin, second_plugin)
+    (second_plugin / "upgrade-only.txt").write_text("upgrade\n", encoding="utf-8")
+    (second_plugin / ".codex-plugin" / "plugin.json").write_text(
+        json.dumps({"name": "auto-cut-lite", "version": "1.4.0"}), encoding="utf-8"
+    )
+    _write_package_manifest(second_plugin, version="1.4.0")
+    helper.install_workspace(
+        plugin_root=second_plugin,
+        workspace_root=workspace,
+        state_root=state,
+        receipt_path=receipt,
+    )
+
+    result = helper.uninstall_workspace(receipt_path=receipt)
+
+    assert result["status"] == "uninstalled"
+    assert result["rollback_count"] == 2
+    assert result["unrelated_unchanged"] is True
+    assert notes.read_bytes() == notes_bytes
+    assert (unrelated_skill / "keep.bin").read_bytes() == unrelated_bytes
+    assert (old_skill / "pre-install.bin").read_bytes() == b"original-auto-cut-skill"
+    assert (workspace / "AGENTS.md").read_text(encoding="utf-8") == "# Pre-install rules\n"
+    assert not (workspace / "upgrade-only.txt").exists()
+    assert not (workspace / "PACKAGE-MANIFEST.json").exists()

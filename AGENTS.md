@@ -89,21 +89,24 @@ When returning a revision result, report:
   implementation, do not improvise a fix. Keep one visible label equal only to its `source_text`,
   record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports, and
   continue independent items. Treat that item as non-executing until a maintained solution exists.
-- That downgrade never authorizes guessed timing. If the authoritative start is unresolved, fail
-  before opening or writing a draft. If the issue is locatable through speech or audio, missing
-  authoritative ASR is the same pre-write failure; the review timestamp remains only a search hint.
+- In Lite, every newly encountered or unrecognized instruction is label-only by default. A new
+  executable category requires an explicit maintained allowlist and tests; never infer execution
+  from generic words such as “修改”, “添加”, or “调整”.
+- That downgrade never authorizes guessed timing. Attempt speech/audio ASR first. If ASR cannot
+  uniquely locate a non-executing item, use the time written in the review comment. Fail before
+  draft writing only when neither ASR nor the review comment supplies a valid time; never use `0:00`.
 
 ## Review Document Audio Precision
 
 - For Feishu/Lark review documents that ask for spoken-word deletion or audio repair, use `skills/auto-cut-review-audio-precision/SKILL.md` before cutting.
 - Convert every review comment into `clip_id`, `source`, `rough_time`, `delete`, `must_keep`, `strategy`, `accepted_tradeoffs`, and `validation`.
-- In Lite mode, every issue that can be located from speech or audio must use configured Chinese
-  word/character ASR before either execution or label placement. This includes spoken deletion,
+- In Lite mode, every issue that can be located from speech or audio must attempt configured Chinese
+  word/character ASR before execution. This includes spoken deletion,
   pause addition/extension/shortening/adjustment, pronunciation, breath, mouth noise, and speech
-  timing. The review timestamp is only a search hint. Spoken deletion uses the ASR-resolved
-  boundary for the edit and label; every pause request uses it only for a verbatim label and is
-  never executed in Lite. Missing authoritative ASR fails before any draft is opened or written.
-- Only a completely non-speech review item may use the timestamp written in the review comment.
+  timing. Spoken deletion uses a unique ASR-resolved boundary for the edit and label. Every pause
+  or other non-executing item uses a unique ASR point when available, otherwise the review-comment
+  time, and is never executed in Lite.
+- Review-only and ASR-unresolved items use the timestamp written in the review comment.
   For target wording such as `07:14 ... 提前到 07:12`, use the requested target `07:12`.
   A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
 - Protect `must_keep` phrases explicitly. Do not remove adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
@@ -123,15 +126,18 @@ When returning a revision result, report:
 
 ## Lite Timeline Duration And Layout
 
-- Lite deletion never compresses the timeline, and Lite never executes a request to add, extend,
-  shorten, or otherwise adjust a pause. Final project duration therefore equals source duration
+- Lite deletion never compresses the timeline. Except for a uniquely ASR-proved spoken deletion,
+  Lite never executes any request that can change duration, including pause, speed, hold, or
+  still-frame changes. Final project duration therefore equals source duration
   even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
 - Treat every pause request, including `+1s`, `-1s`, and `semantic_pause_adjustment`, as
-  label-only. Resolve its authoritative point with word/character ASR, then place exactly one
-  visible label equal only to `source_text` at that point.
+  label-only. Place exactly one visible label equal only to `source_text` at a unique ASR point or,
+  when ASR cannot locate it, at the review-comment time.
 - Do not create a pause edit, `pause_adjustments` row, hold, still-frame segment, audio gap, or
   time offset. Do not change total duration or move any later V1/V2/A1/A2 segment, visual asset,
   or review label because of a pause request.
+- If a hand/pointer row omitted its material, reuse only a unique material from another row with
+  the same normalized modification name. Multiple candidates require structured user selection.
 - `lite_cut_layout=copy` is historical read/validation compatibility only. Reject it for every new
   Lite execution; new tasks must use `split_gap`.
 

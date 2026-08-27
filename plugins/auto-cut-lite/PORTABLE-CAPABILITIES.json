@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.0+codex.20260827070523",
+  "plugin_version": "1.6.0+codex.20260827113207",
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"
@@ -24,9 +24,11 @@
     "default_root": "extracted_package_root",
     "custom_root_supported": true,
     "custom_root_parameter": "WorkspaceRoot",
-    "one_click_launcher": "START-AUTO-CUT-LITE.cmd",
+    "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
+    "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+    "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
     "one_click_default_network": "china_mirrors",
-    "post_install_guide": "CODEX_NEXT_STEPS.md",
+    "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
     "required_leaf_name": "Auto-cut-lite",
     "upgrade_root_precedence": "parameter_then_existing_receipt_then_package_root",
     "explicit_path_upgrade": "verified_relocation_with_rollback",
@@ -45,8 +47,8 @@
       "id": "workspace_skill_surface",
       "required_paths": [
         "AGENTS.md",
-        "BEGINNER_DEPLOYMENT.md",
-        "CODEX_NEXT_STEPS.md",
+        "Auto-Cut-Lite新手部署说明.md",
+        "Auto-Cut-Lite部署成功后操作说明.md",
         "installer/manage_workspace.py",
         "WORKSPACE_SETUP.md",
         "workspace-payload/skills/auto-cut/SKILL.md",
@@ -62,6 +64,7 @@
         "runtime/scripts/cli/jy_wrapper_parser.py",
         "runtime/scripts/utils/replacement_timebase.py",
         "runtime/scripts/utils/review_audio_precision.py",
+        "runtime/scripts/utils/review_document_intake.py",
         "runtime/scripts/utils/review_document_runner.py",
         "runtime/scripts/utils/review_job_compiler.py",
         "runtime/scripts/utils/review_job_pipeline.py"
@@ -139,12 +142,15 @@
       "id": "named_marketplace_deployment",
       "required_paths": [
         "AGENTS.md",
-        "START-AUTO-CUT-LITE.cmd",
+        "一键安装或升级-Auto-Cut-Lite.cmd",
+        "一键卸载-Auto-Cut-Lite.cmd",
         "deploy-to-codex.ps1",
         "install.ps1",
         "installer/manage_named_marketplace.py",
         "installer/one_click_deploy.ps1",
+        "installer/manage_runtime_dependencies.py",
         "installer/manage_workspace.py",
+        "installer/uninstall_auto_cut_lite.ps1",
         "runtime/requirements.txt",
         "runtime/requirements-audio.lock"
       ]

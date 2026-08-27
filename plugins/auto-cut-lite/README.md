@@ -23,7 +23,7 @@ ASR 按严格内容身份去重，中断后只恢复仍有效的阶段，缺失�
 
 本版采用“合并工作区 + 独立运行时”模式：
 
-- 新手只需“全部解压”，再双击 `START-AUTO-CUT-LITE.cmd`；默认使用国内镜像。
+- 新手只需“全部解压”，再双击 `一键安装或升级-Auto-Cut-Lite.cmd`；默认使用国内镜像。
 - 首次部署会弹窗选择路径；选定的 `Auto-cut-lite` 将保存完整包文件并作为 Codex 工作区。
 - 可以直接选择解压出的 `Auto-cut-lite`，也可以选择另一个 Codex 工作区位置；部署器会把完整包同步过去。
 - 工作区同时保存包文件、`AGENTS.md` 和 `.codex\skills`。
@@ -34,5 +34,5 @@ ASR 按严格内容身份去重，中断后只恢复仍有效的阶段，缺失�
 - 插件清单不注册 `skills`，包内也没有顶层 `skills`，因此技能应显示为仓库范围
   `Auto-cut-lite`，而不是重复的 `Personal`。
 
-请从 [BEGINNER_DEPLOYMENT.md](BEGINNER_DEPLOYMENT.md) 开始。正常安装不需要打开 PowerShell、
-进入目录或替换路径；部署完成后按 [CODEX_NEXT_STEPS.md](CODEX_NEXT_STEPS.md) 继续配置本机环境。
+请从 [Auto-Cut-Lite新手部署说明.md](Auto-Cut-Lite新手部署说明.md) 开始。正常安装不需要打开 PowerShell、
+进入目录或替换路径；部署完成后按 [Auto-Cut-Lite部署成功后操作说明.md](Auto-Cut-Lite部署成功后操作说明.md) 继续配置本机环境。

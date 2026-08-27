@@ -2,12 +2,14 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 import wave
 import zipfile
 from contextlib import ExitStack, contextmanager
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -243,6 +245,12 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         config = VolcAsrConfig(api_key="test-key")
         with ExitStack() as stack:
             stack.enter_context(
+                patch(
+                    "utils.runtime_integrity.validate_current_lite_runtime",
+                    return_value={"status": "pass", "plugin_version": "test"},
+                )
+            )
+            stack.enter_context(
                 patch.object(
                     runner,
                     "ffmpeg_identity",
@@ -342,8 +350,20 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertTrue(first["ok"])
             self.assertTrue(second["ok"])
             self.assertEqual(list(second["phases"]), list(runner._RUN_PHASES))
-            self.assertTrue(
-                all(row["status"] == "resumed" for row in second["phases"].values())
+            self.assertEqual(
+                {name: row["status"] for name, row in second["phases"].items()},
+                {
+                    "preflight": "complete",
+                    "document_fetch": "complete",
+                    "asset_download": "complete",
+                    "input_compile": "complete",
+                    "source_hash": "resumed",
+                    "source_asr": "resumed",
+                    "classification": "resumed",
+                    "reverse_asr": "resumed",
+                    "draft_write_validate": "resumed",
+                    "package_publish": "resumed",
+                },
             )
             self.assertEqual(mocks["asr"].call_count, 2)
             self.assertEqual(mocks["extract"].call_count, 1)
@@ -357,6 +377,252 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 Path(first["output_artifacts"]["doc_items"]["path"]).read_text(encoding="utf-8")
             )
             self.assertEqual(processed["review_items"][0]["source_text"], "00:01 删除“测试”")
+
+    def test_visual_compiler_only_touches_visual_items_in_large_mixed_ledger(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            asset = root / "overlay.png"
+            asset.write_bytes(b"png")
+            audio_items = [
+                {
+                    "id": f"audio-{index:02d}",
+                    "kind": "spoken_delete",
+                    "source_text": f"00:01 删除词语 {index}",
+                    "start": 1.0 + index / 100.0,
+                    "end": 1.2 + index / 100.0,
+                    "execution_required": True,
+                    "execution_status": "asr_resolved",
+                    "evidence": {
+                        "delete": f"词语 {index}",
+                        "asr_alignment": {
+                            "status": "pass",
+                            "authoritative_timing": True,
+                            "authoritative_cut_boundary": True,
+                            "resolved_time": 1.0 + index / 100.0,
+                        },
+                    },
+                }
+                for index in range(42)
+            ]
+            visual_items = [
+                {
+                    "id": "visual-with-asset",
+                    "kind": "visual_overlay",
+                    "source_text": "00:02 添加给定图片",
+                    "start": 2.0,
+                    "end": 3.0,
+                    "execution_required": True,
+                    "evidence": {"asset_path": str(asset)},
+                },
+                {
+                    "id": "visual-with-empty-plan",
+                    "kind": "visual_overlay",
+                    "source_text": "00:03 缺少图片时仅保留标签",
+                    "start": 3.0,
+                    "end": 4.0,
+                    "execution_required": True,
+                    "evidence": {"visual_plan": {"reuse_audio": False}},
+                },
+            ]
+            request = {
+                "review_items": deepcopy(audio_items + visual_items),
+                "edits": [
+                    {
+                        "type": "delete",
+                        "doc_item_id": item["id"],
+                        "start": item["start"],
+                        "end": item["end"],
+                    }
+                    for item in audio_items
+                ],
+                "audio_delivery_plan": {
+                    "mode": "segmented",
+                    "segments": [{"id": f"segment-{index:02d}"} for index in range(42)],
+                },
+            }
+            ledger = {"review_items": deepcopy(audio_items + visual_items)}
+            original_request_audio = deepcopy(request["review_items"][:42])
+            original_ledger_audio = deepcopy(ledger["review_items"][:42])
+            original_audio_plan = deepcopy(request["audio_delivery_plan"])
+
+            runner._compile_explicit_lite_visuals(request, ledger)
+
+            self.assertEqual(request["review_items"][:42], original_request_audio)
+            self.assertEqual(ledger["review_items"][:42], original_ledger_audio)
+            self.assertEqual(request["audio_delivery_plan"], original_audio_plan)
+            self.assertEqual(
+                [edit["doc_item_id"] for edit in request["edits"] if edit["type"] == "add_overlay"],
+                ["visual-with-asset"],
+            )
+            request_empty = request["review_items"][43]
+            ledger_empty = ledger["review_items"][43]
+            self.assertFalse(request_empty["execution_required"])
+            self.assertEqual(request_empty["execution_status"], "label_only_unresolved")
+            self.assertEqual(ledger_empty["execution_status"], "label_only_unresolved")
+
+    def test_visual_asset_failures_are_structured_without_leaking_references(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "first.png"
+            second = root / "second.png"
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            cases = (
+                (
+                    {
+                        "id": "download-failed",
+                        "kind": "visual_overlay",
+                        "source_text": "00:01 添加附件",
+                        "start": 1.0,
+                        "execution_required": True,
+                        "evidence": {
+                            "asset_url": "https://secret.example/path?token=private-token"
+                        },
+                    },
+                    "visual_asset_download_failed",
+                ),
+                (
+                    {
+                        "id": "asset-ambiguous",
+                        "kind": "visual_overlay",
+                        "source_text": "00:02 添加附件",
+                        "start": 2.0,
+                        "execution_required": True,
+                        "evidence": {"asset_paths": [str(first), str(second)]},
+                    },
+                    "visual_asset_ambiguous",
+                ),
+            )
+            for item, expected_code in cases:
+                with self.subTest(expected_code=expected_code):
+                    request = {"review_items": [deepcopy(item)], "edits": []}
+                    ledger = {"review_items": [deepcopy(item)]}
+                    with self.assertRaises(runner.LiteVisualAssetError) as raised:
+                        runner._compile_explicit_lite_visuals(request, ledger)
+                    self.assertEqual(raised.exception.details["code"], expected_code)
+                    self.assertEqual(raised.exception.details["status"], "user_action_required")
+                    self.assertEqual(raised.exception.details["item_ids"], [item["id"]])
+                    serialized = json.dumps(raised.exception.details, ensure_ascii=False)
+                    self.assertNotIn("secret.example", serialized)
+                    self.assertNotIn("private-token", serialized)
+
+    def test_v1_runner_receipts_rerun_downstream_while_source_asr_cache_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            job = root / "job"
+            original_reverse_apply = runner.apply_reverse_report_to_payloads
+            with (
+                self._patched_runtime() as mocks,
+                patch.object(
+                    runner,
+                    "apply_reverse_report_to_payloads",
+                    wraps=original_reverse_apply,
+                ) as reverse_apply,
+            ):
+                with (
+                    patch.object(runner, "RUNNER_VERSION", "auto-cut-lite-review-document-run-v1"),
+                    patch.object(runner, "_SCHEMA_VERSION", 1),
+                ):
+                    first = self._run(
+                        snapshot,
+                        project,
+                        job_root=job,
+                        drafts_root=root / "drafts",
+                        package_zip=root / "delivery.zip",
+                        cache_root=root / "cache",
+                    )
+                second = self._run(
+                    snapshot,
+                    project,
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery.zip",
+                    cache_root=root / "cache",
+                )
+
+            self.assertTrue(first["ok"] and second["ok"])
+            self.assertEqual(first["runner_version"], "auto-cut-lite-review-document-run-v1")
+            self.assertEqual(second["runner_version"], runner.RUNNER_VERSION)
+            self.assertTrue(all(row["status"] == "complete" for row in second["phases"].values()))
+            timing = json.loads((job / "job_timing.json").read_text(encoding="utf-8"))
+            self.assertTrue(timing["phases"]["source_asr"]["cache_hit"])
+            self.assertEqual(mocks["asr"].call_count, 2)
+            self.assertEqual(mocks["extract"].call_count, 1)
+            self.assertEqual(mocks["render"].call_count, 1)
+            self.assertEqual(mocks["execute"].call_count, 2)
+            self.assertEqual(reverse_apply.call_count, 2)
+            receipt = json.loads(
+                (job / "reverse_asr.receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(receipt["schema_version"], 2)
+
+    def test_lite_pause_language_and_nested_status_compile_strictly_label_only(self):
+        pause_rows = [
+            ("pause-add", "00:01 停顿增加 1 秒"),
+            ("pause-extend", "00:02 把停顿延长到 2 秒"),
+            ("pause-shorten", "00:03 把停顿缩短 1 秒"),
+            ("pause-delete", "00:04 删除这段停顿"),
+            ("pause-delete-after", "00:04 这段停顿删除"),
+            ("pause-plus", "00:05 停顿 +1s"),
+            ("pause-minus", "00:06 停顿 -1s"),
+            ("pause-duration", "00:07 这里停顿 1 秒"),
+        ]
+        rows = [
+            {
+                "id": item_id,
+                "source_text": source_text,
+                "execution_required": True,
+            }
+            for item_id, source_text in pause_rows
+        ]
+        rows.extend(
+            [
+                {
+                    "id": "explicit-gap-delete",
+                    "kind": "gap_delete",
+                    "source_text": "00:08 删除中间空白",
+                    "execution_required": True,
+                },
+                {
+                    "id": "explicit-semantic",
+                    "kind": "semantic_pause_adjustment",
+                    "source_text": "00:09 调整语义停顿",
+                    "execution_required": True,
+                },
+                {
+                    "id": "nested-label-only",
+                    "kind": "spoken_delete",
+                    "source_text": "00:10 删除“测试”",
+                    "execution_required": True,
+                    "execution_status": "pending",
+                    "validation": {"layers": [{"status": "LABEL-ONLY-UNRESOLVED"}]},
+                },
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "compiled"
+            compiled = runner.compile_review_job(
+                {"items": rows},
+                {
+                    "draft_name": "PauseMatrix",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                    "lite_cut_layout": "split_gap",
+                },
+                output,
+            )
+            ledger = json.loads(Path(compiled["doc_items"]).read_text(encoding="utf-8"))
+            request = json.loads(Path(compiled["revision_request"]).read_text(encoding="utf-8"))
+
+        by_id = {item["id"]: item for item in ledger["review_items"]}
+        for item_id in by_id:
+            with self.subTest(item_id=item_id):
+                self.assertFalse(by_id[item_id]["execution_required"])
+                self.assertTrue(by_id[item_id]["execution_status"].startswith("label_only_"))
+                self.assertEqual(by_id[item_id]["evidence"]["timing_source"], "asr")
+        self.assertEqual(request.get("pause_adjustments") or [], [])
+        self.assertEqual(request.get("edits") or [], [])
 
     def test_pause_change_uses_source_asr_for_verbatim_label_without_media_edit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -383,9 +649,13 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             item = processed["review_items"][0]
             self.assertEqual(item["source_text"], "00:01 在现有停顿基础上增加 1s")
             self.assertFalse(item["execution_required"])
-            self.assertTrue(item["execution_status"].startswith("label_only_"))
+            self.assertEqual(item["execution_status"], "label_only_lite_policy")
             self.assertEqual(item["start"], 1.0)
-            self.assertEqual(item["evidence"]["asr_alignment"]["resolved_time"], 1.0)
+            self.assertEqual(item["evidence"]["resolved_time"], 1.0)
+            self.assertEqual(
+                item["evidence"]["timing_source"], "review_timestamp_fallback"
+            )
+            self.assertNotIn("asr_alignment", item["evidence"])
             self.assertEqual(processed.get("pause_adjustments") or [], [])
             self.assertEqual(processed.get("edits") or [], [])
             request = mocks["execute"].call_args.args[0]
@@ -418,9 +688,9 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 )
 
             self.assertTrue(second["ok"])
-            self.assertEqual(second["phases"]["source_asr_visual_index"]["status"], "complete")
+            self.assertEqual(second["phases"]["source_asr"]["status"], "complete")
             self.assertEqual(
-                second["phases"]["classified_edit_acceptance_plans"]["status"], "resumed"
+                second["phases"]["classification"]["status"], "resumed"
             )
             self.assertEqual(mocks["asr"].call_count, 2)
             self.assertEqual(json.loads(source_asr.read_text(encoding="utf-8"))["provider"], "volc_asr")
@@ -452,7 +722,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
 
             result = raised.exception.result
             self.assertFalse(result["ok"])
-            self.assertEqual(result["phases"]["final_acceptance"]["status"], "failed")
+            self.assertEqual(result["phases"]["package_publish"]["status"], "failed")
             self.assertIn("corrupt", result["error"].casefold())
             self.assertEqual(mocks["package"].call_count, 1)
 
@@ -536,6 +806,362 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 )
             self.assertFalse(raised.exception.result["ok"])
             self.assertEqual(raised.exception.result["workflow_mode"], "lite")
+
+    def test_url_mode_runs_ten_phases_resumes_and_invalidates_by_revision(self):
+        class LarkRunner:
+            def __init__(self) -> None:
+                self.revision = 1
+                self.unknown_text = "00:02 新增从未支持过的镜头旋转效果"
+                self.commands: list[list[str]] = []
+
+            def __call__(self, command):
+                row = [str(value) for value in command]
+                self.commands.append(row)
+                if row[-1:] == ["--version"]:
+                    return subprocess.CompletedProcess(
+                        row, 0, "lark-cli version 1.2.3\n", ""
+                    )
+                if row[1:] == ["whoami"]:
+                    payload = {
+                        "available": True,
+                        "defaultAs": "user",
+                        "identity": "user",
+                        "profile": "operator",
+                        "tokenStatus": "valid",
+                        "onBehalfOf": {"openId": "ou_private", "userName": "reviewer"},
+                    }
+                    return subprocess.CompletedProcess(row, 0, json.dumps(payload), "")
+                if row[1:3] == ["docs", "+fetch"]:
+                    content = "".join(
+                        (
+                            '<source token="source_private_token" name="课程源视频.mp4" '
+                            'mime="video/mp4"/>',
+                            '<checkbox id="delete">00:01 删除“测试”</checkbox>',
+                            f'<checkbox id="unknown">{self.unknown_text}</checkbox>',
+                        )
+                    )
+                    payload = {
+                        "ok": True,
+                        "identity": "user",
+                        "data": {
+                            "document": {
+                                "document_id": "document_private_token",
+                                "revision_id": self.revision,
+                                "content": content,
+                            }
+                        },
+                    }
+                    return subprocess.CompletedProcess(row, 0, json.dumps(payload), "")
+                if row[1:3] == ["docs", "+media-download"]:
+                    target = Path(row[row.index("--output") + 1])
+                    _write_wav(target)
+                    return subprocess.CompletedProcess(row, 0, json.dumps({"ok": True}), "")
+                return subprocess.CompletedProcess(row, 1, "", "unsupported")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lark_exe = root / "lark-cli.exe"
+            lark_exe.write_bytes(b"not executed")
+            lark = LarkRunner()
+            job = root / "job"
+            url = "https://example.feishu.cn/docx/url_private_token"
+            progress: list[dict] = []
+            kwargs = {
+                "doc_url": url,
+                "job_root": job,
+                "drafts_root": root / "drafts",
+                "package_zip": root / "delivery.zip",
+                "cache_root": root / "cache",
+                "lark_cli": lark_exe,
+                "lark_runner": lark,
+                "readiness_path": root / "runtime-readiness.json",
+                "progress": lambda event: progress.append(dict(event)),
+            }
+            with self._patched_runtime() as mocks:
+                first = runner.run_review_document(**kwargs)
+                second = runner.run_review_document(**kwargs)
+                lark.revision = 2
+                lark.unknown_text = "00:02 新增另一种从未支持过的镜头翻转效果"
+                third = runner.run_review_document(**kwargs)
+
+            self.assertTrue(first["ok"] and second["ok"] and third["ok"])
+            self.assertEqual(list(first["phases"]), list(runner._RUN_PHASES))
+            self.assertEqual(
+                set(json.loads((job / "job_timing.json").read_text(encoding="utf-8"))["phases"]),
+                set(runner._RUN_PHASES),
+            )
+            self.assertEqual(second["phases"]["source_hash"]["status"], "resumed")
+            self.assertEqual(second["phases"]["classification"]["status"], "resumed")
+            self.assertEqual(third["phases"]["source_hash"]["status"], "complete")
+            self.assertEqual(third["phases"]["classification"]["status"], "complete")
+            self.assertEqual(mocks["asr"].call_count, 2)
+            self.assertTrue(any(event.get("phase") == "document_fetch" for event in progress))
+
+            processed = json.loads(
+                Path(third["output_artifacts"]["revision_request"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            unknown = next(
+                item for item in processed["review_items"] if "翻转效果" in item["source_text"]
+            )
+            self.assertEqual(unknown["kind"], "review_only")
+            self.assertFalse(unknown["execution_required"])
+
+            serialized = ""
+            for path in job.rglob("*"):
+                if path.is_file():
+                    serialized += path.read_text(encoding="utf-8", errors="ignore")
+            for secret in (
+                url,
+                "url_private_token",
+                "source_private_token",
+                "document_private_token",
+                "ou_private",
+                "reviewer",
+            ):
+                self.assertNotIn(secret, serialized)
+
+    def test_url_mode_creates_state_and_timing_before_preflight_failure(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            lark_exe = root / "lark-cli.exe"
+            lark_exe.write_bytes(b"not executed")
+
+            def failing(command):
+                return subprocess.CompletedProcess(command, 9, "", "private failure")
+
+            job = root / "job"
+            with self._patched_runtime(), self.assertRaises(
+                runner.ReviewDocumentRunError
+            ):
+                runner.run_review_document(
+                    doc_url="https://example.feishu.cn/wiki/failure_private_token",
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery.zip",
+                    cache_root=root / "cache",
+                    lark_cli=lark_exe,
+                    lark_runner=failing,
+                    readiness_path=root / "runtime-readiness.json",
+                )
+            self.assertTrue((job / "job_state.json").is_file())
+            self.assertTrue((job / "job_timing.json").is_file())
+            state = (job / "job_state.json").read_text(encoding="utf-8")
+            self.assertNotIn("failure_private_token", state)
+
+    def test_phase_receipt_and_result_redact_provider_secrets(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            secret_url = "https://provider.example/private?token=receipt-private-token"
+            outcome = runner._phase_outcome(
+                root,
+                "preflight",
+                artifacts=[],
+                data={
+                    "authorization_url": secret_url,
+                    "nested": {"message": f"token=receipt_private_token at {secret_url}"},
+                },
+                result={"provider_message": f"request failed at {secret_url}"},
+            )
+
+            receipt_text = (root / "preflight.receipt.json").read_text(encoding="utf-8")
+            result_text = json.dumps(outcome.result, ensure_ascii=False)
+            for secret in (secret_url, "receipt-private-token", "receipt_private_token"):
+                self.assertNotIn(secret, receipt_text)
+                self.assertNotIn(secret, result_text)
+
+    def test_whoami_failure_invalidates_old_lark_readiness_and_redacts_error(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            readiness = root / "runtime-readiness.json"
+            runner.evaluate_runtime_readiness(
+                path=readiness,
+                runtime_version=runner.RUNNER_VERSION,
+                lark_version="1.2.3",
+                asr_adapter_version=runner.VOLC_ASR_ADAPTER_VERSION,
+            )
+            runner.mark_lark_verified(
+                {"identity": "user", "open_id": "ou_previous_private"},
+                path=readiness,
+                runtime_version=runner.RUNNER_VERSION,
+                lark_version="1.2.3",
+                asr_adapter_version=runner.VOLC_ASR_ADAPTER_VERSION,
+            )
+            self.assertEqual(
+                json.loads(readiness.read_text(encoding="utf-8"))["lark"]["status"],
+                "verified",
+            )
+            job = root / "job"
+            provider_url = "https://provider.example/whoami/private_token"
+            with (
+                self._patched_runtime(),
+                patch.object(runner, "lark_cli_version", return_value="1.2.3"),
+                patch.object(
+                    runner,
+                    "lark_whoami",
+                    side_effect=RuntimeError(
+                        f"identity failed at {provider_url}; token=whoami_private_token"
+                    ),
+                ),
+                self.assertRaises(runner.ReviewDocumentRunError) as raised,
+            ):
+                runner.run_review_document(
+                    doc_url="https://example.feishu.cn/docx/document_private_token",
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery.zip",
+                    cache_root=root / "cache",
+                    readiness_path=readiness,
+                )
+
+            readiness_payload = json.loads(readiness.read_text(encoding="utf-8"))
+            self.assertEqual(readiness_payload["lark"]["status"], "pending_validation")
+            self.assertEqual(
+                readiness_payload["lark"]["reason_code"],
+                "lark_user_identity_unavailable",
+            )
+            self.assertEqual(
+                raised.exception.result["failure_details"]["preflight"]["code"],
+                "lark_user_identity_unavailable",
+            )
+            serialized = json.dumps(raised.exception.result, ensure_ascii=False)
+            serialized += (job / "job_state.json").read_text(encoding="utf-8")
+            serialized += (job / "job_timing.json").read_text(encoding="utf-8")
+            for secret in (provider_url, "whoami_private_token", "document_private_token"):
+                self.assertNotIn(secret, serialized)
+
+    def test_source_asr_failure_downgrades_precise_delete_to_verbatim_comment_time_label(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            job = root / "job"
+            provider_url = "https://asr.example/jobs/asr_private_token"
+            with self._patched_runtime() as mocks:
+                mocks["asr"].side_effect = RuntimeError(
+                    f"provider unavailable at {provider_url}; token=asr_private_token"
+                )
+                result = self._run(
+                    snapshot,
+                    project,
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery.zip",
+                    cache_root=root / "cache",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["phases"]["source_asr"]["status"], "complete")
+            self.assertEqual(mocks["asr"].call_count, 1)
+            self.assertEqual(mocks["render"].call_count, 0)
+            processed = json.loads(
+                Path(result["output_artifacts"]["revision_request"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            item = processed["review_items"][0]
+            self.assertEqual(item["source_text"], "00:01 删除“测试”")
+            self.assertFalse(item["execution_required"])
+            self.assertEqual(item["execution_status"], "label_only_unresolved")
+            self.assertEqual(item["start"], 1.0)
+            self.assertEqual(item["evidence"]["timing_source"], "review_timestamp_fallback")
+            self.assertEqual(processed.get("edits") or [], [])
+            source_index = json.loads(
+                Path(result["output_artifacts"]["source_asr_index"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(source_index["asr_available"])
+            self.assertEqual(source_index["fallback_policy"], "review_comment_time_label_only")
+            serialized = json.dumps(result, ensure_ascii=False)
+            for path in job.rglob("*"):
+                if path.is_file():
+                    serialized += path.read_text(encoding="utf-8", errors="ignore")
+            for secret in (provider_url, "asr_private_token"):
+                self.assertNotIn(secret, serialized)
+
+    def test_url_asset_and_compile_errors_keep_sanitized_public_contract(self):
+        parsed = {
+            "document_identity_sha256": "d" * 64,
+            "revision_id": "1",
+            "content_sha256": "c" * 64,
+            "asset_identity_sha256": "a" * 64,
+        }
+        cases = ("asset_download", "input_compile")
+        for failed_phase in cases:
+            with self.subTest(failed_phase=failed_phase), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                job = root / "job"
+                intake_error = runner.ReviewDocumentIntakeError(
+                    "visual_asset_ambiguous",
+                    "A review item has multiple possible local visual materials",
+                    user_action={
+                        "action_code": "high_risk_confirmation",
+                        "reason_code": "visual_asset_ambiguous",
+                        "item_ids": ["visual-1"],
+                    },
+                    details={
+                        "asset_token": "asset_private_token",
+                        "provider_message": (
+                            "download failed at https://provider.example/private-token"
+                        ),
+                    },
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(self._patched_runtime())
+                    stack.enter_context(
+                        patch.object(runner, "lark_cli_version", return_value="1.2.3")
+                    )
+                    stack.enter_context(
+                        patch.object(
+                            runner,
+                            "lark_whoami",
+                            return_value={"available": True, "identity": "user"},
+                        )
+                    )
+                    stack.enter_context(patch.object(runner, "fetch_lark_document", return_value={}))
+                    stack.enter_context(patch.object(runner, "parse_lark_document", return_value=parsed))
+                    if failed_phase == "asset_download":
+                        stack.enter_context(
+                            patch.object(
+                                runner,
+                                "download_lark_assets",
+                                side_effect=intake_error,
+                            )
+                        )
+                    else:
+                        stack.enter_context(
+                            patch.object(runner, "download_lark_assets", return_value=[])
+                        )
+                        stack.enter_context(
+                            patch.object(runner, "compile_url_inputs", side_effect=intake_error)
+                        )
+                    with self.assertRaises(runner.ReviewDocumentRunError) as raised:
+                        runner.run_review_document(
+                            doc_url="https://example.feishu.cn/wiki/document_private_token",
+                            job_root=job,
+                            drafts_root=root / "drafts",
+                            package_zip=root / "delivery.zip",
+                            cache_root=root / "cache",
+                            readiness_path=root / "runtime-readiness.json",
+                        )
+
+                detail = raised.exception.result["failure_details"][failed_phase]
+                self.assertEqual(detail["code"], "visual_asset_ambiguous")
+                self.assertEqual(
+                    detail["user_action_required"]["action_code"],
+                    "high_risk_confirmation",
+                )
+                serialized = json.dumps(raised.exception.result, ensure_ascii=False)
+                for path in job.rglob("*"):
+                    if path.is_file():
+                        serialized += path.read_text(encoding="utf-8", errors="ignore")
+                for secret in (
+                    "asset_private_token",
+                    "provider.example",
+                    "document_private_token",
+                ):
+                    self.assertNotIn(secret, serialized)
 
 
 if __name__ == "__main__":

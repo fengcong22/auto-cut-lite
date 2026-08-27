@@ -1,6 +1,6 @@
 ---
 name: auto-cut-high-school-history-lite
-description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, source-text-exact two-second review labels, simple local overlays, duration-preserving cuts, ASR-located pause labels, and no destructive animation or automatic scaling.
+description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, source-text-exact two-second review labels, simple local overlays, duration-preserving cuts, ASR-first timing with review-time fallback, and no destructive animation or automatic scaling.
 ---
 
 # High School History Auto-Cut Lite
@@ -64,19 +64,18 @@ reuse task intermediates produced by a mistaken full-version run.
   `lark-cli docs +fetch --as user`; on a new computer configure `lark-cli config default-as user`
   and `lark-cli config strict-mode user` after the one-time user login. Never use an app/bot
   identity for document reads, copy another computer's login state, or include tokens in a
-  plugin/package. Feishu/Lark timestamps are search hints only, exactly as in the full workflow. Never copy a
-  review timestamp directly into a spoken-word cut. Resolve every final boundary from Chinese
+  plugin/package. Never copy a review timestamp directly into a spoken-word cut. Resolve every executable cut boundary from Chinese
   word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
   `must_keep` phrases and strategy, then run reverse validation. Start that review item's label
   at the final ASR-resolved cut start rather than the rough review timestamp. Lite draft generation fails
   closed when that boundary receipt is absent or does not match the saved cut.
 - Apply the same timing-source rule to every other audio-identifiable problem. For any request to
   add, extend, shorten, or otherwise adjust a pause, resolve the real adjacent utterance gap from
-  source ASR and use that boundary only for its verbatim label; never create a pause edit. For
+  source ASR when possible and use that boundary only for its verbatim label; never create a pause edit. For
   pronunciation, breath, mouth noise, or other speech/audio timing, use the matching ASR
-  word/character window or point. Never execute or label these items from the review timestamp
-  alone.
-- Only completely non-speech review items use the timestamp written in the review comment. Parse
+  word/character window or point. If ASR cannot uniquely locate a non-executing item, place its
+  exact label at the time written in the review comment instead of guessing an ASR word.
+- Review-only and ASR-unresolved items use the timestamp written in the review comment. Parse
   the requested target when the text contains both a current time and a move target: for example,
   `07:14 ... 提前到 07:12` labels at `07:12`. A point timestamp does not require a fabricated
   end time. Missing or unresolved timing must fail before writing, never fall back to `0:00`.
@@ -87,10 +86,11 @@ reuse task intermediates produced by a mistaken full-version run.
 - Recognize `lite_cut_layout=copy` only while reading or validating an older Lite draft that
   intentionally kept a full V1/A1 reference layout. Reject `copy` for every new execution.
 
-- Final project duration always equals source duration. Treat `+Ns`, `-Ns`, pause extension,
-  pause shortening, and every `semantic_pause_adjustment` as non-executing review items. Resolve
-  the authoritative point with word/character ASR, place exactly one `source_text` label there,
-  and do not create `pause_adjustments`, holds, still frames, gaps, or timeline offsets.
+- Final project duration always equals source duration. Except for a word/character-ASR-proved
+  spoken deletion, every request that can change duration is non-executing. This includes `+Ns`,
+  `-Ns`, pause edits, speed changes, holds, still frames, and every
+  `semantic_pause_adjustment`. Place exactly one `source_text` label at the ASR point when uniquely
+  located, otherwise at the review-comment time, and do not change the timeline duration.
 
 - Import local video, audio, images, text, subtitles, flower text, and local BGM through the
   maintained repository APIs.
@@ -117,8 +117,9 @@ reuse task intermediates produced by a mistaken full-version run.
   label text with a status, item ID, warning, or diagnostic.
 - If a new issue cannot be solved safely but its authoritative start is reliable, keep exactly one
   original-text label, set `execution_status=label_only_unresolved` internally, do not improvise an
-  edit, and continue independent items. If timing is unreliable, or an audio-identifiable issue
-  lacks authoritative ASR, fail before opening or writing the draft instead of guessing a label.
+  edit, and continue independent items. Every newly encountered or unrecognized instruction is
+  label-only by default. If ASR cannot locate it, use the review-comment time; fail only when neither
+  an ASR point nor a valid review time exists, and never guess `0:00`.
 - Lite marker text is left-aligned (`alignment=0`), rendered at a 4–5 font-size range, and uses
   the full normalized safe width with a clamped background/transform so neither stage edge is
   crossed. These grouped lanes are the intentional lite exception to the full workflow's
@@ -129,6 +130,9 @@ reuse task intermediates produced by a mistaken full-version run.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
   occlusion, or target landing. Clamp the target duration to the source-length project duration.
+  If one hand/pointer review row omitted its attachment, reuse a material only from another row
+  with the same normalized modification name and only when that candidate is unique. Multiple
+  candidates require structured user selection; never guess by filename or source-code search.
 - Keep `Lite Timing Adjusted` empty. Animation, page-turn, reveal, release, and other
   picture-timing requests retain only their verbatim review labels.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
@@ -145,8 +149,8 @@ reuse task intermediates produced by a mistaken full-version run.
   segmented plans before opening or writing the draft.
 - Write exactly one review label per source item. The text must equal the current source
   review text verbatim. Its start equals the edit start for an executable item and the
-  authoritative resolved start for a non-executing item; a pause item's start is its ASR-resolved
-  point even though no pause edit is created. Duration is `2s` except when clamped at the
+  authoritative resolved start for a non-executing item; a pause item's start is its uniquely
+  ASR-resolved point or, when ASR cannot locate it, its review-comment time. Duration is `2s` except when clamped at the
   source-length project end.
 - Place grouped review labels in the existing top safe-band review-marker layout. Keep each
   marker aligned to its edit start and preserve the exact source text; do not re-enable the
@@ -186,7 +190,7 @@ Before delivery, validate the saved root and active timeline variants:
 
 Report split-gap delete requests as editable cut boundaries with the deleted source intervals
 isolated on V2/A2. Report that final duration stayed equal to source duration and list pause
-requests as ASR-located, source-text-only labels rather than executed edits.
+requests as ASR-first, review-time-fallback source-text-only labels rather than executed edits.
 
 Before a non-mock installed-runtime execution, validate the deployment report, package-manifest
 anchor, and managed runtime inventory. Any missing, changed, extra, or hash-mismatched managed

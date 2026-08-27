@@ -13,7 +13,7 @@ def _prepend_path_once(path: str) -> None:
 def setup_env():
     """
     统一初始化 Auto-Cut 运行环境。
-    将 scripts、vendor 及跨 Skill 的依赖路径注入到 sys.path 中。
+    将 scripts、vendor、运行时根目录及跨 Skill 的依赖路径注入到 sys.path 中。
     """
     try:
         current_frame = sys._getframe(1)
@@ -31,6 +31,8 @@ def setup_env():
         scripts_dir = os.path.join(skill_root, "scripts")
         vendor_dir = os.path.join(scripts_dir, "vendor")
 
+        # _prepend_path_once inserts at index zero, so add these in reverse priority order.
+        _prepend_path_once(skill_root)
         _prepend_path_once(vendor_dir)
         _prepend_path_once(scripts_dir)
 

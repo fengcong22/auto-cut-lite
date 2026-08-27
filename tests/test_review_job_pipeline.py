@@ -140,6 +140,79 @@ class ReviewJobPipelineTests(unittest.TestCase):
             self.assertEqual(persisted["status"], "failed")
             self.assertEqual(persisted["retry_count"], 1)
 
+    def test_phase_errors_are_redacted_in_records_state_and_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            store = self._store(root)
+            secret_url = "https://provider.example/jobs/private_token?access_token=top-secret"
+            bare_secret = "provider_private_token"
+
+            def fail_with_provider_details():
+                raise RuntimeError(
+                    f"request {secret_url} failed; token={bare_secret}; "
+                    "Authorization: Bearer eyJprivate.header.signature"
+                )
+
+            records = ReviewJobExecutor(state_store=store).run(
+                (PhaseDefinition("source_asr", fail_with_provider_details),)
+            )
+
+            serialized = json.dumps(records, ensure_ascii=False)
+            serialized += (root / "job_state.json").read_text(encoding="utf-8")
+            serialized += (root / "job_timing.json").read_text(encoding="utf-8")
+            for secret in (secret_url, "top-secret", bare_secret, "eyJprivate"):
+                self.assertNotIn(secret, serialized)
+            self.assertIn("[redacted", serialized)
+
+    def test_progress_callback_streams_started_retry_and_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self._store(Path(temporary))
+            events = []
+            attempts = []
+
+            def flaky_phase():
+                attempts.append(len(attempts))
+                if len(attempts) == 1:
+                    raise RuntimeError("retry")
+                return {"ok": True}
+
+            records = ReviewJobExecutor(state_store=store, progress=events.append).run(
+                (PhaseDefinition("source_asr", flaky_phase, retry_count=1),)
+            )
+
+            self.assertEqual(records["source_asr"]["status"], "complete")
+            self.assertEqual(
+                [(row["status"], row.get("attempt")) for row in events],
+                [("started", 0), ("retrying", 0), ("started", 1), ("complete", 1)],
+            )
+
+    def test_progress_callback_reports_resume_without_rerunning(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self._store(Path(temporary))
+            phase = PhaseDefinition("compile", lambda: {"run": 1})
+            ReviewJobExecutor(state_store=store).run((phase,))
+            events = []
+
+            records = ReviewJobExecutor(state_store=store, progress=events.append).run(
+                (PhaseDefinition("compile", lambda: self.fail("must resume")),)
+            )
+
+            self.assertEqual(records["compile"]["status"], "resumed")
+            self.assertEqual(events, [{"event": "phase", "phase": "compile", "status": "resumed"}])
+
+    def test_progress_callback_failure_does_not_change_phase_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = self._store(Path(temporary))
+
+            def broken_progress(_event):
+                raise RuntimeError("stderr unavailable")
+
+            records = ReviewJobExecutor(state_store=store, progress=broken_progress).run(
+                (PhaseDefinition("compile", lambda: {"ok": True}),)
+            )
+
+            self.assertEqual(records["compile"]["status"], "complete")
+
     def test_phase_definition_rejects_more_than_one_retry(self) -> None:
         with self.assertRaisesRegex(ValueError, "at most 1"):
             PhaseDefinition("source_asr", lambda: None, retry_count=2)

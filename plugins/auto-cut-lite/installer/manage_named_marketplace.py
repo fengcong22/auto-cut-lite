@@ -12,7 +12,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-
 PLUGIN_NAME = "auto-cut-lite"
 MARKETPLACE_NAME = "auto-cut-lite-marketplace"
 MARKETPLACE_DISPLAY_NAME = "Auto-Cut Lite"
@@ -208,6 +207,44 @@ def remove_personal_entry(marketplace_path: Path) -> dict[str, Any]:
     }
 
 
+def _plugins_digest(entries: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        entries, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return _sha256_bytes(encoded)
+
+
+def remove_named_entry(marketplace_path: Path) -> dict[str, Any]:
+    marketplace = marketplace_path.expanduser().resolve(strict=True)
+    if not marketplace.is_file() or marketplace.is_symlink():
+        raise ValueError(f"named marketplace path must be a regular file: {marketplace}")
+    original = marketplace.read_bytes()
+    payload = _read_json_object(marketplace, label="named marketplace")
+    if _validate_marketplace(payload, marketplace) != MARKETPLACE_NAME:
+        raise ValueError(f"refusing to edit a different named marketplace: {marketplace}")
+    unrelated_before = [entry for entry in payload["plugins"] if entry.get("name") != PLUGIN_NAME]
+    before_digest = _plugins_digest(unrelated_before)
+    before = len(payload["plugins"])
+    payload["plugins"] = unrelated_before
+    action = "removed" if len(payload["plugins"]) != before else "absent"
+    committed = _commit(marketplace, payload, original)
+    unrelated_after = [entry for entry in payload["plugins"] if entry.get("name") != PLUGIN_NAME]
+    after_digest = _plugins_digest(unrelated_after)
+    if before_digest != after_digest:
+        raise RuntimeError("unrelated named marketplace entries changed during removal")
+    return {
+        "status": "updated",
+        "changed": committed["changed"],
+        "marketplace_path": str(marketplace),
+        "marketplace_name": MARKETPLACE_NAME,
+        "entry_action": action,
+        "remaining_plugin_count": len(payload["plugins"]),
+        "unrelated_plugins_sha256": after_digest,
+        "unrelated_plugins_unchanged": True,
+        **{key: value for key, value in committed.items() if key != "changed"},
+    }
+
+
 def rollback(
     marketplace_path: Path,
     *,
@@ -260,6 +297,10 @@ def _parser() -> argparse.ArgumentParser:
     remove_parser.add_argument("--marketplace-path", type=Path, required=True)
     remove_parser.add_argument("--json", action="store_true")
 
+    remove_named_parser = subparsers.add_parser("remove-named")
+    remove_named_parser.add_argument("--marketplace-path", type=Path, required=True)
+    remove_named_parser.add_argument("--json", action="store_true")
+
     rollback_parser = subparsers.add_parser("rollback")
     rollback_parser.add_argument("--marketplace-path", type=Path, required=True)
     rollback_parser.add_argument("--backup-path", type=Path)
@@ -276,6 +317,8 @@ def main() -> int:
             result = register_named(args.plugin_dir, args.marketplace_root)
         elif args.command == "remove-personal":
             result = remove_personal_entry(args.marketplace_path)
+        elif args.command == "remove-named":
+            result = remove_named_entry(args.marketplace_path)
         else:
             result = rollback(
                 args.marketplace_path,
@@ -283,7 +326,7 @@ def main() -> int:
                 created_new=args.created_new,
                 expected_current_sha256=args.expected_current_sha256,
             )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False))
         return 1
     print(json.dumps(result, ensure_ascii=False))
