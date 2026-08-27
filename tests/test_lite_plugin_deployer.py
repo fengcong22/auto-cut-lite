@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -363,28 +364,577 @@ def test_deployer_commits_dependencies_before_reporting_installed_and_fails_clos
     committed_index = deployer.index("$dependencyTransactionCommitted = $true", commit_index)
     installed_index = deployer.index("$report.deployment_status = 'installed'", commit_index)
     report_index = deployer.index("Write-DeploymentReport -Payload $report", installed_index)
-    catch_index = deployer.index("\ncatch {", report_index)
+    cleanup_index = deployer.index("$backupCleanup = Remove-OwnedPluginBackups", report_index)
+    catch_index = deployer.index("\ncatch {", cleanup_index)
     failed_index = deployer.index("$report.deployment_status = 'failed'", catch_index)
     not_evaluated_index = deployer.index("$report.readiness = 'not_evaluated'", catch_index)
-    failure_report_index = deployer.index(
-        "Write-DeploymentReport -Payload $report", failed_index
+    attempt_report_index = deployer.index(
+        "Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath",
+        failed_index,
     )
 
-    assert commit_index < committed_index < installed_index < report_index < catch_index
-    assert catch_index < failed_index < failure_report_index
-    assert catch_index < not_evaluated_index < failure_report_index
+    assert commit_index < committed_index < installed_index < report_index < cleanup_index
+    assert cleanup_index < catch_index < failed_index < attempt_report_index
+    assert catch_index < not_evaluated_index < attempt_report_index
+
+
+def test_deployer_preserves_the_previous_committed_report_after_complete_rollback() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    assert "$attemptReportPath = Join-Path $stateRoot 'deployment-attempt-report.json'" in deployer
+    assert "function Get-PreservableDeploymentReport" in deployer
+    assert "[int]$payload.schema_version -ne 2" in deployer
+    assert "[string]$payload.plugin_name -ne $pluginName" in deployer
+    assert "[string]$payload.deployment_status -ne 'installed'" in deployer
+    assert "Test-EquivalentDeploymentPath -SavedPath ([string]$payload.target_root)" in deployer
+    assert "[string]$installedManifest.version -ne [string]$payload.plugin_version" in deployer
+    assert "function Test-PreservableDeploymentAnchors" in deployer
+    assert "workspaceReceipt.installed_package_sha256.'PACKAGE-MANIFEST.json'" in deployer
+    assert "runtime/scripts/utils/runtime_integrity.py" in deployer
+    assert "'.runtime-venv\\Scripts\\python.exe'" in deployer
+    capture_index = deployer.index("$previousInstalledReport = Get-PreservableDeploymentReport")
+    mutation_index = deployer.index("Copy-InventoriedPackage", capture_index)
+    failed_index = deployer.index("$report.deployment_status = 'failed'", mutation_index)
+    identity_index = deployer.index("Test-PreservedPluginIdentity", failed_index - 500)
+    preserve_index = deployer.index(
+        "$preservePreviousReport = $null -ne $previousInstalledReport -and "
+        "$rollbackErrors.Count -eq 0",
+        failed_index,
+    )
+    restore_index = deployer.index(
+        "Restore-PreservedDeploymentReport -Snapshot $previousInstalledReport",
+        preserve_index,
+    )
+    attempt_index = deployer.index(
+        "Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath",
+        restore_index,
+    )
+    failed_main_index = deployer.index(
+        "Write-DeploymentReport -Payload $report -DestinationPath $reportPath",
+        restore_index,
+    )
+
+    assert capture_index < mutation_index < identity_index < failed_index
+    assert failed_index < preserve_index < restore_index < attempt_index < failed_main_index
+    failure_branch = deployer[preserve_index:failed_main_index + 100]
+    assert "if ($preservePreviousReport)" in failure_branch
+    assert "if (-not $preservePreviousReport)" in failure_branch
+    assert "deployment report restore failed" in failure_branch
+
+
+def test_deployer_requires_a_verified_baseline_for_in_place_redeployment() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    capture_index = deployer.index("$previousInstalledReport = Get-PreservableDeploymentReport")
+    guard_index = deployer.index(
+        "if ($sourceIsTarget -and $null -eq $previousInstalledReport)", capture_index
+    )
+    package_validation_index = deployer.index(
+        "$packageManifest = Read-AndValidatePackageManifest", guard_index
+    )
+    dependency_index = deployer.index("manage_runtime_dependencies.py", package_validation_index)
+
+    assert capture_index < guard_index < package_validation_index < dependency_index
+    assert "requires a verified previous installed report" in deployer[
+        guard_index:package_validation_index
+    ]
+
+
+def test_deployer_removes_all_verified_owned_backups_after_success_report() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    helper_start = deployer.index("function Remove-OwnedPluginBackup")
+    helper_end = deployer.index("\nfunction Remove-OwnedPluginBackups", helper_start)
+    helper = deployer[helper_start:helper_end]
+    assert "[System.IO.Path]::GetDirectoryName($resolved)" in helper
+    assert "[string]::Equals($actualParent, $expectedParent" in helper
+    assert "^\\.auto-cut-lite\\.backup\\.\\d{14}\\.[0-9a-f]{32}$" in helper
+    assert "Assert-NoReparseInExistingPath -Path $resolved -StopAt $targetParent" in helper
+    assert "[System.Collections.Generic.Stack[string]]::new()" in helper
+    assert "Get-ChildItem -LiteralPath $directory -Force" in helper
+    assert "$directories.Push($item.FullName)" in helper
+    assert "Get-ChildItem -LiteralPath $resolved -Recurse" not in helper
+    assert "Join-Path $resolved '.codex-plugin\\plugin.json'" in helper
+    assert "[string]$manifest.name -ne $pluginName" in helper
+    assert "Join-Path $resolved 'PACKAGE-MANIFEST.json'" in helper
+    assert "Plugin backup package file failed inventory validation" in helper
+    assert "installer/manage_runtime_dependencies.py" in helper
+    assert "Remove-Item -LiteralPath $resolved -Recurse -Force" in helper
+
+    aggregate_start = helper_end
+    aggregate_end = deployer.index("\ntry {", aggregate_start)
+    aggregate = deployer[aggregate_start:aggregate_end]
+    assert "Get-ChildItem -LiteralPath $targetParent -Force" in aggregate
+    assert "StartsWith(" in aggregate
+    assert "'.auto-cut-lite.backup.'" in aggregate
+    assert "Remove-OwnedPluginBackup -Path $candidate.FullName" in aggregate
+    assert "$removed.Add([string]$candidate.FullName)" in aggregate
+    assert "$deferred.Add(" in aggregate
+
+    commit_index = deployer.index("$dependencyTransactionCommitted = $true")
+    installed_report_index = deployer.index(
+        "Write-DeploymentReport -Payload $report", commit_index
+    )
+    cleanup_index = deployer.index("$backupCleanup = Remove-OwnedPluginBackups", installed_report_index)
+    deferred_index = deployer.index("$report.plugin_backup_cleanup = 'deferred'", cleanup_index)
+    clear_index = deployer.index("$report.plugin_backup_path = $null", cleanup_index)
+    outer_catch_index = deployer.index("\ncatch {", deferred_index)
+
+    assert commit_index < installed_report_index < cleanup_index < outer_catch_index
+    assert cleanup_index < deferred_index < clear_index
+    assert "$report.plugin_backup_cleanup_removed_count = $removedBackupCount" in deployer
+    assert "$report.plugin_backup_cleanup_deferred = $deferredBackups" in deployer
+    assert "$report.plugin_backup_cleanup_error = $_.Exception.Message" in deployer
+    assert "$report.deployment_status = 'failed'" not in deployer[
+        cleanup_index:outer_catch_index
+    ]
+
+
+def test_owned_backup_cleanup_removes_valid_history_and_defers_invalid(
+    tmp_path: Path,
+) -> None:
+    target_parent = tmp_path / "marketplace" / "plugins"
+    target_parent.mkdir(parents=True)
+
+    def write_backup(name: str, *, corrupt: bool = False) -> Path:
+        backup = target_parent / name
+        files = {
+            ".codex-plugin/plugin.json": json.dumps(
+                {"name": "auto-cut-lite", "version": "1.5.9"}
+            ).encode(),
+            "deploy-to-codex.ps1": b"# deployer anchor\n",
+            "installer/manage_runtime_dependencies.py": b"# dependency anchor\n",
+        }
+        rows = []
+        for relative, data in files.items():
+            target = backup / Path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            rows.append(
+                {
+                    "path": relative,
+                    "size": len(data),
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                }
+            )
+        if corrupt:
+            rows[-1]["sha256"] = "0" * 64
+        (backup / "PACKAGE-MANIFEST.json").write_text(
+            json.dumps(
+                {"name": "auto-cut-lite", "version": "1.5.9", "files": rows}
+            ),
+            encoding="utf-8",
+        )
+        return backup
+
+    first = write_backup(".auto-cut-lite.backup.20260827010101." + "a" * 32)
+    second = write_backup(".auto-cut-lite.backup.20260827020202." + "b" * 32)
+    invalid = write_backup(
+        ".auto-cut-lite.backup.20260827030303." + "c" * 32, corrupt=True
+    )
+
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+    assert_start = deployer.index("function Assert-NoReparseInExistingPath")
+    assert_end = deployer.index("\nfunction Resolve-ManifestRelativePath", assert_start)
+    cleanup_start = deployer.index("function Remove-OwnedPluginBackup")
+    cleanup_end = deployer.index("\ntry {", cleanup_start)
+    quoted_parent = str(target_parent).replace("'", "''")
+    harness = "\n".join(
+        (
+            "$ErrorActionPreference = 'Stop'",
+            "Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop",
+            "$pluginName = 'auto-cut-lite'",
+            f"$targetParent = '{quoted_parent}'",
+            deployer[assert_start:assert_end],
+            deployer[cleanup_start:cleanup_end],
+            "$result = Remove-OwnedPluginBackups",
+            "$result | ConvertTo-Json -Depth 8 -Compress",
+        )
+    )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", harness],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    cleanup = json.loads(result.stdout)
+    assert len(cleanup["removed"]) == 2, cleanup
+    assert len(cleanup["deferred"]) == 1
+    assert not first.exists()
+    assert not second.exists()
+    assert invalid.exists()
+    assert "inventory validation" in cleanup["deferred"][0]["error"]
+
+
+def test_failed_upgrade_preserves_committed_report_bytes_but_first_install_fails_main(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "Auto-cut-lite"
+    package.mkdir()
+    deployer = package / "deploy-to-codex.ps1"
+    shutil.copy2(DEPLOYER_PATH, deployer)
+
+    upgrade_local_app_data = tmp_path / "UpgradeLocalAppData"
+    upgrade_user_profile = tmp_path / "UpgradeUserProfile"
+    state_root = upgrade_local_app_data / "Auto-Cut" / "auto-cut-lite"
+    target_root = state_root / "marketplace" / "plugins" / "auto-cut-lite"
+    installed_manifest_path = target_root / ".codex-plugin" / "plugin.json"
+    installed_manifest_path.parent.mkdir(parents=True)
+    installed_manifest_path.write_text(
+        json.dumps({"name": "auto-cut-lite", "version": "1.5.9"}),
+        encoding="utf-8",
+    )
+    runtime_root = target_root / "runtime"
+    runtime_integrity_path = runtime_root / "scripts" / "utils" / "runtime_integrity.py"
+    runtime_entry_path = runtime_root / "scripts" / "jy_wrapper.py"
+    runtime_integrity_path.parent.mkdir(parents=True)
+    runtime_entry_path.parent.mkdir(parents=True, exist_ok=True)
+    runtime_integrity_path.write_bytes(b"# integrity anchor\n")
+    runtime_entry_path.write_bytes(b"# runtime entry anchor\n")
+    runtime_python = target_root / ".runtime-venv" / "Scripts" / "python.exe"
+    runtime_python.parent.mkdir(parents=True)
+    runtime_python.write_bytes(b"runtime python anchor")
+    package_rows = []
+    for relative, path in (
+        (".codex-plugin/plugin.json", installed_manifest_path),
+        ("runtime/scripts/utils/runtime_integrity.py", runtime_integrity_path),
+        ("runtime/scripts/jy_wrapper.py", runtime_entry_path),
+    ):
+        data = path.read_bytes()
+        package_rows.append(
+            {"path": relative, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        )
+    installed_package_manifest = target_root / "PACKAGE-MANIFEST.json"
+    installed_package_manifest.write_text(
+        json.dumps(
+            {"name": "auto-cut-lite", "version": "1.5.9", "files": package_rows}
+        ),
+        encoding="utf-8",
+    )
+    workspace_receipt_path = state_root / "workspace-install-receipt.json"
+    report_path = state_root / "deployment-report.json"
+    previous_workspace_root = package
+    workspace_receipt_path.write_text(
+        json.dumps(
+            {
+                "status": "installed",
+                "plugin_name": "auto-cut-lite",
+                "plugin_version": "1.5.9",
+                "workspace_root": str(previous_workspace_root),
+                "deployment_report_path": str(report_path),
+                "plugin_root": str(target_root),
+                "runtime_root": str(runtime_root),
+                "installed_package_sha256": {
+                    "PACKAGE-MANIFEST.json": hashlib.sha256(
+                        installed_package_manifest.read_bytes()
+                    ).hexdigest()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    committed_report = {
+        "schema_version": 2,
+        "plugin_name": "auto-cut-lite",
+        "plugin_version": "1.5.9",
+        "deployment_status": "installed",
+        "target_root": str(target_root),
+        "plugin_manifest_path": str(installed_manifest_path),
+        "runtime_root": str(runtime_root),
+        "workspace_receipt_path": str(workspace_receipt_path),
+        "components": {
+            "python": {
+                "status": "detected",
+                "dependencies": "installed",
+                "runtime_path": str(runtime_python),
+            }
+        },
+        "custom_committed_field": ["preserve", "these", "bytes"],
+    }
+    committed_bytes = (
+        json.dumps(committed_report, ensure_ascii=False, indent=3) + "\r\n"
+    ).encode("utf-8")
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_bytes(committed_bytes)
+
+    upgrade = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-LocalAppDataRoot",
+            str(upgrade_local_app_data),
+            "-UserProfileRoot",
+            str(upgrade_user_profile),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert upgrade.returncode != 0
+    assert "PACKAGE-MANIFEST.json is missing" in upgrade.stdout + upgrade.stderr
+    assert report_path.read_bytes() == committed_bytes
+    upgrade_attempt = json.loads(
+        (state_root / "deployment-attempt-report.json").read_text(encoding="utf-8")
+    )
+    assert upgrade_attempt["deployment_status"] == "failed"
+    assert upgrade_attempt["previous_deployment_report_preserved"] is True
+
+    first_local_app_data = tmp_path / "FirstInstallLocalAppData"
+    first_user_profile = tmp_path / "FirstInstallUserProfile"
+    first_install = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-LocalAppDataRoot",
+            str(first_local_app_data),
+            "-UserProfileRoot",
+            str(first_user_profile),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert first_install.returncode != 0
+    first_state_root = first_local_app_data / "Auto-Cut" / "auto-cut-lite"
+    first_main = json.loads(
+        (first_state_root / "deployment-report.json").read_text(encoding="utf-8")
+    )
+    first_attempt = json.loads(
+        (first_state_root / "deployment-attempt-report.json").read_text(encoding="utf-8")
+    )
+    assert first_main["deployment_status"] == "failed"
+    assert first_attempt["deployment_status"] == "failed"
+    assert first_main["previous_deployment_report_preserved"] is False
+    assert first_attempt["previous_deployment_report_preserved"] is False
+
+
+def test_incomplete_installed_looking_report_does_not_mask_failure(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "Auto-cut-lite"
+    package.mkdir()
+    deployer = package / "deploy-to-codex.ps1"
+    shutil.copy2(DEPLOYER_PATH, deployer)
+
+    local_app_data = tmp_path / "LocalAppData"
+    user_profile = tmp_path / "UserProfile"
+    state_root = local_app_data / "Auto-Cut" / "auto-cut-lite"
+    target_root = state_root / "marketplace" / "plugins" / "auto-cut-lite"
+    installed_manifest = target_root / ".codex-plugin" / "plugin.json"
+    installed_manifest.parent.mkdir(parents=True)
+    installed_manifest.write_text(
+        json.dumps({"name": "auto-cut-lite", "version": "1.5.9"}), encoding="utf-8"
+    )
+    report_path = state_root / "deployment-report.json"
+    incomplete_bytes = json.dumps(
+        {
+            "schema_version": 2,
+            "plugin_name": "auto-cut-lite",
+            "plugin_version": "1.5.9",
+            "deployment_status": "installed",
+            "target_root": str(target_root),
+            "plugin_manifest_path": str(installed_manifest),
+            "runtime_root": str(target_root / "runtime"),
+        }
+    ).encode("utf-8")
+    report_path.write_bytes(incomplete_bytes)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-LocalAppDataRoot",
+            str(local_app_data),
+            "-UserProfileRoot",
+            str(user_profile),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert report_path.read_bytes() != incomplete_bytes
+    failed_report = json.loads(report_path.read_text(encoding="utf-8"))
+    attempt_report = json.loads(
+        (state_root / "deployment-attempt-report.json").read_text(encoding="utf-8")
+    )
+    assert failed_report["deployment_status"] == "failed"
+    assert failed_report["previous_deployment_report_preserved"] is False
+    assert attempt_report["previous_deployment_report_preserved"] is False
 
 
 def test_uninstaller_is_receipt_scoped_and_preserves_unrelated_registrations() -> None:
     uninstaller = UNINSTALL_PATH.read_text(encoding="utf-8")
 
+    assert "[Console]::OutputEncoding = $utf8NoBom" in uninstaller
+    assert "$OutputEncoding = $utf8NoBom" in uninstaller
+    assert "$env:PYTHONUTF8 = '1'" in uninstaller
+    assert "$env:PYTHONIOENCODING = 'utf-8'" in uninstaller
     assert "'uninstall'" in uninstaller
     assert "'remove-named'" in uninstaller
     assert "unrelated_plugins_unchanged" in uninstaller
     assert "unrelated_unchanged" in uninstaller
+    assert "$expectedRuntimePython = Join-Path $targetRoot '.runtime-venv\\Scripts\\python.exe'" in uninstaller
+    assert "[string]$deployment.components.python.runtime_path" in uninstaller
+    assert "if ($null -eq $pythonCommand)" in uninstaller
+    assert "Get-Command 'python'" in uninstaller
+    managed_python_index = uninstaller.index("$reportedRuntimePython =")
+    fallback_python_index = uninstaller.index("Get-Command 'python'", managed_python_index)
+    assert managed_python_index < fallback_python_index
     assert "Remove-OwnedPluginTree -Path $targetRoot" in uninstaller
+    assert "'deployment-attempt-report.json'" in uninstaller
     assert "Remove-Item -LiteralPath $stateRoot -Recurse" not in uninstaller
     assert "Deployment report target root does not match" in uninstaller
+
+
+def test_uninstaller_uses_managed_python_utf8_and_removes_attempt_report(
+    tmp_path: Path,
+) -> None:
+    local_app_data = tmp_path / "LocalAppData"
+    user_profile = tmp_path / "UserProfile"
+    state_root = local_app_data / "Auto-Cut" / "auto-cut-lite"
+    marketplace_root = state_root / "marketplace"
+    target_root = marketplace_root / "plugins" / "auto-cut-lite"
+    runtime_python = target_root / ".runtime-venv" / "Scripts" / "python.exe"
+    runtime_python.parent.mkdir(parents=True)
+    shutil.copy2(getattr(sys, "_base_executable", sys.executable), runtime_python)
+
+    plugin_manifest = target_root / ".codex-plugin" / "plugin.json"
+    plugin_manifest.parent.mkdir(parents=True)
+    plugin_manifest.write_text(
+        json.dumps({"name": "auto-cut-lite", "version": "1.6.0"}),
+        encoding="utf-8",
+    )
+    helpers = {
+        "installer/manage_named_marketplace.py": (
+            "import json\n"
+            "print(json.dumps({"
+            "'changed': False, 'marketplace_backup_path': None, "
+            "'unrelated_plugins_unchanged': True, 'unrelated_plugins_sha256': 'marketplace', "
+            "'remaining_plugin_count': 0}, ensure_ascii=False))\n"
+        ),
+        "installer/manage_workspace.py": (
+            "import json, sys\n"
+            "print(json.dumps({"
+            "'status': 'uninstalled', 'unrelated_unchanged': True, "
+            "'workspace_root': '中文工作区::' + sys.executable, "
+            "'unrelated_file_count': 0, 'unrelated_tree_sha256': 'workspace'"
+            "}, ensure_ascii=False))\n"
+        ),
+    }
+    manifest_rows = []
+    for relative_path, source in helpers.items():
+        helper = target_root / Path(relative_path)
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_text(source, encoding="utf-8")
+        data = helper.read_bytes()
+        manifest_rows.append(
+            {
+                "path": relative_path,
+                "size": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }
+        )
+    (target_root / "PACKAGE-MANIFEST.json").write_text(
+        json.dumps({"name": "auto-cut-lite", "files": manifest_rows}),
+        encoding="utf-8",
+    )
+
+    marketplace_path = marketplace_root / ".agents" / "plugins" / "marketplace.json"
+    marketplace_path.parent.mkdir(parents=True)
+    marketplace_path.write_text(
+        json.dumps({"name": "auto-cut-lite-marketplace", "plugins": []}),
+        encoding="utf-8",
+    )
+    (state_root / "workspace-install-receipt.json").write_text("{}", encoding="utf-8")
+    (state_root / "dependency-transaction.json").write_text("{}", encoding="utf-8")
+    attempt_report = state_root / "deployment-attempt-report.json"
+    attempt_report.write_text('{"deployment_status":"failed"}', encoding="utf-8")
+    (state_root / "deployment-report.json").write_text(
+        json.dumps(
+            {
+                "plugin_name": "auto-cut-lite",
+                "plugin_version": "1.6.0",
+                "deployment_status": "installed",
+                "target_root": str(target_root),
+                "workspace_root": str(tmp_path / "workspace"),
+                "components": {"python": {"runtime_path": str(runtime_python)}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    command_bin = tmp_path / "command-bin"
+    command_bin.mkdir()
+    (command_bin / "codex.cmd").write_text(
+        "@echo off\nif \"%~1\"==\"--version\" echo codex-cli 0.149.1\nexit /b 0\n",
+        encoding="ascii",
+    )
+    (command_bin / "python.cmd").write_text(
+        "@echo PATH Python must not be used 1>&2\n@exit /b 97\n",
+        encoding="ascii",
+    )
+    process_environment = os.environ.copy()
+    process_environment["PATH"] = str(command_bin) + os.pathsep + process_environment["PATH"]
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(UNINSTALL_PATH),
+            "-LocalAppDataRoot",
+            str(local_app_data),
+            "-UserProfileRoot",
+            str(user_profile),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=process_environment,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PATH Python must not be used" not in result.stdout + result.stderr
+    assert not attempt_report.exists()
+    assert not state_root.exists()
+    uninstall_report = json.loads(
+        (local_app_data / "Auto-Cut" / "auto-cut-lite-uninstall-report.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert uninstall_report["status"] == "uninstalled"
+    assert uninstall_report["managed_runtime_removed"] is True
+    assert uninstall_report["workspace_root"] == f"中文工作区::{runtime_python}"
 
 
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(

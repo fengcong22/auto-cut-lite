@@ -12,6 +12,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 
 $pluginName = 'auto-cut-lite'
 $marketplaceName = 'auto-cut-lite-marketplace'
@@ -53,6 +58,7 @@ $workspaceSkillsRoot = Join-Path $resolvedWorkspaceRoot '.codex\skills'
 $workspaceAgentsPath = Join-Path $resolvedWorkspaceRoot 'AGENTS.md'
 $workspaceReceiptPath = Join-Path $stateRoot 'workspace-install-receipt.json'
 $reportPath = Join-Path $stateRoot 'deployment-report.json'
+$attemptReportPath = Join-Path $stateRoot 'deployment-attempt-report.json'
 $pluginManifestInstalledPath = Join-Path $targetRoot '.codex-plugin\plugin.json'
 $runtimeRoot = Join-Path $targetRoot 'runtime'
 $stagingRoot = Join-Path $targetParent ('.auto-cut-lite.staging.' + [Guid]::NewGuid().ToString('N'))
@@ -60,6 +66,7 @@ $pluginBackup = $null
 $marketplaceRegistration = $null
 $personalMarketplaceCleanup = $null
 $workspaceInstall = $null
+$pythonEvidence = $null
 $dependencyTransaction = $null
 $dependencyTransactionCommitted = $false
 $codexEvidence = $null
@@ -68,6 +75,7 @@ $namedPluginWasInstalled = $false
 $targetActivated = $false
 $oldTargetBackedUp = $false
 $reportPathValidated = $false
+$previousInstalledReport = $null
 $workspaceRollbackNeeded = $false
 $sourceIsTarget = [string]::Equals(
     $packageRoot.TrimEnd('\'),
@@ -88,6 +96,11 @@ $report = [ordered]@{
     plugin_manifest_path = $pluginManifestInstalledPath
     runtime_root = $runtimeRoot
     plugin_backup_path = $null
+    plugin_backup_cleanup = 'not_needed'
+    plugin_backup_cleanup_error = $null
+    plugin_backup_cleanup_removed_count = 0
+    plugin_backup_cleanup_deferred = @()
+    previous_deployment_report_preserved = $false
     marketplace_path = $marketplacePath
     marketplace_name = $null
     marketplace_display_name = $marketplaceDisplayName
@@ -123,19 +136,257 @@ $report = [ordered]@{
 }
 
 function Write-DeploymentReport {
-    param([System.Collections.IDictionary]$Payload)
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Payload,
+        [string]$DestinationPath = $reportPath
+    )
+    $resolvedDestination = [System.IO.Path]::GetFullPath($DestinationPath)
+    $allowedDestinations = @(
+        [System.IO.Path]::GetFullPath($reportPath),
+        [System.IO.Path]::GetFullPath($attemptReportPath)
+    )
+    if (-not ($allowedDestinations | Where-Object {
+        [string]::Equals($_, $resolvedDestination, [StringComparison]::OrdinalIgnoreCase)
+    })) {
+        throw "Refusing to write an unexpected deployment report: $resolvedDestination"
+    }
     $Payload.finished_at_utc = [DateTime]::UtcNow.ToString('o')
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
-    $temporary = Join-Path $stateRoot ('.deployment-report.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    $temporary = Join-Path $stateRoot ('.' + [System.IO.Path]::GetFileName($resolvedDestination) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         $json = $Payload | ConvertTo-Json -Depth 12
         [System.IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($false))
+        Move-Item -LiteralPath $temporary -Destination $resolvedDestination -Force
+    }
+    finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
+function Test-EquivalentDeploymentPath {
+    param(
+        [Parameter(Mandatory)][string]$SavedPath,
+        [Parameter(Mandatory)][string]$ExpectedPath
+    )
+    try {
+        return [string]::Equals(
+            [System.IO.Path]::GetFullPath($SavedPath).TrimEnd('\'),
+            [System.IO.Path]::GetFullPath($ExpectedPath).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-PreservableDeploymentAnchors {
+    param(
+        [Parameter(Mandatory)]$Payload,
+        [Parameter(Mandatory)][string]$PluginVersion
+    )
+    try {
+        $packageManifestPath = Join-Path $targetRoot 'PACKAGE-MANIFEST.json'
+        $runtimeIntegrityPath = Join-Path $runtimeRoot 'scripts\utils\runtime_integrity.py'
+        $runtimeEntryPath = Join-Path $runtimeRoot 'scripts\jy_wrapper.py'
+        $expectedRuntimePython = Join-Path $targetRoot '.runtime-venv\Scripts\python.exe'
+        $reportedRuntimePython = [string]$Payload.components.python.runtime_path
+        if ([string]$Payload.components.python.status -ne 'detected' -or
+            [string]$Payload.components.python.dependencies -ne 'installed' -or
+            -not (Test-EquivalentDeploymentPath -SavedPath $reportedRuntimePython -ExpectedPath $expectedRuntimePython)) {
+            return $false
+        }
+        $reportedWorkspaceReceipt = [string]$Payload.workspace_receipt_path
+        if (-not (Test-EquivalentDeploymentPath -SavedPath $reportedWorkspaceReceipt -ExpectedPath $workspaceReceiptPath)) {
+            return $false
+        }
+        foreach ($requiredPath in @(
+            $packageManifestPath,
+            $runtimeIntegrityPath,
+            $runtimeEntryPath,
+            $expectedRuntimePython,
+            $workspaceReceiptPath
+        )) {
+            $boundary = $(if ($requiredPath -eq $workspaceReceiptPath) { $localAppData } else { $targetParent })
+            Assert-NoReparseInExistingPath -Path $requiredPath -StopAt $boundary
+            if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+                return $false
+            }
+            $requiredItem = Get-Item -LiteralPath $requiredPath -Force
+            if (($requiredItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $false
+            }
+        }
+
+        $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $packageManifestItem = Get-Item -LiteralPath $packageManifestPath -Force
+        if ($packageManifestItem.Length -gt 16777216) {
+            return $false
+        }
+        $packageManifest = $strictUtf8.GetString(
+            [System.IO.File]::ReadAllBytes($packageManifestPath)
+        ) | ConvertFrom-Json
+        if ([string]$packageManifest.name -ne $pluginName -or
+            [string]$packageManifest.version -ne $PluginVersion -or
+            @($packageManifest.files).Count -eq 0) {
+            return $false
+        }
+        foreach ($requiredRelative in @(
+            '.codex-plugin/plugin.json',
+            'runtime/scripts/utils/runtime_integrity.py',
+            'runtime/scripts/jy_wrapper.py'
+        )) {
+            $rows = @($packageManifest.files | Where-Object {
+                [string]$_.path -ieq $requiredRelative
+            })
+            if ($rows.Count -ne 1) {
+                return $false
+            }
+            $requiredFile = Join-Path $targetRoot $requiredRelative.Replace('/', '\')
+            $requiredFileItem = Get-Item -LiteralPath $requiredFile -Force
+            $expectedHash = [string]$rows[0].sha256
+            if ([int64]$rows[0].size -ne $requiredFileItem.Length -or
+                $expectedHash -notmatch '^[0-9a-fA-F]{64}$' -or
+                (Get-FileHash -LiteralPath $requiredFile -Algorithm SHA256).Hash -ne $expectedHash) {
+                return $false
+            }
+        }
+
+        $workspaceReceiptItem = Get-Item -LiteralPath $workspaceReceiptPath -Force
+        if ($workspaceReceiptItem.Length -gt 16777216) {
+            return $false
+        }
+        $workspaceReceipt = $strictUtf8.GetString(
+            [System.IO.File]::ReadAllBytes($workspaceReceiptPath)
+        ) | ConvertFrom-Json
+        if ([string]$workspaceReceipt.status -ne 'installed' -or
+            [string]$workspaceReceipt.plugin_name -ne $pluginName -or
+            [string]$workspaceReceipt.plugin_version -ne $PluginVersion -or
+            -not (Test-EquivalentDeploymentPath -SavedPath ([string]$workspaceReceipt.deployment_report_path) -ExpectedPath $reportPath) -or
+            -not (Test-EquivalentDeploymentPath -SavedPath ([string]$workspaceReceipt.plugin_root) -ExpectedPath $targetRoot) -or
+            -not (Test-EquivalentDeploymentPath -SavedPath ([string]$workspaceReceipt.runtime_root) -ExpectedPath $runtimeRoot)) {
+            return $false
+        }
+        $expectedManifestHash = [string]$workspaceReceipt.installed_package_sha256.'PACKAGE-MANIFEST.json'
+        if ($expectedManifestHash -notmatch '^[0-9a-fA-F]{64}$' -or
+            (Get-FileHash -LiteralPath $packageManifestPath -Algorithm SHA256).Hash -ne $expectedManifestHash) {
+            return $false
+        }
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-PreservableDeploymentReport {
+    if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        Assert-NoReparseInExistingPath -Path $pluginManifestInstalledPath -StopAt $targetParent
+        $reportItem = Get-Item -LiteralPath $reportPath -Force -ErrorAction Stop
+        if (($reportItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $reportItem.Length -gt 4194304) {
+            return $null
+        }
+        $bytes = [System.IO.File]::ReadAllBytes($reportPath)
+        $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $payload = $strictUtf8.GetString($bytes) | ConvertFrom-Json
+        if ([int]$payload.schema_version -ne 2 -or
+            [string]$payload.plugin_name -ne $pluginName -or
+            [string]$payload.deployment_status -ne 'installed') {
+            return $null
+        }
+        if (-not (Test-EquivalentDeploymentPath -SavedPath ([string]$payload.target_root) -ExpectedPath $targetRoot) -or
+            -not (Test-EquivalentDeploymentPath -SavedPath ([string]$payload.plugin_manifest_path) -ExpectedPath $pluginManifestInstalledPath) -or
+            -not (Test-EquivalentDeploymentPath -SavedPath ([string]$payload.runtime_root) -ExpectedPath $runtimeRoot)) {
+            return $null
+        }
+        if (-not (Test-Path -LiteralPath $pluginManifestInstalledPath -PathType Leaf)) {
+            return $null
+        }
+        $installedManifestItem = Get-Item -LiteralPath $pluginManifestInstalledPath -Force
+        if (($installedManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $installedManifestItem.Length -gt 1048576) {
+            return $null
+        }
+        $installedManifest = Get-Content -LiteralPath $pluginManifestInstalledPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([string]$installedManifest.name -ne $pluginName -or
+            [string]::IsNullOrWhiteSpace([string]$installedManifest.version) -or
+            [string]$installedManifest.version -ne [string]$payload.plugin_version) {
+            return $null
+        }
+        if (-not (Test-PreservableDeploymentAnchors `
+            -Payload $payload `
+            -PluginVersion ([string]$installedManifest.version))) {
+            return $null
+        }
+        return [pscustomobject]@{
+            Bytes = $bytes
+            PluginVersion = [string]$installedManifest.version
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
+function Restore-PreservedDeploymentReport {
+    param([Parameter(Mandatory)]$Snapshot)
+    $expectedBytes = [byte[]]$Snapshot.Bytes
+    $currentMatches = $false
+    if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+        $currentBytes = [System.IO.File]::ReadAllBytes($reportPath)
+        if ($currentBytes.Length -eq $expectedBytes.Length) {
+            $currentMatches = $true
+            for ($index = 0; $index -lt $expectedBytes.Length; $index++) {
+                if ($currentBytes[$index] -ne $expectedBytes[$index]) {
+                    $currentMatches = $false
+                    break
+                }
+            }
+        }
+    }
+    if ($currentMatches) {
+        return
+    }
+    $temporary = Join-Path $stateRoot ('.deployment-report.restore.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        [System.IO.File]::WriteAllBytes($temporary, $expectedBytes)
         Move-Item -LiteralPath $temporary -Destination $reportPath -Force
     }
     finally {
         if (Test-Path -LiteralPath $temporary) {
             Remove-Item -LiteralPath $temporary -Force
         }
+    }
+    $restoredBytes = [System.IO.File]::ReadAllBytes($reportPath)
+    if ($restoredBytes.Length -ne $expectedBytes.Length) {
+        throw 'The restored deployment report length does not match the committed report.'
+    }
+    for ($index = 0; $index -lt $expectedBytes.Length; $index++) {
+        if ($restoredBytes[$index] -ne $expectedBytes[$index]) {
+            throw 'The restored deployment report bytes do not match the committed report.'
+        }
+    }
+}
+
+function Test-PreservedPluginIdentity {
+    param([Parameter(Mandatory)]$Snapshot)
+    try {
+        Assert-NoReparseInExistingPath -Path $pluginManifestInstalledPath -StopAt $targetParent
+        if (-not (Test-Path -LiteralPath $pluginManifestInstalledPath -PathType Leaf)) {
+            return $false
+        }
+        $manifest = Get-Content -LiteralPath $pluginManifestInstalledPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return [string]$manifest.name -eq $pluginName -and
+            [string]$manifest.version -eq [string]$Snapshot.PluginVersion
+    }
+    catch {
+        return $false
     }
 }
 
@@ -498,6 +749,141 @@ function Remove-ExactDeploymentDirectory {
     }
 }
 
+function Remove-OwnedPluginBackup {
+    param([Parameter(Mandatory)][string]$Path)
+    $resolved = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $expectedParent = [System.IO.Path]::GetFullPath($targetParent).TrimEnd('\')
+    $actualParent = [System.IO.Path]::GetDirectoryName($resolved).TrimEnd('\')
+    $leaf = [System.IO.Path]::GetFileName($resolved)
+    if (-not [string]::Equals($actualParent, $expectedParent, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove a plugin backup outside the managed parent: $resolved"
+    }
+    if ($leaf -notmatch '^\.auto-cut-lite\.backup\.\d{14}\.[0-9a-f]{32}$') {
+        throw "Refusing to remove a directory without a managed plugin backup name: $resolved"
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        return 'not_needed'
+    }
+    if (-not (Test-Path -LiteralPath $resolved -PathType Container)) {
+        throw "Plugin backup is not a directory: $resolved"
+    }
+    Assert-NoReparseInExistingPath -Path $resolved -StopAt $targetParent
+    $directories = [System.Collections.Generic.Stack[string]]::new()
+    $directories.Push($resolved)
+    while ($directories.Count -gt 0) {
+        $directory = $directories.Pop()
+        foreach ($item in Get-ChildItem -LiteralPath $directory -Force) {
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Plugin backup contains a reparse point: $($item.FullName)"
+            }
+            if ($item.PSIsContainer) {
+                $directories.Push($item.FullName)
+            }
+        }
+    }
+    $packageManifestPath = Join-Path $resolved 'PACKAGE-MANIFEST.json'
+    if (-not (Test-Path -LiteralPath $packageManifestPath -PathType Leaf)) {
+        throw "Plugin backup package manifest is missing: $packageManifestPath"
+    }
+    $packageManifestItem = Get-Item -LiteralPath $packageManifestPath -Force
+    if (($packageManifestItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        $packageManifestItem.Length -gt 16777216) {
+        throw "Plugin backup package manifest is not a regular file: $packageManifestPath"
+    }
+    $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+    $packageManifest = $strictUtf8.GetString(
+        [System.IO.File]::ReadAllBytes($packageManifestPath)
+    ) | ConvertFrom-Json
+    if ([string]$packageManifest.name -ne $pluginName -or
+        [string]::IsNullOrWhiteSpace([string]$packageManifest.version) -or
+        @($packageManifest.files).Count -eq 0) {
+        throw "Plugin backup package identity is invalid: $resolved"
+    }
+    $seen = @{}
+    foreach ($row in @($packageManifest.files)) {
+        $relative = [string]$row.path
+        if ([string]::IsNullOrWhiteSpace($relative) -or [System.IO.Path]::IsPathRooted($relative)) {
+            throw "Plugin backup package path is unsafe: $relative"
+        }
+        $parts = @($relative.Replace('/', '\').Split('\'))
+        if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -eq '' -or $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+            throw "Plugin backup package path is unsafe: $relative"
+        }
+        $key = $relative.Replace('\', '/').ToLowerInvariant()
+        if ($seen.ContainsKey($key)) {
+            throw "Plugin backup package has a duplicate path: $relative"
+        }
+        $seen[$key] = $true
+        $inventoriedPath = [System.IO.Path]::GetFullPath((Join-Path $resolved ($parts -join '\')))
+        if (-not $inventoriedPath.StartsWith($resolved + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            -not (Test-Path -LiteralPath $inventoriedPath -PathType Leaf)) {
+            throw "Plugin backup package file is missing or outside its root: $relative"
+        }
+        $inventoriedItem = Get-Item -LiteralPath $inventoriedPath -Force
+        $expectedHash = [string]$row.sha256
+        if (($inventoriedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            [int64]$row.size -ne $inventoriedItem.Length -or
+            $expectedHash -notmatch '^[0-9a-fA-F]{64}$' -or
+            (Get-FileHash -LiteralPath $inventoriedPath -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw "Plugin backup package file failed inventory validation: $relative"
+        }
+    }
+    foreach ($requiredRelative in @(
+        '.codex-plugin/plugin.json',
+        'deploy-to-codex.ps1',
+        'installer/manage_runtime_dependencies.py'
+    )) {
+        if (-not $seen.ContainsKey($requiredRelative.ToLowerInvariant())) {
+            throw "Plugin backup package is missing a required inventory anchor: $requiredRelative"
+        }
+    }
+    $manifestPath = Join-Path $resolved '.codex-plugin\plugin.json'
+    $manifest = $strictUtf8.GetString(
+        [System.IO.File]::ReadAllBytes($manifestPath)
+    ) | ConvertFrom-Json
+    if ([string]$manifest.name -ne $pluginName -or
+        [string]$manifest.version -ne [string]$packageManifest.version) {
+        throw "Plugin backup manifest identity does not match its package inventory: $resolved"
+    }
+    Remove-Item -LiteralPath $resolved -Recurse -Force
+    if (Test-Path -LiteralPath $resolved) {
+        throw "Plugin backup removal did not complete: $resolved"
+    }
+    return 'removed'
+}
+
+function Remove-OwnedPluginBackups {
+    $removed = [System.Collections.Generic.List[string]]::new()
+    $deferred = [System.Collections.Generic.List[object]]::new()
+    $candidates = @(
+        Get-ChildItem -LiteralPath $targetParent -Force -ErrorAction Stop |
+            Where-Object {
+                $_.Name.StartsWith(
+                    '.auto-cut-lite.backup.',
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    foreach ($candidate in $candidates) {
+        try {
+            $status = Remove-OwnedPluginBackup -Path $candidate.FullName
+            if ($status -eq 'removed') {
+                $removed.Add([string]$candidate.FullName)
+            }
+        }
+        catch {
+            $deferred.Add([pscustomobject]@{
+                path = [string]$candidate.FullName
+                error = $_.Exception.Message
+            })
+        }
+    }
+    return [pscustomobject]@{
+        removed = $removed.ToArray()
+        deferred = $deferred.ToArray()
+    }
+}
+
 try {
     if ($WithAudio -and $SkipAudio) {
         throw 'Use either -WithAudio or -SkipAudio, not both. Audio is installed by default.'
@@ -586,7 +972,12 @@ try {
     Assert-NoReparseInExistingPath -Path $resolvedWorkspaceRoot -StopAt $workspaceAnchor
     Assert-NoReparseInExistingPath -Path $workspaceReceiptPath -StopAt $localAppData
     Assert-NoReparseInExistingPath -Path $reportPath -StopAt $localAppData
+    Assert-NoReparseInExistingPath -Path $attemptReportPath -StopAt $localAppData
     $reportPathValidated = $true
+    $previousInstalledReport = Get-PreservableDeploymentReport
+    if ($sourceIsTarget -and $null -eq $previousInstalledReport) {
+        throw 'Running the deployer from the fixed install directory requires a verified previous installed report.'
+    }
     $packageManifest = Read-AndValidatePackageManifest
     $report.plugin_version = [string]$packageManifest.version
 
@@ -684,6 +1075,7 @@ try {
             [System.IO.Directory]::Move($targetRoot, $pluginBackup)
             $oldTargetBackedUp = $true
             $report.plugin_backup_path = $pluginBackup
+            $report.plugin_backup_cleanup = 'pending'
         }
         [System.IO.Directory]::Move($stagingRoot, $targetRoot)
         $targetActivated = $true
@@ -887,6 +1279,55 @@ try {
     $report.readiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
     Write-DeploymentReport -Payload $report
 
+    try {
+        $backupCleanup = Remove-OwnedPluginBackups
+        $removedBackupCount = @($backupCleanup.removed).Count
+        $deferredBackups = @($backupCleanup.deferred)
+        $report.plugin_backup_cleanup_removed_count = $removedBackupCount
+        $report.plugin_backup_cleanup_deferred = $deferredBackups
+        if ($deferredBackups.Count -gt 0) {
+            $report.plugin_backup_cleanup = 'deferred'
+            $report.plugin_backup_cleanup_error = @(
+                $deferredBackups | ForEach-Object { "$($_.path): $($_.error)" }
+            ) -join ' | '
+        }
+        elseif ($removedBackupCount -gt 0) {
+            $report.plugin_backup_cleanup = 'removed'
+            $report.plugin_backup_cleanup_error = $null
+        }
+        else {
+            $report.plugin_backup_cleanup = 'not_needed'
+            $report.plugin_backup_cleanup_error = $null
+        }
+        if ($null -ne $pluginBackup -and -not (Test-Path -LiteralPath $pluginBackup)) {
+            $report.plugin_backup_path = $null
+        }
+    }
+    catch {
+        $report.plugin_backup_cleanup = 'deferred'
+        $report.plugin_backup_cleanup_error = $_.Exception.Message
+        $report.plugin_backup_cleanup_deferred = @(
+            [pscustomobject]@{
+                path = $targetParent
+                error = $_.Exception.Message
+            }
+        )
+    }
+    try {
+        Write-DeploymentReport -Payload $report
+    }
+    catch {
+        Write-Warning "The committed deployment succeeded, but its backup-cleanup report could not be refreshed: $($_.Exception.Message)"
+    }
+    if (Test-Path -LiteralPath $attemptReportPath -PathType Leaf) {
+        try {
+            Remove-Item -LiteralPath $attemptReportPath -Force
+        }
+        catch {
+            Write-Warning "The committed deployment succeeded, but a stale attempt report could not be removed: $($_.Exception.Message)"
+        }
+    }
+
     Write-Host ''
     Write-Host "Auto-Cut Lite $($report.plugin_version) has been installed in Codex."
     Write-Host "deployment_status=$($report.deployment_status)"
@@ -997,10 +1438,15 @@ catch {
             if ($targetActivated) {
                 Remove-ExactDeploymentDirectory -Path $targetRoot
             }
-            if ($oldTargetBackedUp -and $null -ne $pluginBackup -and
-                (Test-Path -LiteralPath $pluginBackup) -and
-                -not (Test-Path -LiteralPath $targetRoot)) {
+            if ($oldTargetBackedUp -and $null -ne $pluginBackup) {
+                if (-not (Test-Path -LiteralPath $pluginBackup -PathType Container)) {
+                    throw "The previous plugin backup is missing: $pluginBackup"
+                }
+                if (Test-Path -LiteralPath $targetRoot) {
+                    throw "The failed plugin target still exists and blocks rollback: $targetRoot"
+                }
                 [System.IO.Directory]::Move($pluginBackup, $targetRoot)
+                $report.plugin_backup_cleanup = 'restored'
             }
         }
         catch {
@@ -1011,15 +1457,39 @@ catch {
         try { Remove-ExactDeploymentDirectory -Path $stagingRoot }
         catch { $rollbackErrors.Add("staging cleanup failed: $($_.Exception.Message)") }
     }
+    if ($null -ne $previousInstalledReport -and
+        -not (Test-PreservedPluginIdentity -Snapshot $previousInstalledReport)) {
+        $rollbackErrors.Add('previous plugin identity was not restored')
+    }
 
     $report.deployment_status = 'failed'
     $report.readiness = 'not_evaluated'
-    $report.error = $originalError
-    if ($rollbackErrors.Count -gt 0) {
-        $report.error = $originalError + ' | ' + ($rollbackErrors -join ' | ')
-    }
     if ($reportPathValidated) {
-        try { Write-DeploymentReport -Payload $report } catch {}
+        $preservePreviousReport = $null -ne $previousInstalledReport -and $rollbackErrors.Count -eq 0
+        if ($preservePreviousReport) {
+            try {
+                Restore-PreservedDeploymentReport -Snapshot $previousInstalledReport
+            }
+            catch {
+                $rollbackErrors.Add("deployment report restore failed: $($_.Exception.Message)")
+                $preservePreviousReport = $false
+            }
+        }
+        $report.error = $originalError
+        if ($rollbackErrors.Count -gt 0) {
+            $report.error = $originalError + ' | ' + ($rollbackErrors -join ' | ')
+        }
+        $report.previous_deployment_report_preserved = $preservePreviousReport
+        try { Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath } catch {}
+        if (-not $preservePreviousReport) {
+            try { Write-DeploymentReport -Payload $report -DestinationPath $reportPath } catch {}
+        }
+    }
+    else {
+        $report.error = $originalError
+        if ($rollbackErrors.Count -gt 0) {
+            $report.error = $originalError + ' | ' + ($rollbackErrors -join ' | ')
+        }
     }
     throw "Auto-Cut Lite deployment failed: $($report.error)"
 }

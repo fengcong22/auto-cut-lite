@@ -46,6 +46,22 @@ def _assert_descendant(path: Path, parent: Path) -> None:
         raise ValueError(f"managed target cannot equal its boundary: {candidate}")
 
 
+def _assert_no_reparse_ancestors(path: Path, boundary: Path) -> None:
+    candidate = _lexical(path)
+    root = _lexical(boundary)
+    try:
+        candidate.relative_to(root)
+    except ValueError as exc:
+        raise ValueError(f"path escapes managed boundary: {candidate}") from exc
+    cursor = candidate
+    while True:
+        if os.path.lexists(cursor) and _is_reparse(cursor):
+            raise ValueError(f"managed path has a reparse-point ancestor: {cursor}")
+        if cursor == root:
+            return
+        cursor = cursor.parent
+
+
 def _is_reparse(path: Path) -> bool:
     metadata = path.lstat()
     return path.is_symlink() or bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
@@ -341,16 +357,186 @@ def _rollback_records(records: list[dict[str, Any]], state_root: Path) -> None:
             continue
         target = _lexical(Path(record["target_environment"]))
         _assert_descendant(target, state_root)
-        if target.exists():
-            _safe_remove_tree(target, state_root)
         backup_value = record.get("backup_environment")
         if backup_value:
             backup = _lexical(Path(backup_value))
             _assert_descendant(backup, state_root / "dependency-backups")
-            if not backup.is_dir():
+            if not os.path.lexists(backup):
+                # The recovery intent is persisted before the move. A present
+                # target with no backup means the move never started.
+                if record.get("backup_move_status") == "pending" and os.path.lexists(target):
+                    _assert_regular_tree(target)
+                    continue
                 raise ValueError(f"dependency rollback backup is missing: {backup}")
+            _assert_regular_tree(backup)
+            if os.path.lexists(target):
+                _safe_remove_tree(target, state_root)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(backup), str(target))
+        elif os.path.lexists(target):
+            _safe_remove_tree(target, state_root)
+
+
+def _transaction_path(payload: dict[str, Any], key: str, label: str) -> Path:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip() or not Path(value).is_absolute():
+        raise ValueError(f"dependency transaction {label} is invalid")
+    return _lexical(Path(value))
+
+
+def _validate_transaction_receipt(
+    payload: Any,
+    *,
+    state_root: Path,
+    plugin_root: Path,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError("dependency transaction receipt is invalid")
+    if payload.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
+        raise ValueError("dependency transaction receipt is invalid")
+    status = payload.get("status")
+    if status not in {"active", "committed", "rolled_back"}:
+        raise ValueError("dependency transaction status is invalid")
+    transaction_id = payload.get("transaction_id")
+    if not isinstance(transaction_id, str) or re.fullmatch(r"[0-9a-f]{32}", transaction_id) is None:
+        raise ValueError("dependency transaction ID is invalid")
+
+    state = _lexical(state_root)
+    plugin = _lexical(plugin_root)
+    receipt_state = _transaction_path(payload, "state_root", "state root")
+    receipt_plugin = _transaction_path(payload, "plugin_root", "plugin root")
+    if receipt_state != state:
+        raise ValueError("dependency transaction belongs to a different state root")
+    if receipt_plugin != plugin:
+        raise ValueError("dependency transaction belongs to a different plugin root")
+    _assert_no_reparse_ancestors(receipt_plugin, state)
+
+    backup_root = _transaction_path(payload, "backup_root", "backup root")
+    expected_backup_root = state / "dependency-backups" / transaction_id
+    if backup_root != expected_backup_root:
+        raise ValueError("dependency transaction backup root is outside its exact boundary")
+    _assert_no_reparse_ancestors(backup_root, state)
+    if os.path.lexists(backup_root):
+        _assert_regular_tree(backup_root)
+
+    records = payload.get("records")
+    if not isinstance(records, list):
+        raise ValueError("dependency transaction records are invalid")
+    specs = {spec.name: spec for spec in ENVIRONMENT_SPECS}
+    seen: set[str] = set()
+    validated_records: list[dict[str, Any]] = []
+    for raw_record in records:
+        if not isinstance(raw_record, dict):
+            raise ValueError("dependency transaction record is invalid")
+        name = raw_record.get("name")
+        if not isinstance(name, str) or name not in specs or name in seen:
+            raise ValueError("dependency transaction environment identity is invalid")
+        seen.add(name)
+        if raw_record.get("action") not in {"reuse", "incremental_upgrade", "recreate"}:
+            raise ValueError("dependency transaction environment action is invalid")
+        if not isinstance(raw_record.get("changed"), bool):
+            raise ValueError("dependency transaction changed flag is invalid")
+
+        target = _transaction_path(raw_record, "target_environment", "target environment")
+        expected_target = plugin / Path(specs[name].relative_environment)
+        if target != expected_target:
+            raise ValueError("dependency transaction target is outside its exact plugin boundary")
+        _assert_no_reparse_ancestors(target, plugin)
+
+        backup_value = raw_record.get("backup_environment")
+        backup: Path | None = None
+        if backup_value is not None:
+            backup = _transaction_path(raw_record, "backup_environment", "backup environment")
+            if backup != backup_root / name:
+                raise ValueError("dependency transaction environment backup is invalid")
+            _assert_no_reparse_ancestors(backup, state)
+            if raw_record["changed"] is not True:
+                raise ValueError("unchanged dependency transaction record cannot have a backup")
+        move_status = raw_record.get("backup_move_status")
+        if move_status is None:
+            move_status = "complete" if backup is not None else "not_required"
+        if move_status not in {"not_required", "pending", "complete"}:
+            raise ValueError("dependency transaction backup move status is invalid")
+        if backup is None and move_status != "not_required":
+            raise ValueError("dependency transaction backup move status is inconsistent")
+        if backup is not None and move_status == "not_required":
+            raise ValueError("dependency transaction backup move status is inconsistent")
+        validated = dict(raw_record)
+        validated["target_environment"] = str(target)
+        validated["backup_environment"] = str(backup) if backup is not None else None
+        validated["backup_move_status"] = move_status
+        validated_records.append(validated)
+    if backup_root.exists():
+        expected_names = {
+            str(record["name"])
+            for record in validated_records
+            if record.get("backup_environment") is not None
+        }
+        actual_names = {path.name for path in backup_root.iterdir()}
+        if not actual_names.issubset(expected_names):
+            raise ValueError("dependency transaction backup inventory is invalid")
+    return {
+        "payload": payload,
+        "status": status,
+        "transaction_id": transaction_id,
+        "backup_root": backup_root,
+        "records": validated_records,
+    }
+
+
+def _read_transaction_receipt(
+    receipt_path: Path,
+    *,
+    state_root: Path,
+    plugin_root: Path,
+) -> dict[str, Any]:
+    if not receipt_path.is_file() or _is_reparse(receipt_path):
+        raise ValueError("dependency transaction receipt is missing or unsafe")
+    try:
+        payload = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("dependency transaction receipt is invalid JSON") from exc
+    return _validate_transaction_receipt(
+        payload,
+        state_root=state_root,
+        plugin_root=plugin_root,
+    )
+
+
+def _remove_transaction_backup(backup_root: Path, state_root: Path) -> str:
+    if not os.path.lexists(backup_root):
+        return "not_needed"
+    _safe_remove_tree(backup_root, state_root / "dependency-backups")
+    return "removed"
+
+
+def _recover_active_transaction(
+    details: dict[str, Any],
+    *,
+    receipt_path: Path,
+    state_root: Path,
+) -> dict[str, Any]:
+    payload = details["payload"]
+    _rollback_records(details["records"], state_root)
+    recovered_at = datetime.now(timezone.utc).isoformat()
+    payload["status"] = "rolled_back"
+    payload["recovered"] = True
+    payload["recovery_reason"] = "stale_active_transaction"
+    payload["recovered_at_utc"] = recovered_at
+    payload["rolled_back_at_utc"] = recovered_at
+    payload["backup_cleanup"] = "pending"
+    _atomic_write_json(receipt_path, payload)
+    cleanup = _remove_transaction_backup(details["backup_root"], state_root)
+    payload["backup_cleanup"] = cleanup
+    _atomic_write_json(receipt_path, payload)
+    return {
+        "status": "rolled_back",
+        "recovered": True,
+        "action": "recovered_stale_active_transaction",
+        "transaction_id": details["transaction_id"],
+        "backup_cleanup": cleanup,
+        "recovered_at_utc": recovered_at,
+    }
 
 
 def install_dependencies(
@@ -368,6 +554,7 @@ def install_dependencies(
         raise ValueError(f"plugin root must be exactly: {expected_plugin}")
     if not plugin.is_dir() or _is_reparse(plugin):
         raise ValueError("plugin root is missing or unsafe")
+    _assert_no_reparse_ancestors(plugin, state)
     previous = _lexical(previous_plugin_root) if previous_plugin_root is not None else None
     if previous is not None:
         allowed_parent = expected_plugin.parent
@@ -382,13 +569,28 @@ def install_dependencies(
     if base_identity["implementation"] != "CPython" or int(base_identity["bits"]) != 64:
         raise ValueError("base Python must be 64-bit CPython")
 
+    receipt_path = state / "dependency-transaction.json"
+    recovered_transaction: dict[str, Any] | None = None
+    if receipt_path.exists():
+        existing = _read_transaction_receipt(
+            receipt_path,
+            state_root=state,
+            plugin_root=plugin,
+        )
+        if existing["status"] == "active":
+            recovered_transaction = _recover_active_transaction(
+                existing,
+                receipt_path=receipt_path,
+                state_root=state,
+            )
+        elif existing["payload"].get("recovered") is True:
+            cleanup = _remove_transaction_backup(existing["backup_root"], state)
+            if existing["payload"].get("backup_cleanup") != cleanup:
+                existing["payload"]["backup_cleanup"] = cleanup
+                _atomic_write_json(receipt_path, existing["payload"])
+
     transaction_id = uuid.uuid4().hex
     backup_root = state / "dependency-backups" / transaction_id
-    receipt_path = state / "dependency-transaction.json"
-    if receipt_path.exists():
-        active = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
-        if active.get("status") == "active":
-            raise ValueError("an unfinished dependency transaction already exists")
     receipt: dict[str, Any] = {
         "schema_version": TRANSACTION_SCHEMA_VERSION,
         "status": "active",
@@ -399,6 +601,8 @@ def install_dependencies(
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "records": [],
     }
+    if recovered_transaction is not None:
+        receipt["recovered_transaction"] = recovered_transaction
     _atomic_write_json(receipt_path, receipt)
     records: list[dict[str, Any]] = receipt["records"]
     results: dict[str, Any] = {}
@@ -419,6 +623,7 @@ def install_dependencies(
                 "action": plan["action"],
                 "target_environment": str(target_environment),
                 "backup_environment": None,
+                "backup_move_status": "not_required",
                 "changed": False,
             }
             records.append(record)
@@ -428,12 +633,16 @@ def install_dependencies(
             if plan["action"] == "reuse" and source_is_target:
                 pass
             else:
-                if target_environment.exists():
+                if os.path.lexists(target_environment):
+                    _assert_regular_tree(target_environment)
                     backup_environment = backup_root / spec.name
                     backup_environment.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(target_environment), str(backup_environment))
                     record["backup_environment"] = str(backup_environment)
+                    record["backup_move_status"] = "pending"
                     record["changed"] = True
+                    _atomic_write_json(receipt_path, receipt)
+                    shutil.move(str(target_environment), str(backup_environment))
+                    record["backup_move_status"] = "complete"
                     _atomic_write_json(receipt_path, receipt)
                 else:
                     record["changed"] = True
@@ -493,11 +702,14 @@ def install_dependencies(
             if rollback_succeeded and backup_root.exists():
                 _safe_remove_tree(backup_root, state / "dependency-backups")
         raise
-    return {
+    result = {
         "status": "prepared",
         "transaction_receipt_path": str(receipt_path),
         "environments": results,
     }
+    if recovered_transaction is not None:
+        result["recovery"] = recovered_transaction
+    return result
 
 
 def rollback_transaction(*, receipt_path: Path, state_root: Path) -> dict[str, Any]:
@@ -505,21 +717,20 @@ def rollback_transaction(*, receipt_path: Path, state_root: Path) -> dict[str, A
     state = _lexical(state_root)
     if receipt_file != state / "dependency-transaction.json":
         raise ValueError("dependency transaction receipt path is invalid")
-    payload = json.loads(receipt_file.read_text(encoding="utf-8-sig"))
-    if payload.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
-        raise ValueError("dependency transaction receipt is invalid")
-    if payload.get("status") != "active":
-        return {"status": payload.get("status"), "action": "unchanged"}
-    records = payload.get("records")
-    if not isinstance(records, list):
-        raise ValueError("dependency transaction records are invalid")
-    _rollback_records(records, state)
+    plugin = state / "marketplace" / "plugins" / PLUGIN_NAME
+    details = _read_transaction_receipt(
+        receipt_file,
+        state_root=state,
+        plugin_root=plugin,
+    )
+    payload = details["payload"]
+    if details["status"] != "active":
+        return {"status": details["status"], "action": "unchanged"}
+    _rollback_records(details["records"], state)
     payload["status"] = "rolled_back"
     payload["rolled_back_at_utc"] = datetime.now(timezone.utc).isoformat()
     _atomic_write_json(receipt_file, payload)
-    backup_root = _lexical(Path(payload["backup_root"]))
-    if backup_root.exists():
-        _safe_remove_tree(backup_root, state / "dependency-backups")
+    _remove_transaction_backup(details["backup_root"], state)
     return {"status": "rolled_back", "action": "restored_previous_environments"}
 
 
@@ -528,15 +739,19 @@ def commit_transaction(*, receipt_path: Path, state_root: Path) -> dict[str, Any
     state = _lexical(state_root)
     if receipt_file != state / "dependency-transaction.json":
         raise ValueError("dependency transaction receipt path is invalid")
-    payload = json.loads(receipt_file.read_text(encoding="utf-8-sig"))
-    if payload.get("schema_version") != TRANSACTION_SCHEMA_VERSION:
-        raise ValueError("dependency transaction receipt is invalid")
-    if payload.get("status") != "active":
-        return {"status": payload.get("status"), "action": "unchanged"}
+    plugin = state / "marketplace" / "plugins" / PLUGIN_NAME
+    details = _read_transaction_receipt(
+        receipt_file,
+        state_root=state,
+        plugin_root=plugin,
+    )
+    payload = details["payload"]
+    if details["status"] != "active":
+        return {"status": details["status"], "action": "unchanged"}
     payload["status"] = "committed"
     payload["committed_at_utc"] = datetime.now(timezone.utc).isoformat()
     _atomic_write_json(receipt_file, payload)
-    backup_root = _lexical(Path(payload["backup_root"]))
+    backup_root = details["backup_root"]
     cleanup = "not_needed"
     if backup_root.exists():
         try:

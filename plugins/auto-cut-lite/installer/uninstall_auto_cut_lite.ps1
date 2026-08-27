@@ -8,6 +8,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = $utf8NoBom
+$OutputEncoding = $utf8NoBom
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
 
 $pluginName = 'auto-cut-lite'
 $marketplaceName = 'auto-cut-lite-marketplace'
@@ -262,7 +267,24 @@ try {
     foreach ($helper in @($workspaceHelper, $marketplaceHelper)) {
         if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw "Uninstall helper is missing: $helper" }
     }
-    $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $reportedRuntimePython = [string]$deployment.components.python.runtime_path
+    $expectedRuntimePython = Join-Path $targetRoot '.runtime-venv\Scripts\python.exe'
+    if (-not [string]::IsNullOrWhiteSpace($reportedRuntimePython)) {
+        $resolvedRuntimePython = [System.IO.Path]::GetFullPath($reportedRuntimePython)
+        if ([string]::Equals(
+            $resolvedRuntimePython,
+            [System.IO.Path]::GetFullPath($expectedRuntimePython),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and (Test-Path -LiteralPath $resolvedRuntimePython -PathType Leaf)) {
+            $runtimePythonItem = Get-Item -LiteralPath $resolvedRuntimePython -Force
+            if (($runtimePythonItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+                $pythonCommand = [pscustomobject]@{ Source = $resolvedRuntimePython }
+            }
+        }
+    }
+    if ($null -eq $pythonCommand) {
+        $pythonCommand = Get-Command 'python' -ErrorAction SilentlyContinue | Select-Object -First 1
+    }
     if ($null -eq $pythonCommand) { throw 'Python is required to validate and uninstall Auto-Cut Lite.' }
     $codexEvidence = Resolve-CodexCommand
     if ($codexEvidence.status -ne 'detected') { throw 'A usable Codex CLI is required for safe plugin removal.' }
@@ -324,7 +346,12 @@ try {
         $ownedPath = Join-Path $stateRoot $ownedDirectory
         if (Test-Path -LiteralPath $ownedPath) { Remove-Item -LiteralPath $ownedPath -Recurse -Force }
     }
-    foreach ($ownedFile in @('deployment-report.json', 'workspace-install-receipt.json', 'dependency-transaction.json')) {
+    foreach ($ownedFile in @(
+        'deployment-report.json',
+        'deployment-attempt-report.json',
+        'workspace-install-receipt.json',
+        'dependency-transaction.json'
+    )) {
         $ownedPath = Join-Path $stateRoot $ownedFile
         if (Test-Path -LiteralPath $ownedPath -PathType Leaf) { Remove-Item -LiteralPath $ownedPath -Force }
     }
