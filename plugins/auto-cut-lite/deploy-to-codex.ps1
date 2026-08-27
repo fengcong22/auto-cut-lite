@@ -717,7 +717,8 @@ try {
     }
     $runtimePython = [string]$dependencyTransaction.environments.main.runtime_path
     $report.components.python.runtime_path = $runtimePython
-    $report.components.python.dependencies = [string]$dependencyTransaction.environments.main.action
+    $report.components.python.dependencies = 'installed'
+    $report.components.python.dependency_action = [string]$dependencyTransaction.environments.main.action
     $report.components.python.requirements_sha256 = [string]$dependencyTransaction.environments.main.lock_sha256
     $report.components.python.pip_check = [string]$dependencyTransaction.environments.main.pip_check
 

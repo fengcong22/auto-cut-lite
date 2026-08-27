@@ -347,6 +347,8 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
     assert "$audioRequested = -not $SkipAudio" in deployer
     assert "manage_runtime_dependencies.py" in deployer
     assert "--previous-plugin-root" in deployer
+    assert "$report.components.python.dependencies = 'installed'" in deployer
+    assert "$report.components.python.dependency_action =" in deployer
     assert "requirements_sha256" in deployer
     assert "dependency rollback returned a failure code" in deployer
     assert "'-m' 'pip' 'install'" not in deployer
