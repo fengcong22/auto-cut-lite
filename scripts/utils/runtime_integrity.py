@@ -10,6 +10,7 @@ from typing import Any
 
 PLUGIN_NAME = "auto-cut-lite"
 PACKAGE_MANIFEST_NAME = "PACKAGE-MANIFEST.json"
+DEPLOYMENT_ATTEMPT_REPORT_NAME = "deployment-attempt-report.json"
 _REQUIRED_RUNTIME_FILES = {
     "runtime/requirements.txt",
     "runtime/scripts/jy_wrapper.py",
@@ -315,6 +316,23 @@ def resolve_deployment_report_path(
     return _require_regular_file(candidate, "deployment report")
 
 
+def _validate_deployment_attempt_state(report_path: Path) -> None:
+    attempt_path = report_path.parent / DEPLOYMENT_ATTEMPT_REPORT_NAME
+    if not os.path.lexists(attempt_path):
+        return
+    attempt = _read_json_object(attempt_path, "deployment attempt report")
+    safely_rolled_back = (
+        attempt.get("schema_version") == 2
+        and attempt.get("plugin_name") == PLUGIN_NAME
+        and attempt.get("deployment_status") == "failed"
+        and attempt.get("previous_deployment_report_preserved") is True
+    )
+    if not safely_rolled_back:
+        raise _fail(
+            "deployment attempt report does not prove a complete rollback to the installed report"
+        )
+
+
 def validate_deployed_lite_runtime(
     *,
     deployment_report_path: os.PathLike[str] | str | None = None,
@@ -329,6 +347,7 @@ def validate_deployed_lite_runtime(
         raise _fail("deployment report status is not installed")
     if report.get("plugin_name") != PLUGIN_NAME:
         raise _fail("deployment report plugin identity is invalid")
+    _validate_deployment_attempt_state(report_path)
     version = report.get("plugin_version")
     if not isinstance(version, str) or not version.strip():
         raise _fail("deployment report plugin version is missing")

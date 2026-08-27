@@ -77,6 +77,7 @@ $oldTargetBackedUp = $false
 $reportPathValidated = $false
 $previousInstalledReport = $null
 $workspaceRollbackNeeded = $false
+$installedReportDurable = $false
 $sourceIsTarget = [string]::Equals(
     $packageRoot.TrimEnd('\'),
     ([System.IO.Path]::GetFullPath($targetRoot)).TrimEnd('\'),
@@ -162,6 +163,62 @@ function Write-DeploymentReport {
         if (Test-Path -LiteralPath $temporary) {
             Remove-Item -LiteralPath $temporary -Force
         }
+    }
+}
+
+function Write-CommittedDeploymentReport {
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Payload)
+    $firstFailure = $null
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            Write-DeploymentReport -Payload $Payload
+            return
+        }
+        catch {
+            if ($attempt -eq 1) {
+                $firstFailure = $_.Exception.Message
+                continue
+            }
+            throw (
+                'The dependency transaction committed, but the installed deployment report ' +
+                "could not be written after one retry. First failure: $firstFailure | " +
+                "Retry failure: $($_.Exception.Message)"
+            )
+        }
+    }
+}
+
+function Test-DependencyTransactionCommitReceipt {
+    param([Parameter(Mandatory)][string]$ReceiptPath)
+    try {
+        $resolvedReceipt = [System.IO.Path]::GetFullPath($ReceiptPath)
+        $expectedReceipt = [System.IO.Path]::GetFullPath(
+            (Join-Path $stateRoot 'dependency-transaction.json')
+        )
+        if (-not [string]::Equals(
+            $resolvedReceipt,
+            $expectedReceipt,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            return $false
+        }
+        Assert-NoReparseInExistingPath -Path $resolvedReceipt -StopAt $localAppData
+        if (-not (Test-Path -LiteralPath $resolvedReceipt -PathType Leaf)) {
+            return $false
+        }
+        $receiptItem = Get-Item -LiteralPath $resolvedReceipt -Force
+        if (($receiptItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            $receiptItem.Length -gt 4194304) {
+            return $false
+        }
+        $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+        $receipt = $strictUtf8.GetString(
+            [System.IO.File]::ReadAllBytes($resolvedReceipt)
+        ) | ConvertFrom-Json
+        return [string]$receipt.status -eq 'committed'
+    }
+    catch {
+        return $false
     }
 }
 
@@ -1263,21 +1320,31 @@ try {
     $pending.Add("Open the Auto-Cut Lite workspace in Codex and start a new thread: $resolvedWorkspaceRoot")
 
     $report.pending_user_actions = $pending.ToArray()
+    $installedReadiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
+    $report.deployment_status = 'dependency_commit_pending'
+    $report.readiness = 'not_evaluated'
+    Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath
     $dependencyCommitOutput = & $pythonEvidence.path $dependencyHelper 'commit' `
         '--receipt-path' ([string]$dependencyTransaction.transaction_receipt_path) `
         '--state-root' $stateRoot `
         '--json'
-    if ($LASTEXITCODE -ne 0) {
+    $dependencyCommitExitCode = $LASTEXITCODE
+    $dependencyTransactionCommitted = Test-DependencyTransactionCommitReceipt `
+        -ReceiptPath ([string]$dependencyTransaction.transaction_receipt_path)
+    if ($dependencyCommitExitCode -ne 0) {
         throw "Runtime dependency transaction commit failed: $dependencyCommitOutput"
     }
     $dependencyCommit = $dependencyCommitOutput | ConvertFrom-Json
     if ($dependencyCommit.status -ne 'committed') {
         throw 'Runtime dependency transaction commit returned an invalid status.'
     }
-    $dependencyTransactionCommitted = $true
+    if (-not $dependencyTransactionCommitted) {
+        throw 'Runtime dependency transaction receipt did not confirm a committed state.'
+    }
     $report.deployment_status = 'installed'
-    $report.readiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
-    Write-DeploymentReport -Payload $report
+    $report.readiness = $installedReadiness
+    Write-CommittedDeploymentReport -Payload $report
+    $installedReportDurable = $true
 
     try {
         $backupCleanup = Remove-OwnedPluginBackups
@@ -1324,7 +1391,7 @@ try {
             Remove-Item -LiteralPath $attemptReportPath -Force
         }
         catch {
-            Write-Warning "The committed deployment succeeded, but a stale attempt report could not be removed: $($_.Exception.Message)"
+            throw "The committed deployment succeeded, but its pending attempt report could not be removed: $($_.Exception.Message)"
         }
     }
 
@@ -1346,6 +1413,24 @@ try {
 catch {
     $originalError = $_.Exception.Message
     $rollbackErrors = [System.Collections.Generic.List[string]]::new()
+
+    if ($dependencyTransactionCommitted) {
+        $report.deployment_status = $(if ($installedReportDurable) { 'installed' } else { 'installed_report_pending' })
+        $report.readiness = $(if ($installedReportDurable) { $report.readiness } else { 'not_evaluated' })
+        $report.error = $originalError
+        $report.previous_deployment_report_preserved = $false
+        if (-not $installedReportDurable) {
+            $report.plugin_backup_cleanup = 'deferred'
+            $report.plugin_backup_cleanup_error = 'Deployment committed before the installed report became durable.'
+        }
+        try {
+            Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath
+        }
+        catch {
+            Write-Warning "The committed deployment report remains pending and its attempt report could not be refreshed: $($_.Exception.Message)"
+        }
+        throw "Auto-Cut Lite deployment committed, but report finalization failed: $originalError"
+    }
 
     if ($null -ne $dependencyTransaction -and -not $dependencyTransactionCommitted -and $null -ne $pythonEvidence) {
         try {

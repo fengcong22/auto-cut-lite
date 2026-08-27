@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -360,12 +361,28 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
 def test_deployer_commits_dependencies_before_reporting_installed_and_fails_closed() -> None:
     deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
 
+    journal_status_index = deployer.index("$report.deployment_status = 'dependency_commit_pending'")
+    journal_index = deployer.index(
+        "Write-DeploymentReport -Payload $report -DestinationPath $attemptReportPath",
+        journal_status_index,
+    )
     commit_index = deployer.index("$dependencyCommitOutput =")
-    committed_index = deployer.index("$dependencyTransactionCommitted = $true", commit_index)
+    committed_index = deployer.index(
+        "$dependencyTransactionCommitted = Test-DependencyTransactionCommitReceipt",
+        commit_index,
+    )
     installed_index = deployer.index("$report.deployment_status = 'installed'", commit_index)
-    report_index = deployer.index("Write-DeploymentReport -Payload $report", installed_index)
+    report_index = deployer.index("Write-CommittedDeploymentReport -Payload $report", installed_index)
+    durable_index = deployer.index("$installedReportDurable = $true", report_index)
     cleanup_index = deployer.index("$backupCleanup = Remove-OwnedPluginBackups", report_index)
     catch_index = deployer.index("\ncatch {", cleanup_index)
+    committed_failure_index = deployer.index(
+        "if ($dependencyTransactionCommitted)", catch_index
+    )
+    pending_report_index = deployer.index("'installed_report_pending'", committed_failure_index)
+    committed_throw_index = deployer.index(
+        "deployment committed, but report finalization failed", committed_failure_index
+    )
     failed_index = deployer.index("$report.deployment_status = 'failed'", catch_index)
     not_evaluated_index = deployer.index("$report.readiness = 'not_evaluated'", catch_index)
     attempt_report_index = deployer.index(
@@ -373,9 +390,23 @@ def test_deployer_commits_dependencies_before_reporting_installed_and_fails_clos
         failed_index,
     )
 
-    assert commit_index < committed_index < installed_index < report_index < cleanup_index
-    assert cleanup_index < catch_index < failed_index < attempt_report_index
+    assert journal_status_index < journal_index < commit_index
+    assert commit_index < committed_index < installed_index < report_index < durable_index
+    assert durable_index < cleanup_index < catch_index < committed_failure_index
+    assert committed_failure_index < pending_report_index < committed_throw_index < failed_index
+    assert catch_index < failed_index < attempt_report_index
     assert catch_index < not_evaluated_index < attempt_report_index
+    retry_start = deployer.index("function Write-CommittedDeploymentReport")
+    retry_end = deployer.index("\nfunction Test-EquivalentDeploymentPath", retry_start)
+    retry = deployer[retry_start:retry_end]
+    assert "$attempt -le 2" in retry
+    assert "Write-DeploymentReport -Payload $Payload" in retry
+    assert "could not be written after one retry" in retry
+    assert "function Test-DependencyTransactionCommitReceipt" in deployer
+    assert "Join-Path $stateRoot 'dependency-transaction.json'" in deployer
+    assert "[string]$receipt.status -eq 'committed'" in deployer
+    assert "pending attempt report could not be removed" in deployer
+    assert "stale attempt report could not be removed" not in deployer
 
 
 def test_deployer_preserves_the_previous_committed_report_after_complete_rollback() -> None:
@@ -471,9 +502,11 @@ def test_deployer_removes_all_verified_owned_backups_after_success_report() -> N
     assert "$removed.Add([string]$candidate.FullName)" in aggregate
     assert "$deferred.Add(" in aggregate
 
-    commit_index = deployer.index("$dependencyTransactionCommitted = $true")
+    commit_index = deployer.index(
+        "$dependencyTransactionCommitted = Test-DependencyTransactionCommitReceipt"
+    )
     installed_report_index = deployer.index(
-        "Write-DeploymentReport -Payload $report", commit_index
+        "Write-CommittedDeploymentReport -Payload $report", commit_index
     )
     cleanup_index = deployer.index("$backupCleanup = Remove-OwnedPluginBackups", installed_report_index)
     deferred_index = deployer.index("$report.plugin_backup_cleanup = 'deferred'", cleanup_index)
@@ -786,6 +819,435 @@ def test_incomplete_installed_looking_report_does_not_mask_failure(
     assert failed_report["deployment_status"] == "failed"
     assert failed_report["previous_deployment_report_preserved"] is False
     assert attempt_report["previous_deployment_report_preserved"] is False
+
+
+def test_in_place_redeploy_retries_first_installed_report_failure_after_commit(
+    tmp_path: Path,
+) -> None:
+    local_app_data = tmp_path / "LocalAppData"
+    user_profile = tmp_path / "UserProfile"
+    state_root = local_app_data / "Auto-Cut" / "auto-cut-lite"
+    target_root = state_root / "marketplace" / "plugins" / "auto-cut-lite"
+    workspace_root = tmp_path / "StableWorkspace" / "Auto-cut-lite"
+    target_root.mkdir(parents=True)
+    workspace_root.mkdir(parents=True)
+    user_profile.mkdir(parents=True)
+
+    failure_marker = tmp_path / "first-installed-report-write.failed"
+    failure_literal = str(failure_marker).replace("'", "''")
+    report_anchor = "    $Payload.finished_at_utc = [DateTime]::UtcNow.ToString('o')\n"
+    injected_failure = (
+        "    if ([string]$Payload.deployment_status -eq 'installed' -and\n"
+        "        [string]::Equals($resolvedDestination, "
+        "[System.IO.Path]::GetFullPath($reportPath), "
+        "[StringComparison]::OrdinalIgnoreCase) -and\n"
+        f"        -not (Test-Path -LiteralPath '{failure_literal}')) {{\n"
+        f"        [System.IO.File]::WriteAllText('{failure_literal}', 'failed')\n"
+        "        throw 'simulated first installed report write failure'\n"
+        "    }\n"
+    )
+    deployer_text = DEPLOYER_PATH.read_text(encoding="utf-8")
+    assert deployer_text.count(report_anchor) == 1
+    deployer_text = deployer_text.replace(
+        report_anchor, injected_failure + report_anchor, 1
+    )
+
+    dependency_helper = textwrap.dedent(
+        """
+        import json
+        import sys
+        from pathlib import Path
+
+        def option(name):
+            return Path(sys.argv[sys.argv.index(name) + 1])
+
+        command = sys.argv[1]
+        state_root = option("--state-root")
+        receipt_path = option("--receipt-path") if "--receipt-path" in sys.argv else state_root / "dependency-transaction.json"
+        log_path = state_root / "dependency-helper.log"
+
+        def log(value):
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write(value + "\\n")
+
+        if command == "install":
+            plugin_root = option("--plugin-root")
+            sentinel = plugin_root / ".runtime-venv" / "state.txt"
+            backup = state_root / "dependency-state.backup.txt"
+            backup.write_text(sentinel.read_text(encoding="utf-8"), encoding="utf-8")
+            sentinel.write_text("new-dependencies", encoding="utf-8")
+            receipt = {
+                "status": "active",
+                "plugin_root": str(plugin_root),
+                "sentinel": str(sentinel),
+                "backup": str(backup),
+            }
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            runtime_python = plugin_root / ".runtime-venv" / "Scripts" / "python.exe"
+            print(json.dumps({
+                "status": "prepared",
+                "transaction_receipt_path": str(receipt_path),
+                "environments": {
+                    "main": {
+                        "action": "incremental_upgrade",
+                        "runtime_path": str(runtime_python),
+                        "lock_sha256": "new-lock-sha256",
+                        "pip_check": "pass",
+                    },
+                    "audio": {
+                        "action": "skipped",
+                        "reason": "skipped_by_request",
+                        "runtime_path": None,
+                        "lock_sha256": None,
+                        "pip_check": "not_run",
+                    },
+                },
+            }))
+        elif command == "commit":
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            if receipt["status"] != "active":
+                raise SystemExit(2)
+            receipt["status"] = "committed"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            Path(receipt["backup"]).unlink(missing_ok=True)
+            log("commit")
+            print(json.dumps({"status": "committed", "action": "kept_verified_environments"}))
+        elif command == "rollback":
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            backup = Path(receipt["backup"])
+            if backup.exists():
+                Path(receipt["sentinel"]).write_text(
+                    backup.read_text(encoding="utf-8"), encoding="utf-8"
+                )
+                backup.unlink()
+            receipt["status"] = "rolled_back"
+            receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+            log("rollback")
+            print(json.dumps({"status": "rolled_back"}))
+        else:
+            raise SystemExit(3)
+        """
+    ).lstrip()
+    workspace_helper = textwrap.dedent(
+        """
+        import hashlib
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        def option(name):
+            return Path(sys.argv[sys.argv.index(name) + 1])
+
+        command = sys.argv[1]
+        receipt_path = option("--receipt-path")
+        state_root = Path(os.environ["TEST_STATE_ROOT"])
+        receipt_backup = state_root / "workspace-receipt.backup.json"
+        sentinel_backup = state_root / "workspace-state.backup.txt"
+        log_path = state_root / "workspace-helper.log"
+
+        if command == "install":
+            plugin_root = option("--plugin-root")
+            workspace_root = option("--workspace-root")
+            sentinel = workspace_root / "workspace-state.txt"
+            receipt_backup.write_bytes(receipt_path.read_bytes())
+            sentinel_backup.write_text(sentinel.read_text(encoding="utf-8"), encoding="utf-8")
+            sentinel.write_text("new-workspace", encoding="utf-8")
+            package_manifest = plugin_root / "PACKAGE-MANIFEST.json"
+            payload = {
+                "status": "installed",
+                "plugin_name": "auto-cut-lite",
+                "plugin_version": "1.6.0-test",
+                "workspace_root": str(workspace_root),
+                "deployment_report_path": str(state_root / "deployment-report.json"),
+                "plugin_root": str(plugin_root),
+                "runtime_root": str(plugin_root / "runtime"),
+                "installed_package_sha256": {
+                    "PACKAGE-MANIFEST.json": hashlib.sha256(package_manifest.read_bytes()).hexdigest()
+                },
+                "generation": "new",
+            }
+            receipt_path.write_text(json.dumps(payload), encoding="utf-8")
+            print(json.dumps({
+                "status": "installed",
+                "workspace_scope": "repo",
+                "workspace_label": "Auto-cut-lite",
+                "workspace_mode": "combined_package_workspace",
+                "workspace_package_root": str(workspace_root),
+                "workspace_package_file_count": 42,
+                "workspace_skill_count": 17,
+                "plugin_manifest_exposes_skills": False,
+                "plugin_top_level_skills_present": False,
+                "workspace_skill_payload": "workspace-payload/skills",
+                "package_sync_action": "updated",
+                "backup_root": str(state_root / "workspace-test-backup"),
+                "workspace_action": "updated",
+            }))
+        elif command == "rollback":
+            workspace_root = Path(json.loads(receipt_path.read_text(encoding="utf-8"))["workspace_root"])
+            (workspace_root / "workspace-state.txt").write_text(
+                sentinel_backup.read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            receipt_path.write_bytes(receipt_backup.read_bytes())
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write("rollback\\n")
+            print(json.dumps({"status": "rolled_back"}))
+        else:
+            raise SystemExit(3)
+        """
+    ).lstrip()
+    marketplace_helper = textwrap.dedent(
+        """
+        import hashlib
+        import json
+        import os
+        import sys
+        from pathlib import Path
+
+        def option(name):
+            return Path(sys.argv[sys.argv.index(name) + 1])
+
+        command = sys.argv[1]
+        state_root = Path(os.environ["TEST_STATE_ROOT"])
+        log_path = state_root / "marketplace-helper.log"
+
+        if command == "register-named":
+            marketplace_root = option("--marketplace-root")
+            marketplace_path = marketplace_root / ".agents" / "plugins" / "marketplace.json"
+            backup_path = marketplace_root / "marketplace.test.backup.json"
+            backup_path.write_bytes(marketplace_path.read_bytes())
+            payload = json.loads(marketplace_path.read_text(encoding="utf-8"))
+            payload["generation"] = "new"
+            marketplace_path.write_text(json.dumps(payload), encoding="utf-8")
+            digest = hashlib.sha256(marketplace_path.read_bytes()).hexdigest()
+            print(json.dumps({
+                "changed": True,
+                "marketplace_name": "auto-cut-lite-marketplace",
+                "marketplace_display_name": "Auto-Cut Lite",
+                "marketplace_backup_path": str(backup_path),
+                "marketplace_sha256": digest,
+                "marketplace_created": False,
+                "entry_action": "replaced",
+            }))
+        elif command == "remove-personal":
+            print(json.dumps({
+                "changed": False,
+                "entry_action": "not_found",
+                "marketplace_backup_path": None,
+                "marketplace_sha256": None,
+            }))
+        elif command == "rollback":
+            marketplace_path = option("--marketplace-path")
+            marketplace_path.write_bytes(option("--backup-path").read_bytes())
+            with log_path.open("a", encoding="utf-8") as stream:
+                stream.write("rollback\\n")
+            print(json.dumps({"status": "rolled_back"}))
+        else:
+            raise SystemExit(3)
+        """
+    ).lstrip()
+
+    portable_contract = {
+        "workspace_installation": {
+            "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
+            "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
+            "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
+            "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
+        }
+    }
+    files: dict[str, bytes] = {
+        ".codex-plugin/plugin.json": json.dumps(
+            {"name": "auto-cut-lite", "version": "1.6.0-test"}
+        ).encode(),
+        "AGENTS.md": b"# Test package rules\n",
+        "PORTABLE-CAPABILITIES.json": json.dumps(portable_contract).encode(),
+        "Auto-Cut-Lite新手部署说明.md": b"# Beginner\n",
+        "Auto-Cut-Lite部署成功后操作说明.md": b"# Next steps\n",
+        "一键安装或升级-Auto-Cut-Lite.cmd": b"@exit /b 0\n",
+        "一键卸载-Auto-Cut-Lite.cmd": b"@exit /b 0\n",
+        "deploy-to-codex.ps1": deployer_text.encode("utf-8"),
+        "installer/manage_named_marketplace.py": marketplace_helper.encode(),
+        "installer/one_click_deploy.ps1": b"# fixture\n",
+        "installer/manage_runtime_dependencies.py": dependency_helper.encode(),
+        "installer/manage_workspace.py": workspace_helper.encode(),
+        "installer/uninstall_auto_cut_lite.ps1": b"# fixture\n",
+        "runtime/requirements.txt": b"fixture==1.0\n",
+        "runtime/requirements-audio.lock": b"audio-fixture==1.0\n",
+        "runtime/scripts/utils/runtime_integrity.py": b"# integrity anchor\n",
+        "runtime/scripts/jy_wrapper.py": b"# runtime entry anchor\n",
+    }
+    for skill_name in sorted(build_lite_plugin.EXPECTED_SKILLS):
+        files[f"workspace-payload/skills/{skill_name}/SKILL.md"] = (
+            f"---\nname: {skill_name}\ndescription: fixture\n---\n"
+        ).encode()
+        files[f"workspace-payload/skills/{skill_name}/agents/openai.yaml"] = (
+            b"interface: {}\n"
+        )
+    for relative, data in files.items():
+        path = target_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    manifest_rows = [
+        {
+            "path": relative,
+            "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        for relative, data in sorted(files.items())
+    ]
+    package_manifest_path = target_root / "PACKAGE-MANIFEST.json"
+    package_manifest_path.write_text(
+        json.dumps(
+            {"name": "auto-cut-lite", "version": "1.6.0-test", "files": manifest_rows}
+        ),
+        encoding="utf-8",
+    )
+
+    runtime_python = target_root / ".runtime-venv" / "Scripts" / "python.exe"
+    runtime_python.parent.mkdir(parents=True)
+    shutil.copy2(getattr(sys, "_base_executable", sys.executable), runtime_python)
+    dependency_sentinel = target_root / ".runtime-venv" / "state.txt"
+    dependency_sentinel.write_text("old-dependencies", encoding="utf-8")
+    workspace_sentinel = workspace_root / "workspace-state.txt"
+    workspace_sentinel.write_text("old-workspace", encoding="utf-8")
+
+    report_path = state_root / "deployment-report.json"
+    workspace_receipt_path = state_root / "workspace-install-receipt.json"
+    workspace_receipt = {
+        "status": "installed",
+        "plugin_name": "auto-cut-lite",
+        "plugin_version": "1.6.0-test",
+        "workspace_root": str(workspace_root),
+        "deployment_report_path": str(report_path),
+        "plugin_root": str(target_root),
+        "runtime_root": str(target_root / "runtime"),
+        "installed_package_sha256": {
+            "PACKAGE-MANIFEST.json": hashlib.sha256(
+                package_manifest_path.read_bytes()
+            ).hexdigest()
+        },
+        "generation": "old",
+    }
+    workspace_receipt_path.write_text(json.dumps(workspace_receipt), encoding="utf-8")
+    previous_report = {
+        "schema_version": 2,
+        "plugin_name": "auto-cut-lite",
+        "plugin_version": "1.6.0-test",
+        "deployment_status": "installed",
+        "target_root": str(target_root),
+        "plugin_manifest_path": str(target_root / ".codex-plugin" / "plugin.json"),
+        "runtime_root": str(target_root / "runtime"),
+        "workspace_receipt_path": str(workspace_receipt_path),
+        "components": {
+            "python": {
+                "status": "detected",
+                "dependencies": "installed",
+                "runtime_path": str(runtime_python),
+                "requirements_sha256": "old-lock-sha256",
+            }
+        },
+        "generation": "old",
+    }
+    previous_report_bytes = (
+        json.dumps(previous_report, ensure_ascii=False, indent=3) + "\r\n"
+    ).encode("utf-8")
+    report_path.write_bytes(previous_report_bytes)
+
+    marketplace_path = state_root / "marketplace" / ".agents" / "plugins" / "marketplace.json"
+    marketplace_path.parent.mkdir(parents=True, exist_ok=True)
+    marketplace_path.write_text(
+        json.dumps(
+            {
+                "name": "auto-cut-lite-marketplace",
+                "interface": {"displayName": "Auto-Cut Lite"},
+                "plugins": [{"name": "auto-cut-lite"}],
+                "generation": "old",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    command_bin = tmp_path / "command-bin"
+    command_bin.mkdir()
+    codex_log = tmp_path / "codex.log"
+    (command_bin / "codex.cmd").write_text(
+        textwrap.dedent(
+            """
+            @echo off
+            echo %*>>"%TEST_CODEX_LOG%"
+            if "%~1"=="--version" exit /b 0
+            if "%~1"=="plugin" if "%~2"=="marketplace" if "%~3"=="list" (
+              echo auto-cut-lite-marketplace %TEST_MARKETPLACE_ROOT%
+              exit /b 0
+            )
+            if "%~1"=="plugin" if "%~2"=="list" (
+              echo auto-cut-lite@auto-cut-lite-marketplace installed, enabled
+              exit /b 0
+            )
+            exit /b 0
+            """
+        ).lstrip(),
+        encoding="ascii",
+    )
+    (command_bin / "lark-cli.cmd").write_text("@exit /b 1\n", encoding="ascii")
+    process_environment = os.environ.copy()
+    process_environment["PATH"] = str(command_bin) + os.pathsep + process_environment["PATH"]
+    process_environment["LOCALAPPDATA"] = str(local_app_data)
+    process_environment["USERPROFILE"] = str(user_profile)
+    process_environment["TEST_STATE_ROOT"] = str(state_root)
+    process_environment["TEST_MARKETPLACE_ROOT"] = str(state_root / "marketplace")
+    process_environment["TEST_CODEX_LOG"] = str(codex_log)
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(target_root / "deploy-to-codex.ps1"),
+            "-LocalAppDataRoot",
+            str(local_app_data),
+            "-UserProfileRoot",
+            str(user_profile),
+            "-WorkspaceRoot",
+            str(workspace_root),
+            "-SkipAudio",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=process_environment,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert failure_marker.is_file()
+    assert report_path.read_bytes() != previous_report_bytes
+    installed_report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert installed_report["deployment_status"] == "installed"
+    assert installed_report["previous_deployment_report_preserved"] is False
+    assert installed_report["components"]["python"]["requirements_sha256"] == "new-lock-sha256"
+    assert not (state_root / "deployment-attempt-report.json").exists()
+
+    dependency_receipt = json.loads(
+        (state_root / "dependency-transaction.json").read_text(encoding="utf-8")
+    )
+    assert dependency_receipt["status"] == "committed"
+    assert dependency_sentinel.read_text(encoding="utf-8") == "new-dependencies"
+    assert (state_root / "dependency-helper.log").read_text(encoding="utf-8") == "commit\n"
+    assert not (state_root / "dependency-state.backup.txt").exists()
+
+    assert workspace_sentinel.read_text(encoding="utf-8") == "new-workspace"
+    updated_workspace_receipt = json.loads(workspace_receipt_path.read_text(encoding="utf-8"))
+    assert updated_workspace_receipt["generation"] == "new"
+    assert not (state_root / "workspace-helper.log").exists()
+    assert json.loads(marketplace_path.read_text(encoding="utf-8"))["generation"] == "new"
+    assert not (state_root / "marketplace-helper.log").exists()
+    codex_commands = codex_log.read_text(encoding="utf-8")
+    assert "plugin remove" not in codex_commands
+    assert "plugin marketplace remove" not in codex_commands
 
 
 def test_uninstaller_is_receipt_scoped_and_preserves_unrelated_registrations() -> None:

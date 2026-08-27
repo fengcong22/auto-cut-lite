@@ -141,6 +141,45 @@ def test_matching_deployed_runtime_passes(tmp_path: Path) -> None:
     assert result["runtime_root"] == str(paths["runtime"])
 
 
+@pytest.mark.parametrize(
+    "deployment_status",
+    ["dependency_commit_pending", "installed_report_pending", "failed"],
+)
+def test_unresolved_deployment_attempt_stops_execution(
+    tmp_path: Path, deployment_status: str
+) -> None:
+    paths = _fake_deployment(tmp_path)
+    attempt_path = paths["report"].with_name("deployment-attempt-report.json")
+    _write_json(
+        attempt_path,
+        {
+            "schema_version": 2,
+            "plugin_name": "auto-cut-lite",
+            "deployment_status": deployment_status,
+            "previous_deployment_report_preserved": False,
+        },
+    )
+
+    with pytest.raises(RuntimeIntegrityError, match="deployment attempt report"):
+        _validate(paths)
+
+
+def test_failed_attempt_with_verified_previous_report_remains_executable(tmp_path: Path) -> None:
+    paths = _fake_deployment(tmp_path)
+    attempt_path = paths["report"].with_name("deployment-attempt-report.json")
+    _write_json(
+        attempt_path,
+        {
+            "schema_version": 2,
+            "plugin_name": "auto-cut-lite",
+            "deployment_status": "failed",
+            "previous_deployment_report_preserved": True,
+        },
+    )
+
+    assert _validate(paths)["status"] == "pass"
+
+
 @pytest.mark.parametrize("failure_mode", ["modified", "missing"])
 def test_runtime_file_drift_fails_closed(tmp_path: Path, failure_mode: str) -> None:
     paths = _fake_deployment(tmp_path)
