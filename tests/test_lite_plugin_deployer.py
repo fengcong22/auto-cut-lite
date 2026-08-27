@@ -354,6 +354,25 @@ def test_deployer_uses_named_marketplace_and_separate_audio_runtime_by_default()
     assert "$env:USERPROFILE" in deployer
 
 
+def test_deployer_commits_dependencies_before_reporting_installed_and_fails_closed() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    commit_index = deployer.index("$dependencyCommitOutput =")
+    committed_index = deployer.index("$dependencyTransactionCommitted = $true", commit_index)
+    installed_index = deployer.index("$report.deployment_status = 'installed'", commit_index)
+    report_index = deployer.index("Write-DeploymentReport -Payload $report", installed_index)
+    catch_index = deployer.index("\ncatch {", report_index)
+    failed_index = deployer.index("$report.deployment_status = 'failed'", catch_index)
+    not_evaluated_index = deployer.index("$report.readiness = 'not_evaluated'", catch_index)
+    failure_report_index = deployer.index(
+        "Write-DeploymentReport -Payload $report", failed_index
+    )
+
+    assert commit_index < committed_index < installed_index < report_index < catch_index
+    assert catch_index < failed_index < failure_report_index
+    assert catch_index < not_evaluated_index < failure_report_index
+
+
 def test_uninstaller_is_receipt_scoped_and_preserves_unrelated_registrations() -> None:
     uninstaller = UNINSTALL_PATH.read_text(encoding="utf-8")
 

@@ -870,9 +870,6 @@ try {
     $pending.Add("Open the Auto-Cut Lite workspace in Codex and start a new thread: $resolvedWorkspaceRoot")
 
     $report.pending_user_actions = $pending.ToArray()
-    $report.deployment_status = 'installed'
-    $report.readiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
-    Write-DeploymentReport -Payload $report
     $dependencyCommitOutput = & $pythonEvidence.path $dependencyHelper 'commit' `
         '--receipt-path' ([string]$dependencyTransaction.transaction_receipt_path) `
         '--state-root' $stateRoot `
@@ -885,6 +882,9 @@ try {
         throw 'Runtime dependency transaction commit returned an invalid status.'
     }
     $dependencyTransactionCommitted = $true
+    $report.deployment_status = 'installed'
+    $report.readiness = $(if ($pending.Count -eq 0) { 'ready' } else { 'pending_user_configuration' })
+    Write-DeploymentReport -Payload $report
 
     Write-Host ''
     Write-Host "Auto-Cut Lite $($report.plugin_version) has been installed in Codex."
@@ -1011,6 +1011,8 @@ catch {
         catch { $rollbackErrors.Add("staging cleanup failed: $($_.Exception.Message)") }
     }
 
+    $report.deployment_status = 'failed'
+    $report.readiness = 'not_evaluated'
     $report.error = $originalError
     if ($rollbackErrors.Count -gt 0) {
         $report.error = $originalError + ' | ' + ($rollbackErrors -join ' | ')
