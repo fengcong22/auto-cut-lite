@@ -1,6 +1,6 @@
 ---
 name: auto-cut-high-school-history-lite
-description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, source-text-exact two-second review labels, simple local overlays, duration-preserving cuts, additive semantic pauses, and no destructive animation or automatic scaling.
+description: Use when the user explicitly asks for the High School History Auto-Cut lite or compact workflow. Produces a non-destructive editable JianYing draft with fixed trace tracks, source-text-exact two-second review labels, simple local overlays, duration-preserving cuts, ASR-located pause labels, and no destructive animation or automatic scaling.
 ---
 
 # High School History Auto-Cut Lite
@@ -41,9 +41,10 @@ reuse task intermediates produced by a mistaken full-version run.
   screenshots. Strict mode and explicit full-workflow visual flags do not turn
   these checks back on for `workflow_mode=lite`.
 - Every issue locatable through speech or audio uses the Lite workflow's authoritative
-  word/character ASR boundary and reverse-audio checks where applicable. This includes spoken
-  deletion, semantic pauses, pronunciation, breath, mouth noise, and speech timing. Review
-  labels and the editable cut structure remain required.
+  word/character ASR boundary and reverse-audio checks where applicable. Spoken deletion remains
+  executable. Every request to add, extend, shorten, or otherwise adjust a pause is label-only;
+  pronunciation, breath, mouth noise, and other unsupported audio issues follow the maintained
+  execution routing. Review labels and the editable cut structure remain required.
 - A visible JianYing label contains only the source item's exact `source_text`. Internal status,
   item IDs, warnings, and diagnostics never appear in visible label text.
 
@@ -69,11 +70,12 @@ reuse task intermediates produced by a mistaken full-version run.
   `must_keep` phrases and strategy, then run reverse validation. Start that review item's label
   at the final ASR-resolved cut start rather than the rough review timestamp. Lite draft generation fails
   closed when that boundary receipt is absent or does not match the saved cut.
-- Apply the same timing-source rule to every other audio-identifiable problem. For a semantic
-  pause, resolve the real adjacent utterance gap from source ASR and use that boundary for both
-  the pause and its label. For pronunciation, breath, mouth noise, or other speech/audio timing,
-  use the matching ASR word/character window or point. Never execute or label these items from
-  the review timestamp alone.
+- Apply the same timing-source rule to every other audio-identifiable problem. For any request to
+  add, extend, shorten, or otherwise adjust a pause, resolve the real adjacent utterance gap from
+  source ASR and use that boundary only for its verbatim label; never create a pause edit. For
+  pronunciation, breath, mouth noise, or other speech/audio timing, use the matching ASR
+  word/character window or point. Never execute or label these items from the review timestamp
+  alone.
 - Only completely non-speech review items use the timestamp written in the review comment. Parse
   the requested target when the text contains both a current time and a move target: for example,
   `07:14 ... 提前到 07:12` labels at `07:12`. A point timestamp does not require a fabricated
@@ -85,20 +87,19 @@ reuse task intermediates produced by a mistaken full-version run.
 - Recognize `lite_cut_layout=copy` only while reading or validating an older Lite draft that
   intentionally kept a full V1/A1 reference layout. Reject `copy` for every new execution.
 
-- When there are no semantic-pause additions, final project duration equals source duration.
-  A requested `+Ns` pause means add `N` seconds to the source's existing pause, not make the total
-  pause `N` seconds. Sum all added holds into final duration and apply their cumulative offset to
-  every later V1/V2/A1/A2 segment, visual asset, and review label. Keep the pause item's own label
-  at the insertion boundary before the editable still-frame hold.
+- Final project duration always equals source duration. Treat `+Ns`, `-Ns`, pause extension,
+  pause shortening, and every `semantic_pause_adjustment` as non-executing review items. Resolve
+  the authoritative point with word/character ASR, place exactly one `source_text` label there,
+  and do not create `pause_adjustments`, holds, still frames, gaps, or timeline offsets.
 
 - Import local video, audio, images, text, subtitles, flower text, and local BGM through the
   maintained repository APIs.
 - In the default split-gap layout, write the non-delete source intervals to `Original Video`
   and `Separated Source Audio`, and write every logical delete interval (after same-item overlap
-  merging only) to `Lite Cut Segments` and `Lite Reused Audio` at the same source time and its
-  pause-mapped timeline time. Preserve the full source range; deletion does not reduce duration,
-  while explicit added holds increase it.
-- Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. A
+  merging only) to `Lite Cut Segments` and `Lite Reused Audio` at the same source and target time.
+  Preserve the full source range; deletion and pause-review items do not change duration.
+- Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. Every
+  pause addition, extension, shortening, or adjustment is label-only. A
   supplied pointer insertion is execution-required, but an existing-hand occlusion, removal,
   clean-cover, cleanup, or residual-cover request is label-only. Animation or other
   picture-timing requests are label-only and do not create `Lite Timing Adjusted` segments.
@@ -127,24 +128,26 @@ reuse task intermediates produced by a mistaken full-version run.
   these colors, wrapping, text alignment, font range, and both stage bounds.
 - Put downloaded pointers and other local visual assets on `Lite Visual Assets`. Insert them
   with JianYing's default geometry; do not calibrate or optimize size, position, transform,
-  occlusion, or target landing. Clamp the mapped target duration to the final project duration.
+  occlusion, or target landing. Clamp the target duration to the source-length project duration.
 - Keep `Lite Timing Adjusted` empty. Animation, page-turn, reveal, release, and other
   picture-timing requests retain only their verbatim review labels.
 - Keep V1/V2/V3/V4 visible together in JianYing preview.
-- Keep A1 and A2 source-aligned by source range and identically pause-mapped on the target timeline
-  in split-gap layout. The delete lane's audio is placed on A2
+- Keep A1 and A2 source-aligned by source and target range in split-gap layout. The delete lane's
+  audio is placed on A2
   even when the old `reuse_audio` flag is false; that flag only controls the legacy `copy`
   layout's optional audio copies. A2 deleted-source clips keep normal volume (`1.0`) for manual
   review; do not silently mute them because their segmented-audio role is `reference`.
 - One A2 track may contain many clips, but it must contain exactly one independent, audible clip
   for each logical ASR delete window. Merge overlaps only within the same stable source item;
   adjacent windows from different items stay separate, and true cross-item overlap fails before
-  draft writing for disambiguation. Each A2 source range and pause-mapped target range must equal
-  its matching V2 window. Reject full-length/continuous/cross-item-merged A2 and pending or empty
+  draft writing for disambiguation. Each A2 source and target range must equal its matching V2
+  window. Reject full-length/continuous/cross-item-merged A2 and pending or empty
   segmented plans before opening or writing the draft.
 - Write exactly one review label per source item. The text must equal the current source
-  review text verbatim, the start must equal the edit start, and the duration is `2s` except
-  when clamped at the final pause-extended project end.
+  review text verbatim. Its start equals the edit start for an executable item and the
+  authoritative resolved start for a non-executing item; a pause item's start is its ASR-resolved
+  point even though no pause edit is created. Duration is `2s` except when clamped at the
+  source-length project end.
 - Place grouped review labels in the existing top safe-band review-marker layout. Keep each
   marker aligned to its edit start and preserve the exact source text; do not re-enable the
   full-workflow horizontal compression or move a label into the picture body.
@@ -155,8 +158,8 @@ reuse task intermediates produced by a mistaken full-version run.
 
 Before delivery, validate the saved root and active timeline variants:
 
-- project duration equals source duration plus the sum of explicit added-pause durations; with no
-  added pause it equals source duration;
+- project duration equals source duration, including when the review asks to add, extend,
+  shorten, or otherwise adjust a pause;
 - the fixed lite video and A1 tracks exist and remain editable;
 - In split-gap layout, A2 exists when at least one delete window intersects the source audio;
   `copy` is not executable for a new task;
@@ -165,8 +168,10 @@ Before delivery, validate the saved root and active timeline variants:
 - root and active-timeline A2 segment count and windows exactly equal the logical ASR delete
   windows; no A2 segment spans the full source, merges different items, or overlaps an unrelated
   A1 interval;
-- source ranges stay inside source duration; target ranges stay inside final duration and every
-  post-pause track and label uses the same cumulative offset;
+- source and target ranges stay inside source duration; no pause request creates an offset for a
+  later track, asset, or label;
+- no executable `pause_adjustments`, hold, still-frame pause segment, inserted audio gap, or
+  pause-derived duration extension exists;
 - review labels equal only `source_text`, are mapped-start-aligned, top-safe, and no longer than
   `2s`; internal execution status never appears in their text;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.
@@ -180,8 +185,8 @@ Before delivery, validate the saved root and active timeline variants:
   occlusion, clean-cover, or opened-state evidence is required in lite mode.
 
 Report split-gap delete requests as editable cut boundaries with the deleted source intervals
-isolated on V2/A2. Report whether final duration stayed equal to source duration or increased only
-by explicit added-pause time.
+isolated on V2/A2. Report that final duration stayed equal to source duration and list pause
+requests as ASR-located, source-text-only labels rather than executed edits.
 
 Before a non-mock installed-runtime execution, validate the deployment report, package-manifest
 anchor, and managed runtime inventory. Any missing, changed, extra, or hash-mismatched managed

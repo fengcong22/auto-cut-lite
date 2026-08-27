@@ -285,12 +285,27 @@ _VISUAL_KINDS = {
 
 _LITE_LABEL_ONLY_KINDS = {
     "animation_timing",
+    "gap_delete",
     "page_turn",
+    "pause_delete",
+    "pause_timing_review",
     "release_boundary",
+    "semantic_pause_adjustment",
     "state_release",
     "state_reveal",
     "timing",
 }
+_LITE_PAUSE_CHANGE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改).{0,8}(?:停顿|间隔)",
+        r"(?:停顿|间隔).{0,8}(?:增加|加长|延长|缩短|减少|减短|变长|变短|调整|修改|加\s*\+?\s*\d|减\s*\d)",
+        r"(?:停顿|间隔|pause|gap)\s*[+-]\s*\d",
+        r"(?:删除|删掉|去掉|移除).{0,6}(?:这段|这个|该段|该)?(?:停顿|间隔)",
+        r"(?:add|increase|extend|shorten|reduce|remove|delete|adjust).{0,16}(?:pause|gap)",
+        r"(?:pause|gap).{0,16}(?:add|increase|extend|shorten|reduce|remove|delete|adjust)",
+    )
+)
 _LITE_POINTER_KINDS = {
     "add_arrow",
     "add_hand",
@@ -347,6 +362,8 @@ def lite_execution_required(
     """Return the effective execution flag for the fixed Lite visual contract."""
 
     normalized_kind = str(kind or "").strip().casefold()
+    if lite_pause_change_is_label_only(normalized_kind, source_text):
+        return False
     if normalized_kind in _LITE_LABEL_ONLY_KINDS:
         return False
     if normalized_kind not in _LITE_POINTER_KINDS:
@@ -358,6 +375,51 @@ def lite_execution_required(
     if cleanup_only and not insert_requested:
         return False
     return bool(requested)
+
+
+def lite_pause_change_is_label_only(kind: str, source_text: str) -> bool:
+    """Return whether a Lite item requests a duration-changing pause edit."""
+
+    normalized_kind = str(kind or "").strip().casefold()
+    if normalized_kind in {
+        "gap_delete",
+        "pause_delete",
+        "pause_timing_review",
+        "semantic_pause_adjustment",
+    }:
+        return True
+    text = str(source_text or "")
+    return any(pattern.search(text) for pattern in _LITE_PAUSE_CHANGE_PATTERNS)
+
+
+def review_item_execution_status(item: RevisionReviewItem) -> str:
+    """Read the authoritative internal execution status from one review item."""
+
+    statuses = [getattr(item, "execution_status", "")]
+    for payload in (getattr(item, "evidence", None), getattr(item, "validation", None)):
+        if not isinstance(payload, dict):
+            continue
+        status = payload.get("execution_status")
+        statuses.append(status)
+        if str(payload.get("status") or "").strip().casefold() == "label_only_unresolved":
+            statuses.append("label_only_unresolved")
+    normalized = [str(status or "").strip() for status in statuses if str(status or "").strip()]
+    return next(
+        (status for status in normalized if status.casefold().startswith("label_only_")),
+        normalized[0] if normalized else "",
+    )
+
+
+def lite_review_item_execution_required(item: RevisionReviewItem) -> bool:
+    """Apply internal label-only state and the fixed Lite kind policy."""
+
+    if review_item_execution_status(item).casefold().startswith("label_only_"):
+        return False
+    return lite_execution_required(
+        item.kind,
+        item.source_text,
+        item.execution_required,
+    )
 
 
 def lite_timing_source(kind: str, source_text: str = "") -> str:
@@ -1051,21 +1113,14 @@ def load_revision_request(path: str) -> RevisionRequest:
         acceptance = replace(
             acceptance,
             require_visual_evidence=False,
+            require_pause_validation=False,
             require_subject_pointer_binding=False,
             require_pointer_lifecycle_evidence=False,
         )
         review_items = [
             replace(
                 item,
-                execution_required=(
-                    False
-                    if item.execution_status.casefold() == "label_only_unresolved"
-                    else lite_execution_required(
-                        item.kind,
-                        item.source_text,
-                        item.execution_required,
-                    )
-                ),
+                execution_required=lite_review_item_execution_required(item),
             )
             for item in review_items
         ]
@@ -1183,8 +1238,18 @@ def build_revision_summary(
             "require_final_acceptance": request.acceptance.require_final_acceptance,
         },
         "pause_adjustments": {
-            "count": len(request.pause_adjustments),
-            "total_duration": sum(item.duration for item in request.pause_adjustments),
+            "count": (0 if request.workflow_mode == "lite" else len(request.pause_adjustments)),
+            "total_duration": (
+                0.0
+                if request.workflow_mode == "lite"
+                else sum(item.duration for item in request.pause_adjustments)
+            ),
+            "label_only_count": (
+                len(request.pause_adjustments) if request.workflow_mode == "lite" else 0
+            ),
+            "requested_total_duration": sum(
+                item.duration for item in request.pause_adjustments
+            ),
             "item_ids": [item.item_id for item in request.pause_adjustments],
         },
         "pause_alignment": {

@@ -35,6 +35,7 @@ from utils.revision_models import (
     _visual_kind_for_edit,
     _visual_plan_segments,
     build_revision_summary,
+    lite_pause_change_is_label_only,
     load_review_items_json,
     load_revision_request,
     summarize_revision_request,
@@ -857,6 +858,19 @@ def _validate_revision_execution_preflight(
     request: RevisionRequest,
     doc_items: Optional[List[RevisionReviewItem]],
 ) -> None:
+    if request.workflow_mode == "lite":
+        request = replace(
+            request,
+            edits=[
+                edit
+                for edit in request.edits
+                if not lite_pause_change_is_label_only(
+                    edit.source_kind or edit.op_type,
+                    " ".join(str(value or "") for value in (edit.label, edit.detail)),
+                )
+            ],
+            pause_adjustments=[],
+        )
     profile = derive_acceptance_profile(request, doc_items=doc_items)
     source_spoken_edit = any(
         record.get("has_review_item")

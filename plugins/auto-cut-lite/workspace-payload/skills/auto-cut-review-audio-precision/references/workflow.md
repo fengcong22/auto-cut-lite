@@ -8,7 +8,11 @@ The local transcript must contain alphanumeric content, and transcript aliases m
 
 Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 
-The latest canonical doc item kind determines whether the spoken contract applies. Spoken-delete and semantic-pause evidence are validated independently, even under the same item ID. A forbidden semantic-join phrase is waived only by `pass_adjudicated` with a non-empty reason, `final_gap` between 0 and 0.2 seconds, and `no_extra_deletion_contract=pass`.
+The latest canonical doc item kind determines whether the spoken-delete contract applies. In the
+packaged Lite workspace, every pause addition, extension, shortening, or adjustment is validated
+independently as an ASR-located label-only item and never creates executable pause evidence. A
+forbidden semantic-join phrase is waived only by `pass_adjudicated` with a non-empty reason,
+`final_gap` between 0 and 0.2 seconds, and `no_extra_deletion_contract=pass`.
 
 ## 1. Read And Normalize The Review Document
 
@@ -56,7 +60,7 @@ python scripts/portable/volc_setup.py status --json
 
 Accept a Volcengine adapter run only when the normalized alignment records `input_sha256`, `service_job_id`, `service_result_sha256`, the request-bound `resource_id`, `adapter_version`, and a non-empty `words` list whose timing values are finite, whose intervals have positive duration, and whose rows are monotonic. If authorization is absent, the required state is `status=pending`, `code=requires_user_authorization`, and `service_probe=not_run`; report degraded mode, keep the item unresolved for final acceptance, use conservative listening evidence without weakening `must_keep`, and do not claim the service or adapter ran.
 
-The bundled adapter produces normalized alignment only. It does not replace the complete candidate's attributable full-candidate reverse-ASR report with rich per-item result rows, and it does not replace final acceptance. This repository still decides `delete`, `must_keep`, strategy, buffers, physical removal, visual-aware pause handling, and acceptance status.
+The bundled adapter produces normalized alignment only. It does not replace the complete candidate's attributable full-candidate reverse-ASR report with rich per-item result rows, and it does not replace final acceptance. This repository still decides `delete`, `must_keep`, strategy, buffers, physical removal, Lite pause-label routing, and acceptance status.
 
 ## 4. Decide Cut Windows
 
@@ -143,7 +147,8 @@ Use this gate when Feishu/Lark review-document audio edits are delivered as an e
 ### Preserve Review Semantics
 
 - `colored_span_delete`: inspect document markup and keep colored fragments separate. If only `你看。那个`, `它`, and `是不是` are blue, create three delete windows and preserve the uncolored words between them.
-- `gap_delete`: keep both anchors. For "delete the pause between 宰相 and 为核心", delete only the gap/filler and protect both `宰相` and `为核心`.
+- `gap_delete`: in Lite, keep both anchors as ASR context and create only the exact source-text
+  label at the resolved gap point. Do not delete the gap or filler.
 - `ellipsis_range_delete`: delete the full spoken range between prefix and suffix. Do not match only the suffix phrase.
 - `tail_particle_delete`: protect the next word onset. If the particle tail remains but extending the physical cut would swallow the next word, add a post-splice exact duck/mute window instead.
 
@@ -154,58 +159,27 @@ Use this gate when Feishu/Lark review-document audio edits are delivered as an e
 - For editable delivery, write explicit audible source, replacement-video, and local-repair segments, and preserve the approved separated source audio as a muted reference track.
 - Map any `exact_window_cleanup.py` duck/mute window to the processed output timeline and record its source reason, target phrase, gain, and fade.
 
-### Visual-Aware Pause Fit Gate
+### Lite Pause Label Gate
 
-Run this gate after delete accuracy passes and before claiming the draft's listening rhythm is final.
+Run this gate independently from delete accuracy for every request to add, extend, shorten, or
+otherwise adjust a pause, including input named `semantic_pause_adjustment`.
 
-Boundary evidence is mandatory: the rough timestamp is a search hint, never the
-insertion point. Bind a real source ASR path and source ASR SHA-256, preserve the
-requested source time and resolved source time, prefer an adjacent utterance gap,
-resolve to the gap's interior midpoint instead of either ASR-reported edge, and
-record positive recomputable guard time from the nearest real word end/start as
-well as the utterance bounds. Reject a point inside a
-spoken word, on an utterance edge, or inside a physical delete window. Extract
-the still only after resolution and record frame source time equal to resolved
-source time. Compile the segmented audio delivery plan after pause alignment, split
-source/reference segments at the resolved boundary, and require zero audible
-overlap with the hold.
-
-Utterance-only ASR is insufficient: each semantic pause requires real word or character timing, and its semantic pause edit and `pause_adjustments` entry must correspond one-to-one before draft generation.
-
-The request also binds the current source audio SHA-256, source video SHA-256,
-exact alignment-audio path/SHA-256, and complete ASR identity with provider,
-model/resource ID, adapter version, and preprocessing. `preprocessing=none`
-requires byte-identical source/alignment audio; any transform requires a receipt
-binding both hashes, tool/version, and parameters. Strict validation requires the
-evidence ASR path/hash/identity to equal that request configuration, decodes the
-current source video within one frame interval of frame source time, and requires
-the still pixels to match source video. After compiling the normalized segmented plan, run
-`revision-bind-audio-report` so the reverse-ASR report carries the matching audio
-delivery plan SHA-256. Reject duplicate semantic pauses under one normalized source
-item ID until receipts support one-to-many pause evidence.
-
-1. Build pause candidates only from joins that passed reverse-ASR delete validation. Do not use pause fitting to hide a deletion failure.
-2. For each candidate, record source cut window, output join time, previous word, next word, observed gap, and audio-only target class:
-   - `same_clause`: short verbal particle or same-clause repair, usually near 0.22 seconds
-   - `normal_phrase`: ordinary phrase deletion, usually near 0.35 seconds
-   - `sentence_range`: larger sentence/range deletion, usually near 0.55 seconds
-   - `too_fast_semantic_join`: a valid deletion where the next sentence, answer, section, or replacement bridge arrives too quickly and needs a short breath
-3. Build the visual context list from the same draft plan used to write the JianYing project:
-   - animation overlays and full-screen state holds
-   - page turns and stable-frame replacement windows
-   - pointer assets such as hands, arrows, circles, or magnifiers, including their inferred in/out duration
-   - key visual information that needs a reading beat
-4. Map visual events in source time and output timeline time. Use project-specific guard values when available; otherwise start with 2.0 seconds before and 1.0 second after the visual event or hold window.
-5. If the candidate pause-compression source window overlaps a visual guard window, skip the compression and mark the row as `visual_hold_review`. Include the visual event label, source guard window, candidate source window, and the audio-only target that would have been used.
-6. If there is no visual conflict, shorten only clearly long, ASR-safe pauses. Keep protected word onsets outside the cut.
-7. If the join is too fast, add time only after judging the semantic boundary. Sentence/range deletions, question-to-answer transitions, new-section starts, and replacement-video bridges can receive a short silent still-frame hold; one-word filler deletions and within-clause repairs usually stay tight.
-8. For a `semantic_pause_adjustment`, insert the hold as its own no-audio still-frame video segment sampled from the current source or replacement frame. Do not widen the delete window, do not mute live speech, and do not collapse adjacent editable segments.
-9. Keep the pause report separate from delete validation. A row can be `visual_hold_review` for picture rhythm or `semantic_pause_adjustment` for listening rhythm while all delete rows remain `pass`.
-10. Run full-candidate reverse ASR and require the exact preceding sentence tail and following sentence onset to remain. A zero-overlap hold is not sufficient when an ASR edge clipped the first or last protected syllable.
-
-V6 precedent: when an audio-only pass wanted to shorten `修改22`, the candidate source window touched the guard for the `05:10 小手指向奥地利` visual event, so the workflow kept the longer pause and recorded it as `visual_hold_review`.
-
-Lesson-1 precedent: after several review fixes left some joins too quick, the accepted repair inserted 16 short no-audio still-frame holds totaling 4.75 seconds. Each hold kept the source/replacement cut windows unchanged, shifted later segments through the same timeline plan, and recorded item id, source cut window, timeline start/end, duration, frame path, reason, and visual context.
+1. Treat the review timestamp only as a search hint. Bind authoritative word/character ASR to the
+   current source audio bytes, provider/model or resource identity, adapter version, and ordered
+   timing rows.
+2. Resolve the real adjacent-utterance point. It must be attributable to the current source,
+   outside spoken words and physical delete windows; utterance-only or transcript-only ASR is
+   insufficient.
+3. Set effective `execution_required=false`. Place exactly one visible label equal only to the
+   source item's `source_text` at the resolved point.
+4. Do not create executable `pause_adjustments`, split audio for a pause, create a hold or still
+   frame, add an audio gap, change project duration, or offset any later video, audio, asset, or
+   label target.
+5. Require final duration to equal source duration and all later targets to retain their original
+   source-aligned times. Any pause-derived media, duration extension, or offset fails Lite
+   acceptance.
+6. If authoritative ASR is unavailable, fail before draft open/write. Never use the rough review
+   timestamp or `0:00` as a fallback.
 
 ### Reverse-ASR Validation
 

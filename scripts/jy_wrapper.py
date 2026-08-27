@@ -2237,7 +2237,8 @@ def cmd_revision_validate(
 ) -> Dict[str, Any]:
     try:
         request = load_revision_request(request_json)
-        request = normalize_pause_adjustments(request)
+        if request.workflow_mode != "lite":
+            request = normalize_pause_adjustments(request)
         doc_items = load_review_items_json(doc_items_json) if doc_items_json else None
     except (OSError, ValueError) as exc:
         raise UserInputError(str(exc)) from exc

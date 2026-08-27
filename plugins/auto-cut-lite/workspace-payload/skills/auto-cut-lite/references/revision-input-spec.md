@@ -5,10 +5,11 @@ This document defines the repository-scoped input format for review-driven JianY
 For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.md) is
 authoritative and overrides every full-workflow example or field described below. In particular,
 animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
-default geometry, every audio-identifiable item uses its ASR-resolved boundary for execution and
-label placement, and only completely non-speech items use review timestamps. A visible JianYing
-label always equals only the ledger item's `source_text`; execution status and diagnostic wording
-remain internal metadata and never become label text.
+default geometry, every audio-identifiable item uses its ASR-resolved boundary for label placement,
+and only completely non-speech items use review timestamps. Spoken deletion remains executable;
+every pause addition, extension, shortening, or adjustment is label-only. A visible JianYing label
+always equals only the ledger item's `source_text`; execution status and diagnostic wording remain
+internal metadata and never become label text.
 
 Use this format when the task is:
 
@@ -194,22 +195,22 @@ After the exact profile is ready and the user has confirmed the applicable bind 
 ## Workflow Mode
 
 - `workflow_mode=full` is the default and preserves the existing full-capability behavior.
-- `workflow_mode=lite` selects the High School History compact workflow. It keeps the source
-  duration unchanged when no semantic-pause time is added. Its executable
+- `workflow_mode=lite` selects the High School History compact workflow. It always keeps the source
+  duration unchanged. Its executable
   `lite_cut_layout=split_gap` writes non-delete intervals to
   `Original Video` and `Separated Source Audio`, delete intervals to `Lite Cut Segments` and
   `Lite Reused Audio`, and simple downloaded assets to `Lite Visual Assets`. It keeps
   `Lite Timing Adjusted` empty. `lite_cut_layout=copy` is historical read/validation compatibility
   for older full-V1/A1 reference drafts and must be rejected for every new execution.
-- Lite deletion does not compress the timeline. A semantic-pause `duration` is added hold time,
-  not the desired total pause: `+Ns` preserves the existing pause, extends final duration by
-  exactly `N` seconds, and shifts every later video/audio/visual/label target by the cumulative
-  added time. The pause item's own label stays at the insertion boundary before the hold.
+- Lite deletion does not compress the timeline. Every request to add, extend, shorten, or otherwise
+  adjust a pause, including `+Ns`, `-Ns`, and `semantic_pause_adjustment`, is label-only at its
+  ASR-resolved point. It creates no `pause_adjustments`, hold, still frame, audio gap, duration
+  change, or offset for later video/audio/visual/label targets.
 - In lite mode, set `visual_plan.reuse_audio=false` for visual-only source reuse or still frames.
   Omitted `reuse_audio` defaults to true for source delete/timing copies and false for external
   visual assets.
 - Lite review labels use source text verbatim, start at the authoritative item time, remain in the
-  top safe band, and last `2s` unless clamped by the final pause-mapped project end. For every issue
+  top safe band, and last `2s` unless clamped by the source-length project end. For every issue
   locatable through speech or audio, authoritative time means the final ASR-resolved window or
   point, never the rough review timestamp. Only completely non-speech items use review timestamps;
   a requested target after `提前到`/`推迟到`/`移到`/`调到` wins over an earlier current time.
@@ -221,15 +222,15 @@ After the exact profile is ready and the user has confirmed the applicable bind 
   model/resource identity, adapter version, ordered positive-duration matched word/character
   rows, and `authoritative_cut_boundary=true`. Candidate transcripts, prompted local ASR, or a
   rough-time match must keep `authoritative_cut_boundary=false` and cannot be written as a cut.
-  Semantic pauses, pronunciation, breath, mouth noise, and other speech/audio timing must carry
+  Pause requests, pronunciation, breath, mouth noise, and other speech/audio timing must carry
   the equivalent authoritative source-ASR identity and a resolved point/window matching the
-  saved edit and label.
+  label. A pause request has no saved edit in Lite.
 - In Lite `split_gap`, `Separated Source Audio` contains the kept windows and `Lite Reused Audio`
   contains exactly one independent, audible source-aligned clip per logical ASR/V2 delete window.
   Overlapping windows may merge only within the same stable source item; adjacent windows from
   different items remain separate, and true cross-item overlap fails before draft writing for
   disambiguation. Reject pending or empty segmented plans, full-length/continuous/cross-item-merged
-  or muted A2, extra clips, and mismatched source or pause-mapped target ranges before writing.
+  or muted A2, extra clips, and mismatched source or source-aligned target ranges before writing.
   A supplied pointer row remains execution-required but uses default geometry and start-only
   acceptance. Cleanup-only pointer rows are label-only. Lite never enables binding, lifecycle,
   placement, hotspot, opened-editor, or full visual/animation acceptance gates.
@@ -309,7 +310,9 @@ ASR is missing.
 Evidence examples:
 
 - audio deletion: `cut_window`, ASR source, strategy, deleted phrase, must-keep phrase, reverse-ASR `status`
-- semantic pause repair: `semantic_pause_adjustment` with item id, source cut window, timeline start/end, duration, still-frame source or frame path, semantic reason, and protected-word status
+- Lite pause request: non-executing source item with authoritative ASR point and one exact
+  `source_text` marker receipt; executable `semantic_pause_adjustment` and `pause_adjustments`
+  evidence are forbidden
 - pointer/hand/underline: overlay `track_name`, `segment_id`, `asset_path`, target point, placement method, scale rule, and source-video/reference frame when available
 - animation timing: overlay or shifted segment ids, edit mode, first visible frame, stable frame, release time
 - visual deletion: mask/overlay/patch segment ids or the exact local baked window
@@ -346,16 +349,25 @@ Use `acceptance` to make the final gate explicit. For Feishu/Lark review documen
 - In Lite, keep `require_visual_evidence: false` and `require_pointer_profile_binding: false`.
   Supplied visual execution is validated by the fixed Lite asset/start/default-geometry checks.
 - strict validation always enforces the canonical pointer-profile receipt for pointer items; omitting or setting this field to false is not an opt-out
-- `require_pause_validation: true` when post-delete pauses are shortened, extended, preserved, repaired with `semantic_pause_adjustment`, or marked `visual_hold_review`
+- In Lite, keep `require_pause_validation: false`; pause additions, extensions, shortenings, and
+  adjustments are label-only. Strict Lite acceptance instead rejects any executable
+  `pause_adjustments`, pause hold/still, duration change, or later-target offset.
 - `require_final_acceptance: true` when the draft is being delivered as complete
 
-Every acceptance profile runs the low-cost source coverage, execution evidence, draft existence, editable structure, verbatim marker, and audio delivery gates. It conditionally routes the expensive audio precision/join, pause, visual, pointer, and animation gates from the latest ledger kind and executed operations. BGM replacement, level/loudness, and noise-only work skips reverse ASR unless a true acceptance flag explicitly requires it.
+Every acceptance profile runs the low-cost source coverage, execution evidence, draft existence,
+editable structure, verbatim marker, and audio delivery gates. It conditionally routes expensive
+audio precision/join, visual, pointer, and animation gates from the latest ledger kind and executed
+operations. Lite pause requests route only to ASR-label and forbidden-output checks, never to an
+executable pause gate. BGM replacement, level/loudness, and noise-only work skips reverse ASR
+unless a true acceptance flag explicitly requires it.
 
 An explicitly true conditional gate requires attributable evidence on an execution-required source item. A false flag cannot disable a gate required by detected work, including the canonical pointer-profile gate. Unknown execution-required types produce a structured review/failure instead of silently skipping validation. Strict final CLI validation fails when the named draft does not exist; source-text recovery during active editing remains nonblocking.
 
 `expected_review_item_count` and `expected_review_item_ids` may also come from a separate `--doc-items-json` file produced directly from the source document. This is the preferred way to catch items lost while translating the document into an edit request.
 
-Final acceptance evidence should summarize source coverage, audio validation, visual evidence, pause-fit result, editable structure, marker traceability, and unresolved review/fail rows. Use `auto-cut-final-acceptance` for this delivery gate.
+Final acceptance evidence should summarize source coverage, audio validation, visual evidence,
+pause-label coverage and forbidden-pause-output checks, editable structure, marker traceability,
+and unresolved review/fail rows. Use `auto-cut-final-acceptance` for this delivery gate.
 
 `require_final_acceptance: true` is effective even when the caller omits `--strict`; the CLI must still reject a missing or invalid saved draft.
 
@@ -402,12 +414,17 @@ The local transcript must contain alphanumeric content, and transcript aliases m
 
 Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 
-The latest canonical doc item kind determines whether the spoken contract applies. Spoken-delete and semantic-pause evidence are validated independently, even under the same item ID. A forbidden semantic-join phrase is waived only by `pass_adjudicated` with a non-empty reason, `final_gap` between 0 and 0.2 seconds, and `no_extra_deletion_contract=pass`.
+The latest canonical doc item kind determines whether the spoken-delete contract applies. A pause
+request is validated independently as an ASR-located label-only item and must not create executable
+pause evidence. A forbidden semantic-join phrase is waived only by `pass_adjudicated` with a
+non-empty reason, `final_gap` between 0 and 0.2 seconds, and
+`no_extra_deletion_contract=pass`.
 
 For every segmented candidate, the summary must also contain
 `audio_delivery_plan_sha256`, referred to by the request contract as
 `processed_audio.audio_delivery_plan_sha256`. Produce it with the maintained
-binding command after audio-plan compilation and any pause alignment, never by
+binding command after audio-plan compilation. Lite performs no pause alignment that mutates the
+timeline; never obtain this value by
 copying a private validator value:
 
 ```powershell
@@ -426,62 +443,25 @@ Automatic media repair is limited to one targeted attempt. It snapshots the immu
 
 The repair callback must not mutate the live project and must not write saved draft files directly; it must return a scoped `RevisionRequest` for the raw and prepared scope checks.
 
-### ASR-bound semantic pause adjustments
+### ASR-bound Lite pause labels
 
-For every `semantic_pause_adjustment`, the rough timestamp is a search hint rather
-than an insertion point. The request must include:
+For every request to add, extend, shorten, or otherwise adjust a pause, including input named
+`semantic_pause_adjustment`, the rough timestamp is only a search hint. Resolve the real adjacent
+utterance point with authoritative word/character ASR and bind the ASR path, current SHA-256,
+provider/model or resource identity, adapter version, source-media identity, and ordered timing
+rows. Utterance-only or transcript-only ASR is insufficient.
 
-The source ASR path and source ASR SHA-256 identify the timing artifact itself;
-the source-media and adapter fields below bind that artifact to this project.
+The resolved point must be inside the real adjacent-utterance gap, outside spoken words and
+physical delete windows, and attributable to the current source bytes. Place exactly one visible
+label equal only to the item's `source_text` at that point. Keep the requested time as internal
+search-hint evidence only.
 
-- `project.media_duration_seconds`: current source duration; it must agree with
-  media probing and the source duration derived from the saved main timeline
-- `pause_alignment.source_asr_path`: the real source ASR path
-- `pause_alignment.source_asr_sha256`: SHA-256 of the current ASR bytes
-- `pause_alignment.source_video_sha256`: SHA-256 of `project.source_video`
-- `pause_alignment.source_audio_sha256`: SHA-256 of `project.source_audio`
-- `pause_alignment.alignment_audio_path`: the exact audio bytes submitted to ASR
-- `pause_alignment.alignment_audio_sha256`: SHA-256 of those submitted bytes
-- `pause_alignment.source_asr_identity`: provider, model/resource ID,
-  `adapter_version`, and preprocessing identity. String `none` is valid only when
-  source and alignment audio SHA-256 are equal. Transformed alignment audio uses
-  a preprocessing object with `source_audio_sha256`, `alignment_audio_sha256`,
-  `tool`, `tool_version`, and non-empty `parameters`.
-- `pause_adjustments[*].requested_source_time`: the original rough source time
-- `pause_adjustments[*].source_time`: the resolved adjacent-utterance-gap midpoint
-- `pause_adjustments[*].duration`: additional hold seconds inserted on top of the source's existing
-  pause, never the desired total pause duration
-- `pause_adjustments[*].frame_source_time`: the still sampling time, equal to the midpoint
-- `pause_adjustments[*].frame_path`: the extracted still-frame file
-- `pause_adjustments[*].frame_sha256`: SHA-256 of the current still bytes
-
-The resolved point must be strictly inside the utterance gap, never on the
-ASR-reported previous tail or next onset, and must not be inside a spoken word
-or physical delete window. The midpoint must also preserve the configured guard
-from the nearest real word end and word start, not merely from the provider's
-utterance envelope. Evidence records `previous_word_end`, `next_word_start`,
-`previous_utterance_end`, `next_utterance_start`, `previous_guard_seconds`, `next_guard_seconds`,
-`minimum_edge_guard_seconds`, and `placement=gap_midpoint` so both edge guards
-and guard time can be recomputed. It also records requested source time, resolved source time,
-and frame source time in addition to the machine field names above.
-Utterance-only ASR is insufficient: each semantic pause requires real word or character timing, and its semantic pause edit and `pause_adjustments` entry must correspond one-to-one before draft generation.
-Compile the audio delivery plan after pause alignment, write it to
-`audio_delivery_plan`, split source/reference audio at
-the resolved source time, and keep audible segments outside the no-audio hold. Increase final
-project duration by the sum of `pause_adjustments[*].duration`, map every later target range and
-label through the same cumulative addition, and keep all source ranges in source time. The pause
-item's own marker remains at the insertion boundary before its added still-frame hold.
-Standalone `revision-validate` recomputes this evidence from the current ASR bytes.
-It also requires evidence ASR path/hash/identity and resolution settings to equal
-the immutable request configuration, hashes the current source video, source audio,
-and alignment audio, validates byte identity or the preprocessing receipt, seeks
-and decodes the source video within one frame interval plus 2 ms of
-`frame_source_time`, and requires the still pixels to match that source frame.
-One stable source item may carry only one semantic pause until list-valued
-pause receipts are supported; duplicate normalized item IDs fail closed.
-The full-candidate reverse-ASR gate must also confirm that the preceding sentence
-tail and following sentence onset remain complete; silence-overlap checks alone
-cannot accept an edge-clipped candidate.
+Set effective `execution_required=false` for the pause request. Do not add it to executable edits
+or `pause_adjustments`; do not split audio for a pause, create a hold or still-frame segment, add
+an audio gap, change project duration, or offset any later track, asset, or label. Strict Lite
+validation requires project duration to equal source duration and rejects every such prohibited
+pause output. Missing authoritative ASR fails before draft open/write rather than falling back to
+the review timestamp or `0:00`.
 
 ### UI execution modes
 
@@ -515,9 +495,10 @@ In this repository, review jobs are editable-project jobs by default. A flattene
 1. Use one edit item per review issue.
 2. Use one source-ledger marker per stable source item ID; multiple internal edits for that ID share it.
 3. Do not encode multiple unrelated fixes into one giant time window.
-4. Apply the Lite classification matrix: animation/timing, text movement/animation, and
-   cleanup-only pointer notes use `execution_required=false`; supplied pointer/image insertions
-   use `execution_required=true`; spoken deletion remains execution-required with ASR evidence.
+4. Apply the Lite classification matrix: animation/timing, text movement/animation, cleanup-only
+   pointer notes, `pause_delete`, `pause_timing_review`, and every pause addition/extension/
+   shortening/adjustment use `execution_required=false`; supplied pointer/image insertions use
+   `execution_required=true`; spoken deletion remains execution-required with ASR evidence.
 5. If the user says materials must remain visible, keep the matching `preserve` fields set to `true`.
 6. If the user needs second-stage manual editing, the resulting draft must keep inspectable cut structure and must not collapse into one full-length preview clip.
 7. Do not delete a review-document item because a previous attempt mishandled it or its internal `source_text` is missing. Re-read the document automatically; if unavailable, preserve the most complete unmodified candidate with an unverified warning and continue draft generation.
@@ -543,7 +524,9 @@ In this repository, review jobs are editable-project jobs by default. A flattene
   remains exactly `source_text`, with no status prefix, suffix, or explanation.
 - A visible label is not proof of a supplied visual insertion or spoken deletion. Strict
   validation must find their applicable execution evidence. Animation/timing, text-position, and
-  cleanup-only pointer items are intentionally label-only in Lite and require no execution proof.
+  cleanup-only pointer items and every pause adjustment request are intentionally label-only in
+  Lite and require no execution proof. Any internal status remains in metadata/receipts/reports;
+  the visible label still equals only `source_text`.
 - For Feishu/Lark review documents, every source item must appear in `review_items` or a separate `doc_items` ledger. Missing items are validation failures even if the saved draft has enough marker segments.
 
 ## Installed Runtime Integrity

@@ -1,13 +1,10 @@
 # ruff: noqa: E402,I001
-import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
-import wave
 from dataclasses import replace
-from unittest.mock import patch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,8 +19,10 @@ from utils.lite_revision import (
     _collect_lite_delete_windows,
     _localize_lite_request_materials,
     _lite_layout,
+    _lite_timeline_duration,
     _lite_visual_results,
     _spoken_cut_alignment_problems,
+    _validate_lite_content,
 )
 from utils.review_job_compiler import compile_review_job
 from utils.revision_markers import build_marker_plan
@@ -31,12 +30,9 @@ from utils.revision_models import _classify_review_text
 from utils.revision_runner import (
     execute_revision_request,
     load_revision_request,
-    load_review_items_json,
 )
 from utils.revision_evidence import (
     audio_delivery_plan_sha256,
-    bind_audio_delivery_plan_to_report,
-    normalize_pause_adjustments,
 )
 from utils.revision_validation import derive_acceptance_profile
 from core.review_marker_ops import ReviewMarkerOpsMixin
@@ -524,6 +520,7 @@ class LiteRevisionTests(unittest.TestCase):
             build_marker_plan(request)
 
     def test_lite_semantic_pause_marker_uses_asr_resolved_boundary(self):
+        source_text = "01：48，音频需要停顿一秒"
         request = _load_request(
             {
                 "workflow_mode": "lite",
@@ -532,20 +529,35 @@ class LiteRevisionTests(unittest.TestCase):
                     "source_video": "C:/media/source.mp4",
                     "media_duration_seconds": 500.0,
                 },
-                "pause_adjustments": [
+                "edits": [
                     {
-                        "item_id": "pause-1",
-                        "requested_source_time": 108.0,
-                        "source_time": 109.375,
-                        "duration": 1.0,
-                        "frame_path": "C:/media/pause.png",
+                        "type": "semantic_pause_adjustment",
+                        "source_kind": "semantic_pause_adjustment",
+                        "start": 109.375,
+                        "end": 109.375,
+                        "doc_item_id": "pause-1",
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "word",
+                                "input_sha256": "a" * 64,
+                                "matches": [
+                                    {"text": "停顿", "start": 109.375, "end": 109.625}
+                                ],
+                                "resolved_time": 109.375,
+                            },
+                        },
                     }
                 ],
                 "review_items": [
                     {
                         "id": "pause-1",
                         "kind": "semantic_pause_adjustment",
-                        "source_text": "01：48，音频需要停顿一秒",
+                        "source_text": source_text,
                         "start": 108.0,
                     }
                 ],
@@ -555,6 +567,8 @@ class LiteRevisionTests(unittest.TestCase):
         marker = build_marker_plan(request)[0]
         self.assertEqual(marker.start, 109.375)
         self.assertNotEqual(marker.start, 108.0)
+        self.assertEqual(marker.source_text, source_text)
+        self.assertEqual(marker.execution_status, "label_only_lite_policy")
 
     def test_lite_pending_segmented_audio_fails_before_draft_write(self):
         request = _load_request(
@@ -1375,7 +1389,111 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(v2[0]["target_timerange"]["start"], 0)
         self.assertTrue(result["validation"]["ok"])
 
-    def test_lite_added_pause_extends_timeline_and_shifts_later_tracks_and_labels(self):
+    def test_lite_all_pause_wording_variants_are_asr_timed_labels_only(self):
+        cases = [
+            ("pause-add", "review_only", "05:00 在现有停顿基础上增加1秒", 2.25),
+            ("pause-plus", "review_only", "05:00 停顿 +1s", 3.25),
+            ("pause-extend", "visual_overlay", "05:00 延长停顿1秒", 4.25),
+            ("pause-shorten", "visual_overlay", "05:00 缩短停顿1秒", 6.25),
+            ("pause-minus", "review_only", "05:00 停顿 -1s", 7.25),
+            ("pause-delete", "pause_delete", "05:00 删除这段停顿", 8.25),
+            ("gap-delete", "gap_delete", "05:00 删除两句之间的停顿", 9.25),
+        ]
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePauseWordingLabelOnly",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": item_id,
+                        "kind": kind,
+                        "source_text": source_text,
+                        "start": 1.0,
+                        "execution_required": True,
+                    }
+                    for item_id, kind, source_text, _resolved_time in cases
+                ],
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "visual_overlay",
+                        "start": resolved_time,
+                        "end": resolved_time,
+                        "doc_item_id": item_id,
+                        "asset_paths": [f"C:/media/{item_id}.png"],
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "word",
+                                "input_sha256": "e" * 64,
+                                "matches": [
+                                    {
+                                        "text": "停顿",
+                                        "start": resolved_time,
+                                        "end": resolved_time + 0.2,
+                                    }
+                                ],
+                                "resolved_time": resolved_time,
+                            },
+                        },
+                    }
+                    for item_id, kind, _source_text, resolved_time in cases
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(
+                    drafts_root,
+                    "LitePauseWordingLabelOnly",
+                    "draft_content.json",
+                ),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        item_ids = [item_id for item_id, _kind, _source_text, _time in cases]
+        self.assertEqual(content["duration"], 10_000_000)
+        self.assertEqual(_track(content, LITE_TRACKS["visual_assets"])["segments"], [])
+        self.assertEqual(result["pause_results"], [])
+        self.assertEqual(result["label_only_item_ids"], item_ids)
+        self.assertEqual(
+            [receipt["execution_status"] for receipt in result["review_marker_receipts"]],
+            ["label_only_lite_policy"] * len(cases),
+        )
+        text_by_material = {
+            material["id"]: json.loads(material["content"])["text"]
+            for material in content["materials"]["texts"]
+        }
+        marker_rows = sorted(
+            (
+                segment["target_timerange"]["start"],
+                text_by_material[segment["material_id"]],
+            )
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        self.assertEqual(
+            marker_rows,
+            [
+                (round(resolved_time * 1_000_000), source_text)
+                for _item_id, _kind, source_text, resolved_time in cases
+            ],
+        )
+
+    def test_lite_legacy_added_pause_is_label_only_without_shifting_later_content(self):
         source_asr_path = "C:/evidence/source-asr.json"
         request = _load_request(
             {
@@ -1447,382 +1565,54 @@ class LiteRevisionTests(unittest.TestCase):
             ) as content_file:
                 content = json.load(content_file)
 
-        self.assertEqual(content["duration"], 11_000_000)
-        self.assertEqual(result["added_pause_duration_seconds"], 1.0)
+        self.assertEqual(content["duration"], 10_000_000)
+        self.assertEqual(result["added_pause_duration_seconds"], 0.0)
+        self.assertEqual(result["pause_results"], [])
+        self.assertEqual(result["label_only_pause_item_ids"], ["pause-1"])
         v1 = _track(content, LITE_TRACKS["original_video"])["segments"]
         self.assertEqual(
             [(row["target_timerange"]["start"], row["target_timerange"]["duration"]) for row in v1],
-            [(0, 5_000_000), (5_000_000, 1_000_000), (6_000_000, 5_000_000)],
+            [(0, 10_000_000)],
+        )
+        self.assertNotIn(
+            "semantic_pause_hold",
+            [receipt.get("kind") for receipt in result["segment_receipts"]],
         )
         visual = _track(content, LITE_TRACKS["visual_assets"])["segments"][0]
-        self.assertEqual(visual["target_timerange"]["start"], 7_000_000)
+        self.assertEqual(visual["target_timerange"]["start"], 6_000_000)
         marker_starts = sorted(
             segment["target_timerange"]["start"]
             for track in content["tracks"]
             if track["name"].startswith("Review Marker")
             for segment in track["segments"]
         )
-        self.assertEqual(marker_starts, [5_000_000, 7_000_000])
+        self.assertEqual(marker_starts, [5_000_000, 6_000_000])
+        pause_receipt = next(
+            receipt
+            for receipt in result["review_marker_receipts"]
+            if receipt["item_id"] == "pause-1"
+        )
+        self.assertEqual(pause_receipt["source_text"], request.review_items[0].source_text)
+        self.assertEqual(pause_receipt["execution_status"], "label_only_lite_policy")
         self.assertTrue(result["validation"]["ok"])
 
-    def test_lite_strict_source_document_pause_maps_segmented_a1_a2_without_cut_compression(
-        self,
-    ):
-        import cv2
-        import numpy as np
-
-        def write_silence(path, duration_seconds):
-            with wave.open(path, "wb") as audio_file:
-                audio_file.setnchannels(1)
-                audio_file.setsampwidth(2)
-                audio_file.setframerate(8_000)
-                audio_file.writeframes(b"\0\0" * round(8_000 * duration_seconds))
-
-        def file_sha256(path):
-            with open(path, "rb") as source_file:
-                return hashlib.sha256(source_file.read()).hexdigest()
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            source_video = os.path.join(tmpdir, "source.avi")
-            writer = cv2.VideoWriter(
-                source_video,
-                cv2.VideoWriter_fourcc(*"MJPG"),
-                2.0,
-                (16, 16),
-            )
-            self.assertTrue(writer.isOpened())
-            for index in range(20):
-                writer.write(np.full((16, 16, 3), index * 10, dtype=np.uint8))
-            writer.release()
-
-            pause_frame = os.path.join(tmpdir, "pause-at-5s.png")
-            capture = cv2.VideoCapture(source_video)
-            capture.set(cv2.CAP_PROP_POS_MSEC, 5_000)
-            frame_ok, frame = capture.read()
-            capture.release()
-            self.assertTrue(frame_ok)
-            self.assertTrue(cv2.imwrite(pause_frame, frame))
-
-            source_audio = os.path.join(tmpdir, "source.wav")
-            candidate_audio = os.path.join(tmpdir, "candidate.wav")
-            write_silence(source_audio, 10.0)
-            write_silence(candidate_audio, 11.0)
-
-            source_asr = os.path.join(tmpdir, "source-asr.json")
-            with open(source_asr, "w", encoding="utf-8") as asr_file:
-                json.dump(
-                    {
-                        "utterances": [
-                            {"text": "remove before", "start": 2.0, "end": 3.0},
-                            {"text": "before", "start": 3.5, "end": 4.5},
-                            {"text": "after", "start": 5.5, "end": 6.5},
-                            {"text": "remove after", "start": 7.0, "end": 8.0},
-                        ],
-                        "words": [
-                            {"text": "remove-before", "start": 2.0, "end": 3.0},
-                            {"text": "before", "start": 3.5, "end": 4.5},
-                            {"text": "after", "start": 5.5, "end": 6.5},
-                            {"text": "remove-after", "start": 7.0, "end": 8.0},
-                        ],
-                    },
-                    asr_file,
-                )
-
-            source_audio_hash = file_sha256(source_audio)
-            candidate_hash = file_sha256(candidate_audio)
-            source_asr_hash = file_sha256(source_asr)
-            source_video_hash = file_sha256(source_video)
-            pause_frame_hash = file_sha256(pause_frame)
-
-            delete_specs = (
-                (
-                    "delete-before",
-                    2.0,
-                    3.0,
-                    "remove-before",
-                    ["leftone", "rightone"],
-                ),
-                (
-                    "delete-after",
-                    7.0,
-                    8.0,
-                    "remove-after",
-                    ["lefttwo", "righttwo"],
-                ),
-            )
-            delete_edits = []
-            delete_review_items = []
-            for item_id, start, end, phrase, must_keep in delete_specs:
-                evidence = {
-                    "status": "executed",
-                    "executed": True,
-                    "review_timestamp_role": "search_hint",
-                    "cut_window": [start, end],
-                    "delete": phrase,
-                    "must_keep": must_keep,
-                    "strategy": "precision_first",
-                    "asr_alignment": {
-                        "status": "pass",
-                        "provider": "test-asr",
-                        "model": "test-model",
-                        "adapter_version": "1",
-                        "granularity": "word",
-                        "input_sha256": source_audio_hash,
-                        "authoritative_cut_boundary": True,
-                        "words": [{"text": phrase, "start": start, "end": end}],
-                        "resolved_cut_window": [start, end],
-                    },
-                }
-                delete_edits.append(
-                    {
-                        "type": "delete",
-                        "source_kind": "spoken_delete",
-                        "start": start,
-                        "end": end,
-                        "doc_item_id": item_id,
-                        "evidence": evidence,
-                    }
-                )
-                delete_review_items.append(
-                    {
-                        "id": item_id,
-                        "kind": "spoken_delete",
-                        "source_text": f"{start:.0f}.0-{end:.0f}.0 delete {phrase}",
-                        "start": start,
-                        "end": end,
-                        "execution_required": True,
-                        "evidence": evidence,
-                        "validation": {"status": "pass"},
-                    }
-                )
-
-            pause_source_text = "5.0 add one second to the existing semantic pause"
-            review_items = [
-                delete_review_items[0],
-                {
-                    "id": "pause-one-second",
-                    "kind": "semantic_pause_adjustment",
-                    "source_text": pause_source_text,
-                    "start": 5.0,
-                    "execution_required": True,
+    def test_lite_low_level_validation_rejects_pause_execution_artifacts(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LitePauseArtifactGuard",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
                 },
-                delete_review_items[1],
-            ]
-            audio_segments = [
-                {
-                    "id": "a1-001",
-                    "role": "source",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["source_audio"],
-                    "source_start": 0.0,
-                    "timeline_start": 0.0,
-                    "duration": 2.0,
-                },
-                {
-                    "id": "a1-002",
-                    "role": "source",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["source_audio"],
-                    "source_start": 3.0,
-                    "timeline_start": 3.0,
-                    "duration": 2.0,
-                },
-                {
-                    "id": "a1-003",
-                    "role": "source",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["source_audio"],
-                    "source_start": 5.0,
-                    "timeline_start": 6.0,
-                    "duration": 2.0,
-                },
-                {
-                    "id": "a1-004",
-                    "role": "source",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["source_audio"],
-                    "source_start": 8.0,
-                    "timeline_start": 9.0,
-                    "duration": 2.0,
-                },
-                {
-                    "id": "a2-delete-before",
-                    "role": "reference",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["reused_audio"],
-                    "source_start": 2.0,
-                    "timeline_start": 2.0,
-                    "duration": 1.0,
-                    "volume": 0.0,
-                    "doc_item_id": "delete-before",
-                },
-                {
-                    "id": "a2-delete-after",
-                    "role": "reference",
-                    "asset_path": source_audio,
-                    "track_name": LITE_TRACKS["reused_audio"],
-                    "source_start": 7.0,
-                    "timeline_start": 8.0,
-                    "duration": 1.0,
-                    "volume": 0.0,
-                    "doc_item_id": "delete-after",
-                },
-            ]
-            report_path = os.path.join(tmpdir, "reverse-asr.json")
-            report = {
-                "candidate_audio_sha256": candidate_hash,
-                "asr_identity": {
-                    "provider": "test-provider",
-                    "model": "test-model",
-                    "adapter_version": "1",
-                },
-                "status_counts": {"pass": 3},
-                "rows": [
-                    {
-                        "id": "delete-before",
-                        "status": "pass",
-                        "strategy": "precision_first",
-                        "source_cut_windows": [[2.0, 3.0]],
-                        "mapped_join_times": [2.0],
-                        "local_joined_text": "leftone rightone",
-                        "delete": "remove-before",
-                        "must_keep": ["leftone", "rightone"],
-                        "delete_hits": [],
-                        "keep_hits": {"leftone": True, "rightone": True},
-                        "semantic_join_validation": {"status": "pass"},
-                    },
-                    {
-                        "id": "pause-one-second",
-                        "kind": "semantic_pause_adjustment",
-                        "status": "pass",
-                        "reverse_asr_evidence": {
-                            "candidate_audio_sha256": candidate_hash,
-                            "full_candidate_reverse_asr_status": "success",
-                            "previous_utterance_match": {"text": "before"},
-                            "next_utterance_match": {"text": "after"},
-                            "previous_utterance_preserved": True,
-                            "next_utterance_preserved": True,
-                            "surrounding_utterance_order_valid": True,
-                            "no_asr_word_overlaps_hold": True,
-                            "reverse_asr_word_overlaps_hold": [],
-                            "previous_protected_trailing_anchor": "re",
-                            "previous_protected_trailing_anchor_present": True,
-                            "next_protected_leading_anchor": "af",
-                            "next_protected_leading_anchor_present": True,
-                        },
-                    },
-                    {
-                        "id": "delete-after",
-                        "status": "pass",
-                        "strategy": "precision_first",
-                        "source_cut_windows": [[7.0, 8.0]],
-                        "mapped_join_times": [8.0],
-                        "local_joined_text": "lefttwo righttwo",
-                        "delete": "remove-after",
-                        "must_keep": ["lefttwo", "righttwo"],
-                        "delete_hits": [],
-                        "keep_hits": {"lefttwo": True, "righttwo": True},
-                        "semantic_join_validation": {"status": "pass"},
-                    },
-                ],
             }
-            with open(report_path, "w", encoding="utf-8") as report_file:
-                json.dump(report, report_file)
-
-            request = _load_request(
-                {
-                    "workflow_mode": "lite",
-                    "lite_cut_layout": "split_gap",
-                    "project": {
-                        "draft_name": "LiteStrictSourceDocumentPause",
-                        "source_video": source_video,
-                        "source_audio": source_audio,
-                        "media_duration_seconds": 10.0,
-                    },
-                    "edits": [
-                        delete_edits[0],
-                        {
-                            "type": "semantic_pause_adjustment",
-                            "source_kind": "semantic_pause_adjustment",
-                            "start": 5.0,
-                            "end": 5.0,
-                            "doc_item_id": "pause-one-second",
-                        },
-                        delete_edits[1],
-                    ],
-                    "review_items": review_items,
-                    "pause_adjustments": [
-                        {
-                            "item_id": "pause-one-second",
-                            "requested_source_time": 5.0,
-                            "source_time": 5.0,
-                            "frame_source_time": 5.0,
-                            "duration": 1.0,
-                            "frame_path": pause_frame,
-                            "frame_sha256": pause_frame_hash,
-                        }
-                    ],
-                    "pause_alignment": {
-                        "source_asr_path": source_asr,
-                        "source_asr_sha256": source_asr_hash,
-                        "source_video_sha256": source_video_hash,
-                        "source_audio_sha256": source_audio_hash,
-                        "alignment_audio_path": source_audio,
-                        "alignment_audio_sha256": source_audio_hash,
-                        "source_asr_identity": {
-                            "provider": "test-provider",
-                            "model": "test-model",
-                            "adapter_version": "test-adapter-v1",
-                            "preprocessing": "none",
-                        },
-                        "semantic_gap_seconds": 0.8,
-                        "search_window_seconds": 3.0,
-                    },
-                    "audio_delivery_plan": {
-                        "mode": "segmented",
-                        "forbid_full_length_segments": True,
-                        "validation_only_audio_paths": [candidate_audio],
-                        "segments": audio_segments,
-                    },
-                    "processed_audio": {
-                        "output_wav": candidate_audio,
-                        "validation_summary": report_path,
-                    },
-                    "acceptance": {
-                        "require_review_items": True,
-                        "expected_review_item_count": 3,
-                        "expected_review_item_ids": [
-                            "delete-before",
-                            "pause-one-second",
-                            "delete-after",
-                        ],
-                        "require_pause_validation": True,
-                    },
-                }
-            )
-            doc_items_path = os.path.join(tmpdir, "doc_items.json")
-            with open(doc_items_path, "w", encoding="utf-8") as doc_items_file:
-                json.dump({"review_items": review_items}, doc_items_file, ensure_ascii=False)
-            source_doc_items = load_review_items_json(doc_items_path)
-            request = normalize_pause_adjustments(request)
-            with open(report_path, "w", encoding="utf-8") as report_file:
-                json.dump(bind_audio_delivery_plan_to_report(request, report), report_file)
-
-            with patch(
-                "utils.runtime_integrity.validate_current_lite_runtime",
-                return_value={"ok": True, "source": "test-runtime"},
-            ):
-                result = execute_revision_request(
-                    request,
-                    drafts_root=tmpdir,
-                    mock_media=False,
-                    strict=True,
-                    doc_items=source_doc_items,
-                )
+        )
+        with tempfile.TemporaryDirectory() as drafts_root:
+            execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
             with open(
                 os.path.join(
-                    tmpdir,
-                    "LiteStrictSourceDocumentPause",
+                    drafts_root,
+                    "LitePauseArtifactGuard",
                     "draft_content.json",
                 ),
                 "r",
@@ -1830,76 +1620,183 @@ class LiteRevisionTests(unittest.TestCase):
             ) as content_file:
                 content = json.load(content_file)
 
-        self.assertTrue(
-            result["acceptance_validation"]["ok"],
-            result["acceptance_validation"]["errors"],
+        clean_content = json.loads(json.dumps(content))
+        source_segment = _track(content, LITE_TRACKS["original_video"])["segments"][0]
+        source_material_id = source_segment["material_id"]
+        hold = json.loads(
+            json.dumps(source_segment)
         )
-        self.assertIn(
-            "pause_fit",
-            result["acceptance_validation"]["metrics"]["enabled_gates"],
-        )
-        self.assertEqual(content["duration"], 11_000_000)
-        self.assertEqual(result["added_pause_duration_seconds"], 1.0)
+        hold["id"] = "forged-semantic-pause-hold"
+        hold["target_timerange"] = {"start": 5_000_000, "duration": 1_000_000}
+        hold["source_timerange"] = {"start": 0, "duration": 1_000_000}
+        _track(content, LITE_TRACKS["original_video"])["segments"].append(hold)
 
-        def saved_windows(track_name):
-            return [
-                (
-                    segment["target_timerange"]["start"],
-                    segment["target_timerange"]["duration"],
-                    segment["source_timerange"]["start"],
+        self.assertEqual(_lite_timeline_duration(10.0, [object()]), 10.0)
+        validation = _validate_lite_content(
+            content,
+            total_duration=10.0,
+            marker_plan=[],
+            marker_receipts=[],
+            reused_audio_expected=False,
+            pause_adjustments=[object()],
+            pause_receipts=[{"item_id": "pause-1", "segment_id": hold["id"]}],
+            segment_receipts=[
+                {
+                    "item_id": "pause-1",
+                    "kind": "Semantic_Pause_Hold",
+                    "segment_id": hold["id"],
+                }
+            ],
+            source_video_material_id=source_material_id,
+            source_video_path=request.project.source_video,
+        )
+
+        self.assertFalse(validation["ok"])
+        joined_errors = "\n".join(validation["errors"])
+        self.assertIn("executable pause_adjustments", joined_errors)
+        self.assertIn("pause_receipts", joined_errors)
+        self.assertIn("semantic_pause_hold", joined_errors)
+        self.assertIn("V1 segment count mismatch", joined_errors)
+
+        forged_content = json.loads(json.dumps(clean_content))
+        forged_material = json.loads(
+            json.dumps(
+                next(
+                    material
+                    for material in forged_content["materials"]["videos"]
+                    if material["id"] == source_material_id
                 )
-                for segment in _track(content, track_name)["segments"]
-            ]
-
-        self.assertEqual(
-            saved_windows(LITE_TRACKS["source_audio"]),
-            [
-                (0, 2_000_000, 0),
-                (3_000_000, 2_000_000, 3_000_000),
-                (6_000_000, 2_000_000, 5_000_000),
-                (9_000_000, 2_000_000, 8_000_000),
-            ],
-        )
-        self.assertEqual(
-            saved_windows(LITE_TRACKS["reused_audio"]),
-            [
-                (2_000_000, 1_000_000, 2_000_000),
-                (8_000_000, 1_000_000, 7_000_000),
-            ],
-        )
-        a2_receipts = [
-            receipt
-            for receipt in result["segment_receipts"]
-            if receipt.get("track_name") == LITE_TRACKS["reused_audio"]
-        ]
-        self.assertEqual(
-            [receipt["doc_item_id"] for receipt in a2_receipts],
-            ["delete-before", "delete-after"],
-        )
-        self.assertEqual(len({receipt["segment_id"] for receipt in a2_receipts}), 2)
-
-        text_by_material = {
-            material["id"]: json.loads(material["content"])["text"]
-            for material in content["materials"]["texts"]
-        }
-        marker_rows = sorted(
-            (
-                segment["target_timerange"]["start"],
-                text_by_material[segment["material_id"]],
             )
+        )
+        forged_material["id"] = "forged-unreceipted-hold-material"
+        forged_material["material_id"] = "forged-unreceipted-hold-material"
+        forged_material["path"] = "C:/media/pause-frame.png"
+        forged_content["materials"]["videos"].append(forged_material)
+        _track(forged_content, LITE_TRACKS["original_video"])["segments"][0][
+            "material_id"
+        ] = forged_material["id"]
+        forged_validation = _validate_lite_content(
+            forged_content,
+            total_duration=10.0,
+            marker_plan=[],
+            marker_receipts=[],
+            reused_audio_expected=False,
+            source_video_material_id=source_material_id,
+            source_video_path=request.project.source_video,
+        )
+        self.assertFalse(forged_validation["ok"])
+        self.assertTrue(
+            any(
+                "contains non-source video material" in error
+                for error in forged_validation["errors"]
+            ),
+            forged_validation["errors"],
+        )
+
+        extended_content = json.loads(json.dumps(clean_content))
+        extended_content["duration"] = 11_000_000
+        duration_validation = _validate_lite_content(
+            extended_content,
+            total_duration=10.0,
+            marker_plan=[],
+            marker_receipts=[],
+            reused_audio_expected=False,
+            source_video_material_id=source_material_id,
+            source_video_path=request.project.source_video,
+        )
+        self.assertFalse(duration_validation["ok"])
+        self.assertTrue(
+            any(
+                "expected unchanged source duration" in error
+                for error in duration_validation["errors"]
+            ),
+            duration_validation["errors"],
+        )
+
+    def test_lite_audio_label_only_item_keeps_asr_marker_time_after_execution_filtering(
+        self,
+    ):
+        source_text = "02:00 发音问题暂时只记录修改意见原文"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteAudioLabelOnlyAsrTime",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "audio-new",
+                        "kind": "pronunciation_repair",
+                        "source_text": source_text,
+                        "start": 2.0,
+                        "execution_required": True,
+                        "evidence": {
+                            "execution_status": "label_only_unresolved",
+                        },
+                    }
+                ],
+                "edits": [
+                    {
+                        "type": "visual_overlay",
+                        "source_kind": "pronunciation_repair",
+                        "start": 6.25,
+                        "end": 6.25,
+                        "doc_item_id": "audio-new",
+                        "asset_paths": ["C:/media/unresolved-audio-repair.png"],
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "word",
+                                "input_sha256": "d" * 64,
+                                "matches": [
+                                    {"text": "发音", "start": 6.25, "end": 6.45}
+                                ],
+                                "resolved_time": 6.25,
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            result = execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            with open(
+                os.path.join(
+                    drafts_root,
+                    "LiteAudioLabelOnlyAsrTime",
+                    "draft_content.json",
+                ),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        self.assertEqual(_track(content, LITE_TRACKS["visual_assets"])["segments"], [])
+        self.assertEqual(result["label_only_unresolved_item_ids"], ["audio-new"])
+        self.assertEqual(result["label_only_item_ids"], ["audio-new"])
+        marker_segment = next(
+            segment
             for track in content["tracks"]
             if track["name"].startswith("Review Marker")
             for segment in track["segments"]
         )
-        self.assertEqual(
-            marker_rows,
-            [
-                (2_000_000, delete_review_items[0]["source_text"]),
-                (5_000_000, pause_source_text),
-                (8_000_000, delete_review_items[1]["source_text"]),
-            ],
+        self.assertEqual(marker_segment["target_timerange"]["start"], 6_250_000)
+        text_material = next(
+            material
+            for material in content["materials"]["texts"]
+            if material["id"] == marker_segment["material_id"]
         )
-        self.assertTrue(result["validation"]["ok"])
+        self.assertEqual(json.loads(text_material["content"])["text"], source_text)
+        receipt = result["review_marker_receipts"][0]
+        self.assertEqual(receipt["source_text"], source_text)
+        self.assertEqual(receipt["execution_status"], "label_only_unresolved")
 
     def test_lite_copy_layout_is_rejected_before_draft_open(self):
         request = _load_request(
@@ -1935,7 +1832,7 @@ class LiteRevisionTests(unittest.TestCase):
                         "source_text": source_text,
                         "start": 2.0,
                         "execution_required": True,
-                        "execution_status": "label_only_unresolved",
+                        "evidence": {"execution_status": "label_only_unresolved"},
                     }
                 ],
             }
@@ -1986,7 +1883,8 @@ class LiteRevisionTests(unittest.TestCase):
                         "start": 2.0,
                         "end": 4.0,
                         "execution_required": True,
-                        "execution_status": "label_only_unresolved",
+                        "execution_status": "pending",
+                        "validation": {"execution_status": "label_only_unresolved"},
                     }
                 ],
                 "edits": [
@@ -2018,6 +1916,21 @@ class LiteRevisionTests(unittest.TestCase):
         assert not visual_track["segments"]
         assert result["label_only_unresolved_item_ids"] == ["new-issue"]
         assert result["review_marker_count"] == 1
+        marker_segment = next(
+            segment
+            for track in content["tracks"]
+            if track["name"].startswith("Review Marker")
+            for segment in track["segments"]
+        )
+        text_material = next(
+            material
+            for material in content["materials"]["texts"]
+            if material["id"] == marker_segment["material_id"]
+        )
+        assert json.loads(text_material["content"])["text"] == source_text
+        assert result["review_marker_receipts"][0]["execution_status"] == (
+            "label_only_unresolved"
+        )
 
     def test_lite_acceptance_downgrades_stale_doc_item_execution_status(self):
         """A stale external doc item cannot promote a marker-only issue to execution."""

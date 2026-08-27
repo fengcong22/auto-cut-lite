@@ -2,6 +2,10 @@
 
 Run this checklist before saying the JianYing revision draft is done.
 
+For the packaged workspace's required `workflow_mode=lite`, every request to add, extend, shorten,
+or otherwise adjust a pause is label-only at its authoritative ASR point. The Lite rules below
+replace any inherited full-workflow pause-mutation gate.
+
 ## Resumable Job Evidence
 
 - Natural-language source-document work has canonical `review-job-compile` outputs under ignored `tmp/` storage.
@@ -42,9 +46,12 @@ For precise spoken-word revision:
 - The original separated audio remains available, usually muted as a reference track.
 - The processed audible narration is on a distinct replacement-audio track.
 - Exact duck/mute tail-cleanup windows, if used, are recorded in the audio report.
-- Post-delete pause timing decisions are recorded separately from delete-window accuracy.
-- Any pause shortening near animations, pointers, page turns, or key visual holds has passed a visual-aware guard check.
-- Any `semantic_pause_adjustment` that repairs a too-fast join is a separate no-audio still-frame segment, not a widened delete window or hidden mute.
+- Post-delete pause requests are recorded separately from delete-window accuracy as non-executing
+  source-text-only labels at authoritative ASR points.
+- No pause shortening, extension, addition, `semantic_pause_adjustment`, visual-hold repair, or
+  other pause mutation is executed in Lite.
+- No pause request creates a hold, still-frame segment, hidden mute, audio gap, duration change, or
+  offset to a later track, asset, or label.
 
 ## Cut Visibility
 
@@ -88,12 +95,14 @@ For precise spoken-word revision:
 - Reverse ASR has no unresolved `fail` rows.
 - The full candidate is fully decoded, binds the normalized segmented plan digest, and covers its timeline after only exactly adjacent two-sided crossfades; isolated fades add no duration allowance, and every spoken-delete row's transcript, cut/join mapping, delete/keep hits, and semantic-join validation match the same item contract rather than a generic pass.
 - Same-word recurrence is only accepted when an adjudication explains why the hit belongs to a later kept phrase.
-- Pause-fit validation reports adjusted pause count, inserted semantic-pause count, skipped visual-context count, and any `semantic_pause_adjustment` or `visual_hold_review` rows.
-- A `semantic_pause_adjustment` row records item id, source cut window, timeline start/end, duration, still-frame source or frame path, semantic reason, and confirms protected words are unchanged.
-- Every semantic pause binds source ASR path and source ASR SHA-256 plus identity equal to the immutable request configuration, current source audio/video hashes, exact alignment-audio hash, and either byte identity for `preprocessing=none` or a receipt binding transformed hashes/tool/version/parameters; preserves requested source time and resolved source time; resolves to the utterance-gap midpoint with positive recomputable guard time from the nearest real word end/start; records frame source time at that midpoint and proves successful decode within one frame interval plus pixel agreement; uses an audio delivery plan compiled after pause alignment and bound by audio delivery plan SHA-256; and has full-candidate reverse-ASR proof that the preceding sentence tail and following sentence onset remain complete.
-- Utterance-only ASR is insufficient: each semantic pause requires real word or character timing, and its semantic pause edit and `pause_adjustments` entry must correspond one-to-one before draft generation.
-- Each stable source item ID has at most one semantic pause until one-to-many pause receipts are implemented.
-- A `visual_hold_review` row is acceptable only when it names the conflicting visual event and source-time guard window; do not count it as a spoken-word deletion failure.
+- Pause-label validation reports every pause item as `execution_required=false`, with its stable item
+  ID, exact `source_text`, authoritative ASR point, and marker receipt.
+- Every pause item binds current source word/character ASR identity and timing. Utterance-only or
+  transcript-only ASR is insufficient, and the review timestamp remains only a search hint.
+- The request and saved draft contain no executable `semantic_pause_adjustment` or
+  `pause_adjustments` row and no pause-generated media segment.
+- Final duration equals source duration, and all later targets retain their original source-aligned
+  times. Any pause-derived duration extension or offset fails Lite acceptance.
 
 ## Safety
 

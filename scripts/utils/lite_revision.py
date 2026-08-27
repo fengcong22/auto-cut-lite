@@ -25,7 +25,10 @@ from utils.revision_models import (
     RevisionReviewItem,
     _visual_plan_segments,
     lite_execution_required,
+    lite_pause_change_is_label_only,
+    lite_review_item_execution_required,
     lite_timing_source,
+    review_item_execution_status,
 )
 
 
@@ -383,7 +386,7 @@ def _lite_edit_is_executable(
     item from becoming an accidental cut or overlay.
     """
 
-    if _lite_edit_status(edit) == "label_only_unresolved":
+    if _lite_edit_status(edit).startswith("label_only_"):
         return False
     authoritative = doc_items if doc_items is not None else request.review_items
     if edit.doc_item_id:
@@ -391,13 +394,7 @@ def _lite_edit_is_executable(
         for item in authoritative:
             if item.item_id.strip().casefold() != normalized_id:
                 continue
-            if str(item.execution_status or "").strip().casefold() == "label_only_unresolved":
-                return False
-            return lite_execution_required(
-                item.kind,
-                item.source_text,
-                item.execution_required,
-            )
+            return lite_review_item_execution_required(item)
 
     kind = _edit_kind(edit)
     if kind == "timing":
@@ -423,6 +420,51 @@ def _filter_lite_execution_edits(
     if len(executable) == len(request.edits):
         return request, skipped
     return replace(request, edits=executable), skipped
+
+
+def _prepare_lite_execution_request(
+    request: RevisionRequest,
+    doc_items: Optional[List[RevisionReviewItem]],
+) -> Tuple[RevisionRequest, List[str], List[str], List[str]]:
+    """Remove every marker-only operation from the request that writes the draft."""
+
+    execution_request, skipped_edit_ids = _filter_lite_execution_edits(request, doc_items)
+    authoritative = doc_items if doc_items is not None else request.review_items
+    unresolved_ids = {
+        item.item_id
+        for item in authoritative
+        if review_item_execution_status(item).casefold() == "label_only_unresolved"
+    }
+    unresolved_ids.update(
+        str(edit.doc_item_id or f"edit_{index + 1:03d}")
+        for index, edit in enumerate(request.edits)
+        if _lite_edit_status(edit) == "label_only_unresolved"
+    )
+    pause_policy_ids = {
+        item.item_id
+        for item in authoritative
+        if lite_pause_change_is_label_only(item.kind, item.source_text)
+    }
+    pause_policy_ids.update(
+        str(pause.item_id or "").strip()
+        for pause in request.pause_adjustments
+        if str(pause.item_id or "").strip()
+    )
+    all_label_only_ids = list(
+        dict.fromkeys(
+            [
+                *skipped_edit_ids,
+                *sorted(pause_policy_ids),
+                *sorted(unresolved_ids),
+            ]
+        )
+    )
+    return (
+        replace(execution_request, pause_adjustments=[]),
+        all_label_only_ids,
+        sorted(unresolved_ids),
+        sorted(pause_policy_ids),
+    )
 
 
 def _bounded_window(start: Any, end: Any, total_duration: float) -> Tuple[float, float]:
@@ -451,18 +493,9 @@ def _lite_pause_offset_before(
     *,
     include_at_point: bool = False,
 ) -> float:
-    point_value = float(point)
-    if include_at_point:
-        return sum(
-            float(pause.duration)
-            for pause in pauses
-            if float(pause.source_time) <= point_value + 1e-6
-        )
-    return sum(
-        float(pause.duration)
-        for pause in pauses
-        if float(pause.source_time) < point_value - 1e-6
-    )
+    # Pause requests are source-time labels in Lite. They never offset the timeline.
+    _ = (point, pauses, include_at_point)
+    return 0.0
 
 
 def _map_lite_source_time(
@@ -483,27 +516,20 @@ def _map_lite_source_time(
 
 
 def _lite_timeline_duration(source_duration: float, pauses: Iterable[Any]) -> float:
-    return float(source_duration) + sum(float(pause.duration) for pause in pauses)
+    _ = pauses
+    return float(source_duration)
 
 
 def _split_lite_source_windows(
     windows: Iterable[Tuple[float, float]],
     pauses: Iterable[Any],
 ) -> List[Tuple[float, float]]:
-    pause_points = sorted({float(pause.source_time) for pause in pauses})
-    result: List[Tuple[float, float]] = []
-    for start, end in windows:
-        boundaries = [
-            float(start),
-            *(point for point in pause_points if start + 1e-6 < point < end - 1e-6),
-            float(end),
-        ]
-        result.extend(
-            (left, right)
-            for left, right in zip(boundaries, boundaries[1:])
-            if right - left > 1e-6
-        )
-    return result
+    _ = pauses
+    return [
+        (float(start), float(end))
+        for start, end in windows
+        if float(end) - float(start) > 1e-6
+    ]
 
 
 def _mapped_lite_windows(
@@ -788,6 +814,14 @@ def _validate_spoken_cut_alignment(
         source_kind = str(edit.source_kind or "").strip().casefold()
         review_item = by_id.get(edit.doc_item_id.casefold()) if edit.doc_item_id else None
         review_kind = str(review_item.kind if review_item is not None else "").strip().casefold()
+        if (
+            review_item is not None
+            and lite_pause_change_is_label_only(review_item.kind, review_item.source_text)
+        ) or lite_pause_change_is_label_only(
+            source_kind,
+            " ".join(str(value or "") for value in (edit.label, edit.detail)),
+        ):
+            continue
         if source_kind in _SPOKEN_CUT_KINDS or review_kind in _SPOKEN_CUT_KINDS:
             problems.extend(_spoken_cut_alignment_problems(edit, review_item))
     if problems:
@@ -911,8 +945,18 @@ def _validate_lite_audio_timing_sources(
         if lite_timing_source(item.kind, item.source_text) != "asr":
             continue
         normalized_id = item.item_id.strip().casefold()
-        if str(item.kind or "").strip().casefold() == "semantic_pause_adjustment":
-            problems.extend(_semantic_pause_asr_problems(request, item))
+        if lite_pause_change_is_label_only(item.kind, item.source_text):
+            edits = edit_by_id.get(normalized_id, [])
+            if edits:
+                for edit in edits:
+                    problems.extend(_generic_asr_timing_problems(edit, item))
+            elif str(item.kind or "").strip().casefold() == "semantic_pause_adjustment":
+                problems.extend(_semantic_pause_asr_problems(request, item))
+            else:
+                problems.append(
+                    f"Lite audio timing {item.item_id}: pause change has no ASR-resolved "
+                    "edit or pause boundary."
+                )
             continue
         edits = edit_by_id.get(normalized_id, [])
         if not edits:
@@ -1120,50 +1164,6 @@ def _add_video_segment(
     )
     project.script.add_segment(segment, track_name)
     return segment
-
-
-def _add_lite_pause_hold(
-    project: Any,
-    draft: Any,
-    mock_video: Any,
-    *,
-    frame_path: str,
-    timeline_start: float,
-    duration: float,
-    mock_media: bool,
-    material_cache: Dict[str, Any],
-) -> Any:
-    cache_key = os.path.normcase(os.path.abspath(frame_path))
-    material = material_cache.get(cache_key)
-    if material is None:
-        if mock_media:
-            material = _make_video_material(
-                draft,
-                mock_video,
-                frame_path,
-                max(duration, 0.01),
-                True,
-            )
-        else:
-            if not os.path.isfile(frame_path):
-                raise FileNotFoundError(frame_path)
-            try:
-                material = draft.VideoMaterial(frame_path)
-            except Exception:
-                from core.media_ops import _FallbackPhotoMaterial
-
-                material = _FallbackPhotoMaterial(frame_path)
-        material_cache[cache_key] = material
-    return _add_video_segment(
-        project,
-        draft,
-        material,
-        track_name=LITE_TRACKS["original_video"],
-        timeline_start=timeline_start,
-        source_start=0.0,
-        duration=duration,
-        volume=0.0,
-    )
 
 
 def _add_audio_segment(
@@ -1438,13 +1438,16 @@ def _add_asset_segment(
 
 def _marker_items(
     marker_type: Any,
-    request: RevisionRequest,
+    execution_request: RevisionRequest,
     doc_items: Optional[List[RevisionReviewItem]],
     timeline_duration: float,
+    *,
+    marker_source_request: Optional[RevisionRequest] = None,
 ) -> Tuple[List[Any], List[Dict[str, Any]], List[str]]:
+    source_request = marker_source_request or execution_request
     plan = map_marker_plan_to_timeline(
-        build_marker_plan(request, doc_items=doc_items),
-        request,
+        build_marker_plan(source_request, doc_items=doc_items),
+        execution_request,
     )
     markers: List[Any] = []
     warnings: List[str] = []
@@ -1594,6 +1597,9 @@ def _validate_lite_content(
     audio_duration: Optional[float] = None,
     pause_adjustments: Optional[List[Any]] = None,
     pause_receipts: Optional[List[Dict[str, Any]]] = None,
+    segment_receipts: Optional[List[Dict[str, Any]]] = None,
+    source_video_material_id: str = "",
+    source_video_path: str = "",
 ) -> Dict[str, Any]:
     errors: List[str] = []
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
@@ -1621,21 +1627,74 @@ def _validate_lite_content(
             errors.append(f"Lite track {name} has type {track.get('type')!r}, expected {track_type!r}.")
 
     pauses = list(pause_adjustments or [])
+    pause_receipt_rows = list(pause_receipts or [])
+    segment_receipt_rows = list(segment_receipts or [])
+    if pauses:
+        errors.append(
+            "Lite draft must not contain executable pause_adjustments; "
+            "pause changes are label-only."
+        )
+    if pause_receipt_rows:
+        errors.append(
+            "Lite draft must not contain pause_receipts; pause changes are label-only."
+        )
+    if any(
+        str(receipt.get("kind") or "").strip().casefold() == "semantic_pause_hold"
+        for receipt in segment_receipt_rows
+    ):
+        errors.append("Lite draft must not contain semantic_pause_hold segments.")
+
     expected_timeline_duration = _lite_timeline_duration(total_duration, pauses)
     saved_duration = int(content.get("duration", 0) or 0) / 1_000_000.0
     if abs(saved_duration - expected_timeline_duration) > 0.01:
         errors.append(
-            "Lite draft duration changed: expected source duration plus explicit added pauses "
+            "Lite draft duration changed: expected unchanged source duration "
             f"({expected_timeline_duration:.3f}s), found {saved_duration:.3f}s."
         )
     if (content.get("config") or {}).get("maintrack_adsorb") is not False:
         errors.append("Lite split-gap draft must save maintrack_adsorb=false.")
 
-    pause_segment_ids = {
-        str(receipt.get("segment_id") or "")
-        for receipt in (pause_receipts or [])
-        if str(receipt.get("segment_id") or "")
-    }
+    expected_source_material_id = str(source_video_material_id or "").strip()
+    if not expected_source_material_id:
+        errors.append("Lite validation requires the source video material ID.")
+    else:
+        video_materials = [
+            material
+            for material in (content.get("materials") or {}).get("videos", []) or []
+            if isinstance(material, dict)
+            and str(material.get("id") or material.get("material_id") or "").strip()
+            == expected_source_material_id
+        ]
+        if len(video_materials) != 1:
+            errors.append(
+                "Lite source video material is missing or duplicated: "
+                f"{expected_source_material_id}."
+            )
+        elif source_video_path:
+            saved_path = str(video_materials[0].get("path") or "").strip()
+            expected_path = str(source_video_path).strip()
+            if (
+                not saved_path
+                or os.path.normcase(os.path.abspath(saved_path))
+                != os.path.normcase(os.path.abspath(expected_path))
+            ):
+                errors.append("Lite source video material path does not match project.source_video.")
+
+        for track_name in (LITE_TRACKS["original_video"], LITE_TRACKS["cut_segments"]):
+            track = by_name.get(track_name)
+            if track is None:
+                continue
+            mismatched = [
+                str(segment.get("id") or index + 1)
+                for index, segment in enumerate(track.get("segments") or [])
+                if str(segment.get("material_id") or "").strip()
+                != expected_source_material_id
+            ]
+            if mismatched:
+                errors.append(
+                    f"Lite {track_name} contains non-source video material: "
+                    + ", ".join(mismatched)
+                )
 
     def _track_windows(
         track_name: str,
@@ -1754,7 +1813,6 @@ def _validate_lite_content(
                 LITE_TRACKS["original_video"],
                 keep_video,
                 "V1",
-                exclude_segment_ids=pause_segment_ids,
             )
         cut_track = by_name.get(LITE_TRACKS["cut_segments"])
         if cut_track is not None:
@@ -1796,10 +1854,7 @@ def _validate_lite_content(
                         "A2 deleted-source audio must keep normal volume: "
                         + ", ".join(muted)
                     )
-        v1_windows = _track_windows(
-            LITE_TRACKS["original_video"],
-            exclude_segment_ids=pause_segment_ids,
-        )
+        v1_windows = _track_windows(LITE_TRACKS["original_video"])
         v2_windows = _track_windows(LITE_TRACKS["cut_segments"])
         a1_windows = _track_windows(LITE_TRACKS["source_audio"])
         a2_windows = _track_windows(LITE_TRACKS["reused_audio"])
@@ -1816,30 +1871,6 @@ def _validate_lite_content(
         if not _coverage_matches([*a1_windows, *a2_windows], audio_total):
             errors.append("A1 and A2 must cover the complete source audio exactly once.")
 
-        expected_pause_starts: List[Tuple[str, float, float]] = []
-        same_boundary_offsets: Dict[float, float] = {}
-        for pause in pauses:
-            boundary = round(float(pause.source_time), 6)
-            base = _map_lite_source_time(pause.source_time, pauses)
-            start = base + same_boundary_offsets.get(boundary, 0.0)
-            expected_pause_starts.append((str(pause.item_id or ""), start, float(pause.duration)))
-            same_boundary_offsets[boundary] = same_boundary_offsets.get(boundary, 0.0) + float(
-                pause.duration
-            )
-        actual_pause_by_item = {
-            str(receipt.get("item_id") or ""): receipt for receipt in (pause_receipts or [])
-        }
-        for item_id, expected_start, expected_duration in expected_pause_starts:
-            receipt = actual_pause_by_item.get(item_id)
-            if not receipt:
-                errors.append(f"Lite pause hold is missing for {item_id or '<unidentified>'}.")
-                continue
-            if (
-                str(receipt.get("track_name") or "") != LITE_TRACKS["original_video"]
-                or abs(float(receipt.get("timeline_start") or 0.0) - expected_start) > 0.001
-                or abs(float(receipt.get("duration") or 0.0) - expected_duration) > 0.001
-            ):
-                errors.append(f"Lite pause hold {item_id or '<unidentified>'} is misaligned.")
     elif original is not None:
         segments = original.get("segments") or []
         if len(segments) != 1:
@@ -1947,17 +1978,21 @@ def execute_lite_revision_request(
             "delete clips before opening or writing a JianYing draft."
         )
 
-    # Validate audio evidence before filtering marker-only edits. An unresolved
-    # audio item still needs authoritative ASR (and must fail closed if absent),
-    # while a non-audio unresolved item is safely removed from the execution set.
-    if _requires_full_lite_acceptance(request, strict):
-        from utils.revision_evidence import normalize_pause_adjustments
-
-        request = normalize_pause_adjustments(request)
-
+    # Validate audio evidence before filtering marker-only edits. Pause timing
+    # remains ASR-bound even though Lite never writes a hold or changes duration.
+    marker_source_request = request
     _validate_lite_audio_timing_sources(request, doc_items)
     _validate_spoken_cut_alignment(request, doc_items)
-    request, skipped_label_only_item_ids = _filter_lite_execution_edits(request, doc_items)
+    (
+        request,
+        label_only_item_ids,
+        unresolved_label_only_item_ids,
+        pause_label_only_item_ids,
+    ) = _prepare_lite_execution_request(request, doc_items)
+    if request.pause_adjustments:
+        raise RuntimeError(
+            "Lite execution policy error: pause_adjustments remained after label-only filtering."
+        )
 
     # Keep the lite timeline contract, but do not silently bypass the full
     # workflow's evidence/preflight gates when a compiled job asks for them.
@@ -1991,6 +2026,10 @@ def execute_lite_revision_request(
         if localize_materials and not mock_media:
             request, localized_materials = _localize_lite_request_materials(
                 request, project.draft_dir
+            )
+        if request.pause_adjustments:
+            raise RuntimeError(
+                "Lite execution policy error: material localization restored pause_adjustments."
             )
         declared_duration = float(request.project.media_duration_seconds or 0.0)
         total_duration = declared_duration
@@ -2071,77 +2110,21 @@ def execute_lite_revision_request(
             _complement_windows(delete_windows, total_duration),
             request.pause_adjustments,
         )
-        v1_operations: List[Tuple[float, str, Any]] = [
-            (
-                _map_lite_source_time(
+        for keep_start, keep_end in keep_video_windows:
+            _add_video_segment(
+                project,
+                draft,
+                video_material,
+                track_name=LITE_TRACKS["original_video"],
+                timeline_start=_map_lite_source_time(
                     keep_start,
                     request.pause_adjustments,
                     include_at_point=True,
                 ),
-                "source",
-                (keep_start, keep_end),
+                source_start=keep_start,
+                duration=keep_end - keep_start,
+                volume=0.0,
             )
-            for keep_start, keep_end in keep_video_windows
-        ]
-        same_boundary_offsets: Dict[float, float] = {}
-        for pause in request.pause_adjustments:
-            boundary = round(float(pause.source_time), 6)
-            pause_start = _map_lite_source_time(
-                pause.source_time,
-                request.pause_adjustments,
-            ) + same_boundary_offsets.get(boundary, 0.0)
-            same_boundary_offsets[boundary] = same_boundary_offsets.get(boundary, 0.0) + float(
-                pause.duration
-            )
-            v1_operations.append((pause_start, "pause", pause))
-
-        for timeline_start, operation, payload in sorted(
-            v1_operations,
-            key=lambda row: (row[0], 0 if row[1] == "pause" else 1),
-        ):
-            if operation == "source":
-                keep_start, keep_end = payload
-                _add_video_segment(
-                    project,
-                    draft,
-                    video_material,
-                    track_name=LITE_TRACKS["original_video"],
-                    timeline_start=timeline_start,
-                    source_start=keep_start,
-                    duration=keep_end - keep_start,
-                    volume=0.0,
-                )
-                continue
-            pause = payload
-            hold_segment = _add_lite_pause_hold(
-                project,
-                draft,
-                mock_video,
-                frame_path=pause.frame_path,
-                timeline_start=timeline_start,
-                duration=float(pause.duration),
-                mock_media=mock_media,
-                material_cache=visual_material_cache,
-            )
-            receipt = {
-                "item_id": pause.item_id,
-                "kind": "semantic_pause_hold",
-                "requested_source_time": pause.requested_source_time,
-                "source_time": pause.source_time,
-                "frame_source_time": pause.frame_source_time,
-                "timeline_start": timeline_start,
-                "timeline_end": timeline_start + float(pause.duration),
-                "duration": float(pause.duration),
-                "frame_path": pause.frame_path,
-                "frame_sha256": pause.frame_sha256,
-                "reason": pause.reason,
-                "boundary_evidence": dict(pause.boundary_evidence),
-                "segment_id": str(getattr(hold_segment, "segment_id", "")),
-                "material_id": str(getattr(hold_segment, "material_id", "")),
-                "track_name": LITE_TRACKS["original_video"],
-            }
-            pause_receipts.append(receipt)
-            segment_receipts.append(receipt)
 
         for window in delete_window_items:
             target_start = _map_lite_source_time(
@@ -2508,6 +2491,7 @@ def execute_lite_revision_request(
             request,
             doc_items,
             timeline_duration,
+            marker_source_request=marker_source_request,
         )
         # Lite labels use independent Delete/Visual/Animation track families.
         # The full workflow keeps the default dynamic horizontal layout.
@@ -2525,6 +2509,10 @@ def execute_lite_revision_request(
             }
             for item in marker_receipts
         ]
+        if pause_receipts:
+            raise RuntimeError(
+                "Lite execution policy error: pause receipts were created for label-only items."
+            )
 
         save_result = project.save(auto_retain=False)
         variants = _load_content_variants(save_result)
@@ -2541,6 +2529,11 @@ def execute_lite_revision_request(
                 audio_duration=source_audio_duration,
                 pause_adjustments=request.pause_adjustments,
                 pause_receipts=pause_receipts,
+                segment_receipts=segment_receipts,
+                source_video_material_id=str(
+                    getattr(video_material, "material_id", "")
+                ),
+                source_video_path=request.project.source_video,
             )
             validations.append((variant_name, variant_validation))
         primary_name, primary_validation = validations[0]
@@ -2575,28 +2568,17 @@ def execute_lite_revision_request(
         )
         from utils.revision_runner import (
             RevisionAcceptanceError,
-            _merge_pause_results_into_items,
             _merge_visual_results_into_items,
-            _request_with_pause_results,
             _request_with_visual_results,
         )
         from utils.revision_validation import validate_revision_acceptance_variants
 
         validation_request = _request_with_visual_results(request, visual_results)
-        validation_request = _request_with_pause_results(
-            validation_request,
-            pause_receipts,
-        )
         validation_doc_items = (
             _merge_visual_results_into_items(doc_items, visual_results)
             if doc_items is not None
             else None
         )
-        if validation_doc_items is not None:
-            validation_doc_items = _merge_pause_results_into_items(
-                validation_doc_items,
-                pause_receipts,
-            )
         if _requires_full_lite_acceptance(validation_request, strict):
             acceptance_validation = validate_revision_acceptance_variants(
                 validation_request,
@@ -2667,11 +2649,13 @@ def execute_lite_revision_request(
             "draft_path": save_result.get("draft_path", ""),
             "source_duration_seconds": total_duration,
             "timeline_duration_seconds": timeline_duration,
-            "added_pause_duration_seconds": timeline_duration - total_duration,
+            "added_pause_duration_seconds": 0.0,
             "tracks": list(LITE_TRACKS.values()),
             "segment_receipts": segment_receipts,
             "pause_results": pause_receipts,
-            "label_only_unresolved_item_ids": skipped_label_only_item_ids,
+            "label_only_item_ids": label_only_item_ids,
+            "label_only_unresolved_item_ids": unresolved_label_only_item_ids,
+            "label_only_pause_item_ids": pause_label_only_item_ids,
             "localized_materials": localized_materials,
             "visual_overlay_results": visual_results,
             "review_marker_count": len(marker_receipt_dicts),

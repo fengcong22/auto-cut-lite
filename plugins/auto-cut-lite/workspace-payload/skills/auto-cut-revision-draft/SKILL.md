@@ -19,11 +19,12 @@ focused visual skill. It overrides full-workflow visual instructions and accepta
    the final ASR-resolved cut start rather than the review timestamp.
 4. Insert only supplied local pointer/image assets, at their requested starts, with default
    geometry and no keyframes.
-5. Keep animation/picture-timing, text-position/animation, and existing-hand cleanup items
-   label-only.
-6. Save the editable split-gap draft with source duration unchanged when no pause is added; an
-   explicit `+Ns` pause extends the project by `N` seconds and shifts every later track, asset,
-   and label by the cumulative added time. Keep isolated marker families.
+5. Keep animation/picture-timing, text-position/animation, existing-hand cleanup, and every pause
+   addition/extension/shortening/adjustment item label-only. Resolve a pause label with ASR; never
+   create a pause edit.
+6. Save the editable split-gap draft with final duration equal to source duration. Do not create
+   `pause_adjustments`, holds, still frames, audio gaps, duration changes, or later-track offsets.
+   Keep isolated marker families.
 7. Validate root and active timeline content, source coverage, audio evidence, asset start
    alignment, default visual geometry, forbidden Lite outputs, and package integrity when
    delivery was requested.

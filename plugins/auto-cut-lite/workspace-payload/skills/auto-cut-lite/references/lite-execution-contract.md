@@ -15,7 +15,8 @@ user-selected subskill whenever `workflow_mode=lite`.
 | Existing-hand occlusion, removal, cleanup, clean-cover, or residual cleanup | Keep one two-second label whose text is exactly `source_text` at the requested start | `false` | Label only; no cleanup evidence |
 | Text/sticker safe-zone movement or text/flower intro/outro animation | Keep one two-second label whose text is exactly `source_text` at the requested start | `false` | Label only; no field mutation or animation evidence |
 | Spoken deletion | Resolve the real cut with word/character ASR, then execute the editable cut | `true` | ASR cut, must-keep, reverse-validation, and editable-cut gates; label starts at the ASR cut |
-| Semantic pause, pronunciation, breath, mouth noise, or other audio-identifiable timing | Resolve the actual word/character or adjacent-utterance boundary with source ASR | `true` | Both execution and label start use the ASR boundary; a requested `+Ns` pause adds `N` seconds to the existing pause |
+| Add, extend, shorten, or otherwise adjust a pause, including `semantic_pause_adjustment` | Resolve the actual word/character or adjacent-utterance boundary with source ASR, then keep one exact `source_text` label | `false` | Label-only at the ASR boundary; no pause edit, hold, still frame, gap, duration change, or later-track offset |
+| Pronunciation, breath, mouth noise, or other audio-identifiable timing | Resolve the actual word/character boundary with source ASR | Per maintained audio rule | The label starts at the ASR boundary; unsupported execution falls back to the documented label-only rule |
 | Completely non-speech item | Parse the review timestamp or explicitly requested target | Per visual rule | Point timestamps are valid; `old time ... 提前到 target` uses the target |
 | New or unrecognized issue with reliable authoritative time but no safe maintained implementation | Keep one label whose visible text is exactly `source_text`; skip ad-hoc execution | `false` | Record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports and continue independent items |
 | Item without reliable authoritative time, or audio-identifiable item without authoritative ASR | Do not create or update the draft | N/A | Fail before draft open/write; never guess a review time or `0:00` |
@@ -34,7 +35,7 @@ For every supplied visual asset:
 - do not calibrate size, move the asset, target a hotspot, optimize landing, or infer a subject;
 - do not read or require subject profiles, project bindings, screenshots, opened-editor evidence,
   lifecycle receipts, target geometry, or pointer-placement receipts;
-- clamp only the pause-mapped target duration to the final project duration.
+- clamp only the source-aligned target duration to the source-length project duration.
 
 If a requested pointer or image asset is unavailable, keep the verbatim label, report that the
 asset was not inserted, and do not start profile onboarding or synthesize a substitute.
@@ -61,8 +62,10 @@ correct Lite output.
   internal request metadata, marker receipts, validation output, and reports. Never prefix,
   suffix, replace, or otherwise annotate a visible label with them.
 - For every audio-identifiable issue, the review-document timestamp is only a search hint. Start
-  the label at the final word/character ASR-resolved window or point, which must equal the saved
-  edit/pause boundary. Never start an audio label from the rough review timestamp when ASR differs.
+  the label at the final word/character ASR-resolved window or point. For an executable audio item
+  this equals its saved edit boundary; for every pause request it is the label point only because
+  Lite creates no pause edit. Never start an audio label from the rough review timestamp when ASR
+  differs.
 - For spoken deletion specifically, this remains the word/character ASR-resolved cut start.
 - Only completely non-speech items use review timestamps. Prefer a requested target after cues
   such as `提前到`, `推迟到`, `移到`, or `调到`; a point timestamp is sufficient.
@@ -71,9 +74,10 @@ correct Lite output.
   `label_only_unresolved`, which is allowed only after authoritative time is reliable.
 - Put animation/timing labels on `Review Marker Animation N`, supplied visual/pointer labels on
   `Review Marker Visual N`, and other review-only items on the documented fallback family.
-- Start each label at the source item's authoritative source start mapped through preceding added
-  pauses and use two seconds unless clamped by the final project end. The pause item's own label
-  stays at its insertion boundary before the new hold. Spoken deletion uses the ASR-resolved cut.
+- Start each label at the source item's authoritative source start without a pause-derived offset
+  and use two seconds unless clamped by the source-length project end. A pause item's label starts
+  at its ASR-resolved point even though no pause edit exists. Spoken deletion uses the ASR-resolved
+  cut.
 - Lite strict acceptance removes full visual, pointer, and animation gates. It must not reject a
   correct label-only animation, safe-zone, or cleanup item as marker-only.
 - Execution-required visual items still need a real editable asset segment with matching item ID,
@@ -83,18 +87,19 @@ correct Lite output.
 These rules do not weaken spoken-word deletion, audio restoration, source preservation, marker
 coverage, editable structure, package integrity, or portable-delivery checks.
 
-## Timeline Duration And Pause Mapping
+## Timeline Duration And Pause Labels
 
-- Delete windows remain on the editable timeline and do not compress it. With no added semantic
-  pause, final project duration equals source duration.
-- A semantic-pause `duration` is the amount added to the existing source pause, not the desired
-  total pause. `+1s` therefore preserves the existing pause and inserts one additional second.
-- Final duration equals source duration plus the sum of added-pause durations. Apply the same
-  cumulative added-pause offset to every later V1/V2/A1/A2 target range, visual asset, and review
-  label. The inserted hold is an editable still-frame segment.
-- Source ranges always remain in the source timebase; only target timeline ranges receive the
-  cumulative offset. Validation checks the identical mapping across video, audio, visuals, and
-  markers.
+- Delete windows remain on the editable timeline and do not compress it. Final project duration
+  always equals source duration.
+- Every request to add, extend, shorten, or otherwise adjust a pause is non-executing in Lite.
+  This includes `+1s`, `-1s`, and input named `semantic_pause_adjustment`.
+- Resolve the pause request's real adjacent-utterance point with authoritative word/character ASR,
+  then place exactly one visible label equal only to `source_text` at that source-aligned point.
+- Do not emit executable `pause_adjustments`, a hold, a still-frame pause segment, an audio gap, or
+  any pause-derived target mapping. Do not change project duration or shift a later V1/V2/A1/A2
+  range, visual asset, or review label.
+- Source and target ranges remain on the same source-aligned timebase. Strict acceptance rejects
+  any pause-derived duration extension or offset.
 - `lite_cut_layout=copy` is historical read/validation compatibility only. Reject it before every
   new Lite execution; new tasks use `split_gap`.
 
@@ -106,7 +111,7 @@ coverage, editable structure, package integrity, or portable-delivery checks.
   windows from different items remain separate; true cross-item overlap fails before draft writing
   and requires disambiguation.
 - Each A2 source range equals the corresponding V2 source window, and each A2 target range equals
-  the same pause-mapped V2 target window. A2 volume remains `1.0`.
+  the same source-aligned V2 target window. A2 volume remains `1.0`.
 - Reject pending or empty segmented plans, full-length/continuous/cross-item-merged or muted A2,
   extra A2 clips, and any plan whose A1/A2 windows do not match the authoritative delete layout.
 

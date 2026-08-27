@@ -14,15 +14,15 @@ pointer, and animation acceptance.
 
 - the saved draft and declared active timeline exist and agree;
 - source media, editable tracks, split-gap cut structure, separated/reused audio, and the Lite
-  duration contract satisfy the draft contract (source duration when no added pause, source plus
-  explicit added-pause time otherwise);
+  duration contract satisfy the draft contract: final duration always equals source duration;
 - every source review item has one start-aligned verbatim marker; every audio-identifiable item
   is aligned to its final ASR-resolved window or point, not the rough review timestamp; only a
   completely non-speech item may use the review timestamp or requested target;
 - no unresolved item falls back to `0:00`;
 - spoken deletions retain ASR boundary, delete/must-keep, reverse-ASR, and semantic-join evidence;
-- semantic pauses and other audio-identifiable timing retain authoritative source-ASR identity
-  and boundary evidence;
+- pause additions, extensions, shortenings, and adjustments retain authoritative source-ASR
+  identity and boundary evidence for their labels, remain `execution_required=false`, and create
+  no executable pause edit;
 - A2 contains exactly one independent, audible source-aligned clip per logical ASR/V2 delete
   window, with no pending/empty plan and no full-length, continuous, muted, or cross-item-merged
   A2 segment;
@@ -34,6 +34,8 @@ pointer, and animation acceptance.
   `execution_required=false` and represented by their labels;
 - no `Lite Timing Adjusted`, animation overlay, clean-cover/cleanup layer, pointer movement,
   transformed visual, or visual keyframe was produced;
+- no `pause_adjustments`, hold, still-frame pause segment, inserted audio gap, pause-derived
+  duration change, or later-track offset was produced;
 - portable delivery, when requested, passes CRC, isolated extraction, tree-hash, relink-tool,
   local-material, and external-receipt checks.
 
@@ -42,5 +44,6 @@ animation stable-frame evidence, opened JianYing screenshots, or target-open pro
 Lite acceptance. Do not fail a correct label-only Lite item merely because it has no execution
 evidence.
 
-Report draft path, item coverage, audio result, executed supplied assets, label-only visual items,
-forbidden-output checks, root/active-timeline status, and ZIP/receipt hashes when applicable.
+Report draft path, item coverage, audio result, executed supplied assets, label-only visual and
+pause items, source-equals-final duration, forbidden-output checks, root/active-timeline status,
+and ZIP/receipt hashes when applicable.

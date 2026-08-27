@@ -13,7 +13,7 @@ comments are label-only in Lite:
 
 - set `execution_required=false`;
 - preserve one two-second label whose visible text is exactly the source item's `source_text` at
-  the requested start (or its pause-mapped start);
+  the requested source-aligned start; Lite pause requests never offset later labels;
 - do not change text or sticker coordinates, transforms, scale, `anim_in`, `anim_out`, or any
   animation material;
 - do not compensate for save-time drift or request opened-editor screenshots.

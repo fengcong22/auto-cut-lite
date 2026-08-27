@@ -8,7 +8,9 @@ from utils.revision_models import (
     RevisionRequest,
     RevisionReviewItem,
     _collect_delete_windows,
+    lite_pause_change_is_label_only,
     lite_timing_source,
+    review_item_execution_status,
 )
 
 _REVIEW_ID_PATTERN = re.compile(r"(修改|校对)\s*0*(\d+)", re.IGNORECASE)
@@ -31,22 +33,7 @@ class MarkerPlanItem:
 
 
 def _execution_status_from_source_item(source_item: RevisionReviewItem) -> str:
-    direct_status = getattr(source_item, "execution_status", "")
-    if direct_status is not None and str(direct_status).strip():
-        return str(direct_status).strip()
-
-    for metadata in (source_item.evidence, source_item.validation):
-        if not isinstance(metadata, dict):
-            continue
-        explicit_status = metadata.get("execution_status")
-        if explicit_status is not None and str(explicit_status).strip():
-            return str(explicit_status).strip()
-        # Generic status is accepted only for the dedicated label-only state;
-        # ASR and validation pass/fail statuses remain unrelated metadata.
-        generic_status = metadata.get("status")
-        if str(generic_status or "").strip().casefold() == "label_only_unresolved":
-            return "label_only_unresolved"
-    return ""
+    return review_item_execution_status(source_item)
 
 
 def _deleted_duration_before(point: float, delete_windows: List[List[float]]) -> float:
@@ -71,17 +58,12 @@ def _inserted_duration_before(point: float, request: RevisionRequest) -> float:
 def map_marker_plan_to_timeline(
     plan: Sequence[MarkerPlanItem], request: RevisionRequest
 ) -> List[MarkerPlanItem]:
-    # Lite never subtracts deleted duration. Explicitly added pauses do extend the
-    # timeline, however, so every later label moves by the cumulative added hold.
-    # A label exactly on a pause boundary stays before that hold. Map only the
-    # start: an inserted hold must not stretch a fixed-duration review label.
+    # Lite never compresses deletion windows or executes pause-duration changes.
+    # Marker starts therefore remain on their authoritative source-time boundary.
     if str(getattr(request, "workflow_mode", "") or "").strip().casefold() == "lite":
         mapped_plan: List[MarkerPlanItem] = []
         for item in plan:
-            mapped_start = max(
-                0.0,
-                item.start + _inserted_duration_before(item.start, request),
-            )
+            mapped_start = max(0.0, item.start)
             mapped_plan.append(
                 replace(
                     item,
@@ -734,6 +716,13 @@ def build_marker_plan(
 
         actions = action_index.get(normalized_item_id, [])
         source_kind = str(source_item.kind or "").strip().casefold()
+        execution_status = _execution_status_from_source_item(source_item)
+        if (
+            request.workflow_mode == "lite"
+            and lite_pause_change_is_label_only(source_kind, source_item.source_text)
+            and not execution_status.casefold().startswith("label_only_")
+        ):
+            execution_status = "label_only_lite_policy"
         asr_aligned_lite_marker = request.workflow_mode == "lite" and (
             lite_timing_source(source_kind, source_item.source_text) == "asr"
         )
@@ -785,7 +774,7 @@ def build_marker_plan(
                 verbatim_status=verbatim_status,
                 source=str(source_item.source or ""),
                 kind=str(source_item.kind or "review_only"),
-                execution_status=_execution_status_from_source_item(source_item),
+                execution_status=execution_status,
             )
         )
 

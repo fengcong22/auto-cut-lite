@@ -137,7 +137,7 @@ class TestReviewMarkerRendering(unittest.TestCase):
 
         self.assertEqual([(item.start, item.end) for item in mapped], [(5.0, 7.0)])
 
-    def test_lite_marker_mapping_adds_only_prior_pause_duration(self):
+    def test_lite_marker_mapping_ignores_label_only_pause_duration(self):
         request = RevisionRequest(
             project=RevisionProject(
                 draft_name="LiteMarkerPauseMapping",
@@ -177,10 +177,10 @@ class TestReviewMarkerRendering(unittest.TestCase):
 
         self.assertEqual(
             [(item.start, item.end) for item in mapped],
-            [(2.0, 2.5), (6.25, 6.75)],
+            [(2.0, 2.5), (5.0, 5.5)],
         )
 
-    def test_lite_marker_on_pause_boundary_stays_two_seconds_before_hold(self):
+    def test_lite_marker_on_pause_boundary_stays_at_source_time(self):
         request = RevisionRequest(
             project=RevisionProject(
                 draft_name="LiteMarkerPauseBoundary",

@@ -7,8 +7,8 @@ Use this checklist together with the
 
 - The latest source ledger supplies unique stable item IDs and verbatim source text.
 - Root and active timeline drafts exist and agree.
-- Project duration equals source duration when no pause is added, otherwise source duration plus
-  the sum of explicit added-pause durations. Deletions never compress the Lite timeline.
+- Project duration equals source duration even when a review asks to add, extend, shorten, or
+  otherwise adjust a pause. Deletions never compress the Lite timeline.
 - Required editable video/audio/marker tracks and split-gap cut boundaries exist.
 - One start-aligned, at-most-two-second verbatim label exists per source item. Completely
   non-speech point timestamps are valid; target wording such as `07:14 ... 提前到 07:12`
@@ -19,15 +19,19 @@ Use this checklist together with the
 - Every issue locatable through speech or audio uses word/character ASR boundaries, not review
   timestamps. This includes spoken cuts, semantic pauses, pronunciation, breath, mouth noise,
   and speech timing.
-- Audio-related labels start at the same ASR-resolved window or point as the saved edit/pause,
-  even when the review-document timestamp differs.
+- Audio-related labels start at the ASR-resolved window or point even when the review-document
+  timestamp differs. A pause request has no saved edit; its ASR point is used only for its label.
 - Delete and `must_keep` contracts match the physical cut windows.
 - Reverse-ASR, candidate decode, segmented-audio, and semantic-join checks pass when required.
 - A1 equals the complement of logical ASR delete windows. A2 has exactly one independent, audible
-  clip per logical ASR/V2 delete window with matching source start and pause-mapped timeline start
+  clip per logical ASR/V2 delete window with matching source start and source-aligned timeline start
   and duration. Same-item overlaps may merge; adjacent different-item windows stay separate and
   true cross-item overlaps fail. Pending, empty, full-length, continuous, muted, extra, or
   differently merged A2 delivery fails.
+- Every pause addition, extension, shortening, or adjustment is `execution_required=false` and has
+  exactly one source-text-only label at its authoritative ASR point.
+- No executable `pause_adjustments`, hold, still-frame pause segment, inserted audio gap,
+  pause-derived duration change, or offset to a later track, asset, or label exists.
 
 ## Lite Visual Behavior
 

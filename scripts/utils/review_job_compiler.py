@@ -25,6 +25,7 @@ from utils.revision_models import (
     _looks_execution_required,
     _normalize_review_id,
     lite_execution_required,
+    lite_pause_change_is_label_only,
     lite_timing_source,
 )
 from utils.revision_validation import derive_acceptance_profile
@@ -631,24 +632,39 @@ def _canonical_review_items(
                 inference_text, kind, explicit_kind=explicit_kind
             )
         execution_required = _execution_required_for_kind(kind, execution_required)
-        execution_status = str(
-            source_row.get("execution_status")
-            or (
+        execution_status_candidates = [
+            source_row.get("execution_status"),
+            (
                 source_row.get("evidence", {}).get("execution_status")
                 if isinstance(source_row.get("evidence"), dict)
                 else ""
-            )
-            or (
+            ),
+            (
                 source_row.get("validation", {}).get("execution_status")
                 if isinstance(source_row.get("validation"), dict)
                 else ""
-            )
-            or ""
-        ).strip()
+            ),
+        ]
+        normalized_statuses = [
+            str(status or "").strip()
+            for status in execution_status_candidates
+            if str(status or "").strip()
+        ]
+        execution_status = next(
+            (
+                status
+                for status in normalized_statuses
+                if status.casefold().startswith("label_only_")
+            ),
+            normalized_statuses[0] if normalized_statuses else "",
+        )
         if workflow_mode == "lite":
+            if lite_pause_change_is_label_only(kind, source_text):
+                if not execution_status.casefold().startswith("label_only_"):
+                    execution_status = "label_only_lite_policy"
             execution_required = (
                 False
-                if execution_status.casefold() == "label_only_unresolved"
+                if execution_status.casefold().startswith("label_only_")
                 else lite_execution_required(
                     kind,
                     source_text,

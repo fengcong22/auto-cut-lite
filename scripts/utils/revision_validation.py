@@ -69,7 +69,8 @@ from utils.revision_models import (
     _replacement_audio_paths_for_request,
     _visual_plan_segments,
     build_revision_summary,
-    lite_execution_required,
+    lite_review_item_execution_required,
+    review_item_execution_status,
 )
 
 
@@ -81,17 +82,7 @@ def _effective_lite_execution_required(item: RevisionReviewItem) -> bool:
     the status authoritative at the validation boundary as well.
     """
 
-    statuses = [getattr(item, "execution_status", "")]
-    for payload in (getattr(item, "evidence", None), getattr(item, "validation", None)):
-        if isinstance(payload, dict):
-            statuses.append(payload.get("execution_status", ""))
-    if any(str(status or "").strip().casefold() == "label_only_unresolved" for status in statuses):
-        return False
-    return lite_execution_required(
-        item.kind,
-        item.source_text,
-        item.execution_required,
-    )
+    return lite_review_item_execution_required(item)
 
 _SUBJECT_POINTER_BINDINGS_MODULE: Optional[ModuleType] = None
 _LOCAL_TRANSCRIPT_FIELDS = (
@@ -2435,7 +2426,10 @@ def _merge_unique_review_items(
             evidence=evidence,
             validation=validation,
             verbatim_status=verbatim_status,
-            execution_status=(source_item.execution_status or item.execution_status),
+            execution_status=(
+                review_item_execution_status(source_item)
+                or review_item_execution_status(item)
+            ),
         )
     return list(merged.values())
 
@@ -3093,7 +3087,9 @@ def _acceptance_route_records(
                 kind_source = (kind_source + "+edit_source_kind").strip("+")
             kind_source = (kind_source + "+concrete_operation").strip("+")
 
-        if not execution_required and not operation_tokens:
+        if not execution_required and (
+            request.workflow_mode == "lite" or not operation_tokens
+        ):
             classification = {
                 **classification,
                 "known": True,
@@ -4536,6 +4532,8 @@ def _semantic_pause_main_video_problems(
     request: RevisionRequest,
     content: Dict[str, Any],
 ) -> List[str]:
+    if request.workflow_mode == "lite":
+        return []
     if not request.pause_adjustments or not request.pause_alignment:
         return []
     tracks = content.get("tracks") or []

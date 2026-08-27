@@ -99,9 +99,10 @@ When returning a revision result, report:
 - Convert every review comment into `clip_id`, `source`, `rough_time`, `delete`, `must_keep`, `strategy`, `accepted_tradeoffs`, and `validation`.
 - In Lite mode, every issue that can be located from speech or audio must use configured Chinese
   word/character ASR before either execution or label placement. This includes spoken deletion,
-  semantic pause insertion/adjustment, pronunciation, breath, mouth noise, and speech timing.
-  The review timestamp is only a search hint; the final edit and label start use the ASR-resolved
-  boundary. Missing authoritative ASR fails before any draft is opened or written.
+  pause addition/extension/shortening/adjustment, pronunciation, breath, mouth noise, and speech
+  timing. The review timestamp is only a search hint. Spoken deletion uses the ASR-resolved
+  boundary for the edit and label; every pause request uses it only for a verbatim label and is
+  never executed in Lite. Missing authoritative ASR fails before any draft is opened or written.
 - Only a completely non-speech review item may use the timestamp written in the review comment.
   For target wording such as `07:14 ... 提前到 07:12`, use the requested target `07:12`.
   A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
@@ -122,14 +123,15 @@ When returning a revision result, report:
 
 ## Lite Timeline Duration And Layout
 
-- Lite deletion never compresses the timeline. With no added semantic pause, final project duration
-  equals source duration even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
-- A semantic-pause `duration` is added hold time, not the total desired pause. A request for
-  `+1s` preserves the source pause and adds one second, so final duration increases by exactly one
-  second. Multiple additions accumulate.
-- Apply the cumulative added-pause offset to every later V1/V2/A1/A2 segment, visual asset, and
-  review label. Keep the pause item's own label at the insertion boundary before its added hold;
-  use an editable still-frame segment for the hold.
+- Lite deletion never compresses the timeline, and Lite never executes a request to add, extend,
+  shorten, or otherwise adjust a pause. Final project duration therefore equals source duration
+  even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
+- Treat every pause request, including `+1s`, `-1s`, and `semantic_pause_adjustment`, as
+  label-only. Resolve its authoritative point with word/character ASR, then place exactly one
+  visible label equal only to `source_text` at that point.
+- Do not create a pause edit, `pause_adjustments` row, hold, still-frame segment, audio gap, or
+  time offset. Do not change total duration or move any later V1/V2/A1/A2 segment, visual asset,
+  or review label because of a pause request.
 - `lite_cut_layout=copy` is historical read/validation compatibility only. Reject it for every new
   Lite execution; new tasks must use `split_gap`.
 
