@@ -19,7 +19,9 @@ Use this checklist together with the
 - Every issue locatable through speech or audio attempts word/character ASR. Only a uniquely
   ASR-located spoken deletion may execute. A non-executing item uses the unique ASR point when
   available and otherwise the review-comment time.
-- Delete and `must_keep` contracts match the physical cut windows.
+- Delete and `must_keep` contracts match the authoritative source-aligned logical cut windows;
+  source media remains complete and the windows are visible through the complementary V1/V2 and
+  A1/A2 split traces.
 - Reverse-ASR, candidate decode, segmented-audio, and semantic-join checks pass when required.
 - A1 equals the complement of logical ASR delete windows. A2 has exactly one independent, audible
   clip per logical ASR/V2 delete window with matching source start and source-aligned timeline start
@@ -30,6 +32,8 @@ Use this checklist together with the
   one source-text-only label at its unique ASR point or review-time fallback.
 - No executable `pause_adjustments`, hold, still-frame pause segment, inserted audio gap,
   pause-derived duration change, or offset to a later track, asset, or label exists.
+- No spoken-delete item physically removes or compresses source media. Any reverse-ASR candidate is
+  a source-time-preserving diagnostic artifact only and is not a delivery/replacement track.
 
 ## Lite Visual Behavior
 

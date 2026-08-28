@@ -42,12 +42,17 @@ rules below replace any inherited full-workflow pause-mutation gate.
 - Main video track is not a single full-length baked preview for a multi-edit revision job.
 - Preview-style `Final Video` / `Final Audio` replacement tracks were not used as the final deliverable structure.
 
-For precise spoken-word revision:
+For precise spoken-word revision in Lite:
 
-- Physical delete windows are reflected in the main video segmentation.
-- The original separated audio remains available, usually muted as a reference track.
-- The processed audible narration is on a distinct replacement-audio track.
-- Exact duck/mute tail-cleanup windows, if used, are recorded in the audio report.
+- Authoritative ASR delete windows are reflected as source-time logical split boundaries in the
+  complementary V1/V2 video lanes; source media remains complete and the timeline is not
+  compressed.
+- A1 contains the complement of those windows and A2 contains one independent, audible,
+  source-aligned clip for each logical delete window. Neither lane is a flattened replacement.
+- Any complete reverse-ASR candidate is a source-time-preserving diagnostic artifact under `tmp/`;
+  it is never imported as a replacement-audio or delivery track.
+- Duck/mute, hard-mute, trim, speed, hold, still-frame, and other duration-changing cleanup is not
+  used to implement a Lite spoken deletion.
 - Post-delete pause requests are recorded separately from delete-window accuracy as non-executing
   source-text-only labels at unique ASR points or review-time fallbacks.
 - No pause shortening, extension, addition, `semantic_pause_adjustment`, visual-hold repair, or
@@ -57,7 +62,7 @@ For precise spoken-word revision:
 
 ## Cut Visibility
 
-- Zero-second trims or opening deletions still leave a visible first cut boundary.
+- Zero-length or edge-aligned logical windows still leave a visible first split boundary.
 - Split points introduced by review edits are still visible.
 - Adjacent segments were not merged in a way that hides edit evidence.
 - If the user asked to see the editing process, trace lanes or equivalent in-draft edit evidence exist.
@@ -95,7 +100,11 @@ For precise spoken-word revision:
 - Colored-span deletes are traceable as separate fragments instead of one collapsed sentence.
 - Gap-delete items preserve both anchor words.
 - Reverse ASR has no unresolved `fail` rows.
-- The full candidate is fully decoded, binds the normalized segmented plan digest, and covers its timeline after only exactly adjacent two-sided crossfades; isolated fades add no duration allowance, and every spoken-delete row's transcript, cut/join mapping, delete/keep hits, and semantic-join validation match the same item contract rather than a generic pass.
+- The source-time-preserving diagnostic candidate is fully decoded, binds the normalized segmented
+  plan digest, equals the source duration, and covers the source timeline after only exactly
+  adjacent two-sided crossfades; isolated fades add no duration allowance. Every spoken-delete
+  row's transcript, logical cut/join mapping, delete/keep hits, and semantic-join validation match
+  the same item contract rather than a generic pass. The diagnostic candidate is not delivery audio.
 - Same-word recurrence is only accepted when an adjudication explains why the hit belongs to a later kept phrase.
 - Pause-label validation reports every pause item as `execution_required=false`, with its stable item
   ID, exact `source_text`, selected ASR or review-time source, and marker receipt.

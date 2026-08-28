@@ -61,10 +61,11 @@
 - Do not start pointer-profile onboarding or require bindings, target geometry, lifecycle,
   hotspot, opened-editor, or screenshot evidence for a Lite editing request.
 - Every issue that can be located through speech or audio attempts authoritative ASR first.
-  Executable spoken deletion also retains must-keep, reverse-validation, and editable-cut
-  requirements. Only a uniquely word/character-ASR-located spoken deletion may execute, and its
-  label uses the resolved cut start. Every other audio or speech item is non-executing: use its
-  unique ASR point when available, otherwise use the time written in the review comment.
+  A uniquely word/character-ASR-located spoken deletion may execute only as a non-destructive
+  editable split/cut trace; source media remains complete, total duration stays unchanged, and
+  must-keep, boundary, and source-preservation checks still apply. Its label uses the resolved
+  cut start. Every other audio or speech item is non-executing: use its unique ASR point when
+  available, otherwise use the time written in the review comment.
 - Review-only, newly encountered, unrecognized, and ASR-unresolved non-executing items use
   review-comment timestamps. When a comment names an old time and a requested target such as
   `07:14 ... 提前到 07:12`, place the label at `07:12`. Point timestamps are valid label starts;

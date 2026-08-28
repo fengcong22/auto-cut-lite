@@ -12,7 +12,10 @@ Before executing this skill from the distributed plugin, read the [portable runt
 
 ## Overview
 
-Use this skill for review-document audio repair where the job is not generic denoise, but "read the comments, remove exactly the requested spoken words, preserve required neighboring words, validate the result, then append labeled deliverables back to the document."
+Use this skill for review-document audio alignment where the job is not generic denoise, but
+"read the comments, resolve exactly the requested spoken words, preserve required neighboring
+words, write a non-destructive editable split/cut trace, validate source preservation, then append
+labeled deliverables back to the document." In Lite, source media is never physically removed.
 
 Load `references/workflow.md` before executing a real review-document audio job.
 
@@ -21,7 +24,8 @@ Load `references/workflow.md` before executing a real review-document audio job.
 Use this skill when the request includes any of these signals:
 
 - Feishu/Lark document review comments with audio or video attachments
-- spoken-word deletion such as deleting filler words, repeated phrases, false starts, or tail phrases
+- spoken-word deletion requests such as filler words, repeated phrases, false starts, or tail
+  phrases; in Lite these become ASR-resolved logical cut boundaries only
 - post-delete pause requests that need an ASR-first, review-time-fallback source-text-only label
   without changing the timeline
 - review feedback such as "第二条", "第三条", "所以没有找回来", "语言被吞音"
@@ -38,7 +42,8 @@ Lite pause-label checks pass.
 
 Assign one strategy to every review item before cutting:
 
-- `precision_first`: delete only the requested phrase. Protect `must_keep` words even if the join sounds slightly less clean.
+- `precision_first`: resolve only the requested phrase's source window. Protect `must_keep` words
+  even if the trace boundary is less convenient; Lite never physically removes the window.
 - `hybrid`: use ASR boundaries plus small buffers, then tune by listening. This is the default when the review note is clear but not enough to justify removing extra words.
 - `listening_first`: optimize the spoken flow. This may remove short fillers, particles, or function words only when the review note or user preference allows that tradeoff.
 
@@ -102,15 +107,21 @@ If the review document contains blue or red deletion text, inspect the document 
 ## Cutting Rules
 
 - In Lite mode, attempt source word/character ASR for every issue locatable through speech or
-  audio. Only a uniquely ASR-located precise spoken deletion may execute. Semantic pauses,
+  audio. Only a uniquely ASR-located precise spoken deletion may execute as a non-destructive
+  editable split/cut trace. Semantic pauses,
   pronunciation, breath, mouth noise, speech timing, and every pause addition, extension,
   shortening, or adjustment are non-executing: use the unique ASR point when available and
   otherwise the review-comment time. Fail only when neither source supplies a valid time.
 
-- Use physical segment removal for spoken-word deletion, not denoise or hard mute, unless the target is pure breath/noise.
+- In Lite, do not use physical segment removal, denoise, or hard mute to implement a spoken-word
+  deletion. Preserve the source media and write the ASR-resolved logical split/cut trace instead.
+  Physical segment removal is a full-workflow-only operation and is outside this packaged Lite
+  contract.
 - When a reviewer marks a whole sentence/range for deletion, automatically include tightly adjacent oral fillers and discourse particles that belong to that removed range even if the written note did not spell them out. Examples include `啊`, `嗯`, `呃`, `呢`, `哈`, `这个`, `就是`, `然后`, `那`, `对吧`, and short phrases such as `坦率地讲哈` when they sit between the deleted sentence anchors. Record these as `auto_absorbed_fillers` in evidence.
 - Detached filler absorption is narrow. Only absorb oral residue that is not part of the kept sentence, such as an isolated `a/en/e/dui-ba` tail or a half-word left directly against the deleted range. Do not absorb normal neighboring content words such as `na`, `ye`, `da`, `ta`, `jin`, `tong`, `shang`, or `hou-mu` unless the user explicitly accepts that tradeoff.
-- Treat normal words on both sides of a cut as hard `must_keep` boundary words. If a wider physical cut would swallow a kept onset or tail, back the cut away and use a short post-splice exact duck/mute cleanup only for the proven residue.
+- Treat normal words on both sides of a logical boundary as hard `must_keep` context. If a wider
+  boundary would cross a kept onset or tail, narrow the trace; do not widen it and do not create a
+  physical cleanup to simulate deletion.
 - Short delete items must keep independent windows. Do not let a one-word or particle delete inherit a longer merged sentence window from an adjacent review item.
 - In Lite `split_gap`, write one independent A2 clip per merged authoritative delete window.
   Never replace these clips with one full-length/continuous A2 segment, and never accept a
@@ -124,12 +135,13 @@ If the review document contains blue or red deletion text, inspect the document 
   - normal spoken join: 25 to 35 ms
 - If a boundary risks swallowing an onset such as "语言", back the start/end window away and use a shorter crossfade.
 
-Separate timeline deletion from local audio cleanup:
+Separate logical cut tracing from local audio cleanup:
 
-- physical deletion must be used when requested spoken words should shorten video and audio
-  together; a pause timing request never authorizes physical deletion in Lite
-- exact duck/mute cleanup may be added after the splice for tail residue when further physical deletion would swallow a protected next word
-- document the post-splice cleanup as an exact window with the source reason, target phrase, gain, and fade
+- Lite never shortens video or audio for a spoken deletion. Record the ASR-resolved source window as
+  a non-destructive split/cut trace; a pause timing request remains label-only and never authorizes
+  a physical operation.
+- Do not add a duck/mute cleanup to imitate physical deletion in Lite. Any independently requested
+  non-duration audio cleanup follows its own maintained routing and must not alter project duration.
 
 Route every Lite pause request separately from deletion correctness:
 
@@ -152,7 +164,9 @@ Route every Lite pause request separately from deletion correctness:
 
 After processing every clip:
 
-- Any spoken-audio change retains one final full-candidate reverse ASR over the delivered candidate.
+- Any spoken-audio trace retains one final source-boundary/reverse-ASR report over the delivered
+  candidate or source-aligned segments; the report verifies source preservation and boundary
+  mapping, not physical phrase removal.
 - The candidate duration must cover the normalized segmented delivery timeline; only a two-sided fade at an exactly adjacent audible-segment boundary counts as crossfade overlap, while isolated fades do not shorten the required duration.
 - Hash and fully decode the actual candidate bytes. Non-WAV candidates require a complete FFmpeg audio-stream decode, not only container-duration probing.
 - Every spoken-delete result row contains attributable local transcript, strategy, source cut windows, mapped join times, explicit `delete_hits`, `keep_hits`, and passing semantic-join validation, all matching that item's request contract and segmented-plan mapping. A generic item-level `status=pass` is invalid.

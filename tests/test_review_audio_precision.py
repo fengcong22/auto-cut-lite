@@ -15,8 +15,11 @@ if str(SCRIPTS_ROOT) not in sys.path:
 
 from utils.lite_revision import _validate_lite_audio_timing_sources
 from utils.review_audio_precision import (
+    CANDIDATE_RENDERER_VERSION,
+    REVERSE_ASR_DIAGNOSTIC_PURPOSE,
     alignment_cache_identity,
     apply_audio_plan_to_compiled_payloads,
+    apply_reverse_report_to_payloads,
     build_full_candidate_reverse_report,
     build_lite_split_gap_audio_plan,
     candidate_cache_identity,
@@ -220,6 +223,13 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
 
             self.assertEqual(wav_duration_seconds(candidate), wav_duration_seconds(source))
             self.assertEqual(result["duration_seconds"], 2.0)
+            self.assertEqual(result["source_duration_seconds"], 2.0)
+            self.assertEqual(result["candidate_duration_seconds"], 2.0)
+            self.assertTrue(result["source_aligned"])
+            self.assertTrue(result["duration_matches_source"])
+            self.assertEqual(result["purpose"], REVERSE_ASR_DIAGNOSTIC_PURPOSE)
+            self.assertEqual(result["role"], REVERSE_ASR_DIAGNOSTIC_PURPOSE)
+            self.assertFalse(result["delivery_eligible"])
             with wave.open(str(candidate), "rb") as rendered:
                 rendered.setpos(round(0.6 * 16_000))
                 silent = rendered.readframes(1)
@@ -227,6 +237,43 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 audible = rendered.readframes(1)
             self.assertEqual(silent, b"\0\0")
             self.assertNotEqual(audible, b"\0\0")
+
+    def test_reverse_report_cannot_promote_diagnostic_candidate_to_delivery(self):
+        request = {
+            "processed_audio": {
+                "candidate_audio_delivery_eligible": True,
+                "candidate_audio_purpose": "final_delivery",
+                "candidate_audio_role": "replacement",
+                "candidate_audio_renderer_version": "old-renderer",
+            },
+            "review_items": [],
+        }
+        ledger = {"review_items": []}
+        report = {
+            "candidate_audio_sha256": "a" * 64,
+            "audio_delivery_plan_sha256": "b" * 64,
+            "candidate_audio_delivery_eligible": True,
+            "candidate_audio_purpose": "final_delivery",
+            "candidate_audio_role": "replacement",
+            "candidate_audio_renderer_version": "old-renderer",
+            "candidate_audio_source_aligned": True,
+            "candidate_audio_source_duration_seconds": 3.0,
+            "candidate_audio_duration_seconds": 3.0,
+            "candidate_audio_duration_matches_source": True,
+            "unresolved_ids": [],
+            "rows": [],
+        }
+        updated, _updated_ledger = apply_reverse_report_to_payloads(
+            request,
+            ledger,
+            report,
+            report_path="C:/qa/reverse-report.json",
+        )
+        processed = updated["processed_audio"]
+        self.assertEqual(processed["candidate_audio_purpose"], REVERSE_ASR_DIAGNOSTIC_PURPOSE)
+        self.assertEqual(processed["candidate_audio_role"], REVERSE_ASR_DIAGNOSTIC_PURPOSE)
+        self.assertFalse(processed["candidate_audio_delivery_eligible"])
+        self.assertEqual(processed["candidate_audio_renderer_version"], CANDIDATE_RENDERER_VERSION)
 
     def test_item_level_label_only_asr_passes_without_edit_and_rejects_pause_adjustment(self):
         alignment = {

@@ -14,8 +14,8 @@ user-selected subskill whenever `workflow_mode=lite`.
 | Supplied PNG/JPG replacement or local picture | Insert one ordinary editable asset segment at the requested start | `true` | Saved asset, editable segment, and start alignment only |
 | Existing-hand occlusion, removal, cleanup, clean-cover, or residual cleanup | Keep one two-second label whose text is exactly `source_text` at the requested start | `false` | Label only; no cleanup evidence |
 | Text/sticker safe-zone movement or text/flower intro/outro animation | Keep one two-second label whose text is exactly `source_text` at the requested start | `false` | Label only; no field mutation or animation evidence |
-| Spoken deletion | Resolve the real cut with word/character ASR, then execute the editable cut | `true` | ASR cut, must-keep, reverse-validation, and editable-cut gates; label starts at the ASR cut |
-| Any duration-changing request except an ASR-proved spoken deletion, including pause, speed, hold, still-frame, or stretch changes | Attempt source word/character ASR, then keep one exact `source_text` label | `false` | Label at a unique ASR point, otherwise at the review-comment time; no duration mutation or later-track offset |
+| Spoken deletion | Resolve the real boundary with word/character ASR, then write a non-destructive editable split/cut trace while retaining the complete source interval | `true` | ASR boundary, must-keep, source-preservation, and editable-trace gates; the label uses the word/character ASR-resolved cut start; no duration change |
+| Any other duration-changing request, including pause, speed, hold, still-frame, or stretch changes | Attempt source word/character ASR, then keep one exact `source_text` label | `false` | Label at a unique ASR point, otherwise at the review-comment time; no duration mutation or later-track offset |
 | Pronunciation, breath, mouth noise, or other audio-identifiable timing | Attempt the actual word/character boundary with source ASR | `false` unless an explicit maintained non-duration executor exists | Label at the unique ASR boundary, otherwise at the review-comment time |
 | Review-only or ASR-unresolved item | Parse the review timestamp or explicitly requested target | Per visual rule | Point timestamps are valid; `old time ... 提前到 target` uses the target |
 | New or unrecognized issue with reliable authoritative time but no safe maintained implementation | Keep one label whose visible text is exactly `source_text`; skip ad-hoc execution | `false` | Record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports and continue independent items |
@@ -65,10 +65,10 @@ correct Lite output.
   internal request metadata, marker receipts, validation output, and reports. Never prefix,
   suffix, replace, or otherwise annotate a visible label with them.
 - For every audio-identifiable issue, attempt word/character ASR first. For an executable spoken
-  deletion its unique ASR window is mandatory and equals the saved edit boundary. A non-executing
-  item uses its unique ASR point when available and otherwise the time written in the review
-  comment.
-- For spoken deletion specifically, this remains the word/character ASR-resolved cut start.
+  deletion its unique ASR window is mandatory and equals the saved non-destructive split boundary;
+  the source interval remains present and the project duration is unchanged. A non-executing item
+  uses its unique ASR point when available and otherwise the time written in the review comment.
+- For spoken deletion specifically, this remains the word/character ASR-resolved logical split start.
 - Review-only and ASR-unresolved items use review timestamps. Prefer a requested target after cues
   such as `提前到`, `推迟到`, `移到`, or `调到`; a point timestamp is sufficient.
 - Reject every item whose authoritative time is unresolved before draft writing. A missing time
@@ -91,11 +91,12 @@ coverage, editable structure, package integrity, or portable-delivery checks.
 
 ## Timeline Duration And Pause Labels
 
-- Delete windows remain on the editable timeline and do not compress it. Final project duration
-  always equals source duration.
-- Except for an ASR-proved spoken deletion, every duration-changing request is non-executing in
-  Lite. This includes pause changes, `+1s`, `-1s`, speed changes, holds, still frames, and input
-  named `semantic_pause_adjustment`.
+- Logical delete windows remain on the editable timeline as source-aligned trace ranges and do not
+  remove source media or compress it. Final project duration always equals source duration.
+- Every physical duration-changing operation is non-executing in Lite. A precisely ASR-proved
+  spoken deletion is execution-required only for its non-destructive split/cut trace; pause changes,
+  `+1s`, `-1s`, speed changes, holds, still frames, and input named
+  `semantic_pause_adjustment` are label-only.
 - Attempt to resolve the request with authoritative word/character ASR. Place exactly one visible
   label equal only to `source_text` at a unique ASR point, otherwise at the review-comment time.
 - Do not emit executable `pause_adjustments`, a hold, a still-frame pause segment, an audio gap, or

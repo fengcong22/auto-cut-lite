@@ -103,14 +103,18 @@ When returning a revision result, report:
 - In Lite mode, every issue that can be located from speech or audio must attempt configured Chinese
   word/character ASR before execution. This includes spoken deletion,
   pause addition/extension/shortening/adjustment, pronunciation, breath, mouth noise, and speech
-  timing. Spoken deletion uses a unique ASR-resolved boundary for the edit and label. Every pause
-  or other non-executing item uses a unique ASR point when available, otherwise the review-comment
-  time, and is never executed in Lite.
+  timing. A precisely requested spoken deletion uses a unique ASR-resolved boundary for a
+  non-destructive editable split/cut trace and label; source media remains complete and the
+  timeline is unchanged. Every pause or other non-executing item uses a unique ASR point when
+  available, otherwise the review-comment time, and is never executed in Lite.
 - Review-only and ASR-unresolved items use the timestamp written in the review comment.
   For target wording such as `07:14 ... 提前到 07:12`, use the requested target `07:12`.
   A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
-- Protect `must_keep` phrases explicitly. Do not remove adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
-- Validate the output by confirming deleted phrases are gone and must-keep phrases remain audible.
+- Protect `must_keep` phrases explicitly. Do not widen the logical source-aligned boundary across
+  adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
+- Validate the output by confirming the ASR boundary, source-preserving split ranges, and
+  `must_keep` context. Lite does not require the requested phrase to be absent because no source
+  media is physically removed.
 - When returning results to a document, append label then file, label then file, strictly serially so attachments stay in the intended order.
 
 ## Lite A1/A2 Audio Layout
@@ -126,10 +130,11 @@ When returning a revision result, report:
 
 ## Lite Timeline Duration And Layout
 
-- Lite deletion never compresses the timeline. Except for a uniquely ASR-proved spoken deletion,
-  Lite never executes any request that can change duration, including pause, speed, hold, or
-  still-frame changes. Final project duration therefore equals source duration
-  even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
+- Lite deletion is always non-destructive: a uniquely ASR-proved spoken deletion creates only a
+  source-aligned editable split/cut trace. It never removes media, compresses the timeline, or
+  offsets later material. Lite never executes any other request that can change duration,
+  including pause, speed, hold, or still-frame changes. Final project duration therefore equals
+  source duration even though V1/A1 keep windows and V2/A2 delete windows remain segmented.
 - Treat every pause request, including `+1s`, `-1s`, and `semantic_pause_adjustment`, as
   label-only. Place exactly one visible label equal only to `source_text` at a unique ASR point or,
   when ASR cannot locate it, at the review-comment time.
@@ -165,7 +170,7 @@ When returning a revision result, report:
 - The final user report separates active compute, external API wait, and application/user blocking. The first optimized real job establishes the baseline; compare later runs by media duration and item/gate mix, not wall clock alone.
 - Optimization cannot remove evidence, flatten the draft, import full QA narration, weaken exact markers, `must_keep`, visual, pointer, or animation gates, or make missing source text block editing.
 - Final spoken-audio acceptance requires a real full-candidate reverse-ASR report whose candidate SHA-256 matches the candidate bytes and whose provider/model/adapter identity and result rows are present; aggregate status counts and a generic item-level `pass` are not sufficient.
-- Automatic media repair is limited to one attributable attempt, reruns the affected and global gates, does not widen physical audio delete windows or alter unrelated items, and restores the pre-repair draft if the callback aborts, scope validation fails, or the attempted save is structurally invalid. A structurally valid unresolved draft remains available with its path and unresolved item IDs in the failure result.
+- Automatic media repair is limited to one attributable attempt, reruns the affected and global gates, does not widen logical source-aligned audio windows or alter unrelated items, and restores the pre-repair draft if the callback aborts, scope validation fails, or the attempted save is structurally invalid. A structurally valid unresolved draft remains available with its path and unresolved item IDs in the failure result.
 
 ## Integrated Audio Engine
 

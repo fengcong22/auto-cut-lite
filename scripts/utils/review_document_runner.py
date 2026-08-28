@@ -17,6 +17,8 @@ from typing import Any, Callable, Mapping, Sequence
 from utils.jianying_native_delivery import capture_draft_tree_receipt
 from utils.lite_package import package_lite_delivery
 from utils.review_audio_precision import (
+    CANDIDATE_RENDERER_VERSION,
+    REVERSE_ASR_DIAGNOSTIC_PURPOSE,
     alignment_cache_identity,
     apply_audio_plan_to_compiled_payloads,
     apply_reverse_report_to_payloads,
@@ -65,6 +67,12 @@ from utils.review_job_pipeline import (
     sanitize_public_value,
 )
 from utils.revision_evidence import audio_delivery_plan_sha256
+from utils.revision_models import (
+    lite_duration_change_is_label_only,
+    lite_execution_required,
+    lite_timing_source,
+    resolve_execution_status,
+)
 from utils.revision_runner import (
     execute_revision_request,
     load_review_items_json,
@@ -586,6 +594,38 @@ def _has_authoritative_visual_start(item: Mapping[str, Any]) -> bool:
     )
 
 
+def _is_lite_audio_or_asr_timing_item(item: Mapping[str, Any]) -> bool:
+    """Keep audio/ASR-timed review rows out of the visual compiler.
+
+    Some intake payloads carry a local ``visual_plan`` on an audio row (for
+    example, as an attachment used for diagnosis).  The presence of that plan
+    must never make the row eligible for an overlay or alter its ASR cut
+    state.  Explicit visual rows remain eligible unless their instruction is
+    itself a duration-changing request, which Lite always labels only.
+    """
+
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    kind = str(item.get("kind") or item.get("type") or item.get("source_kind") or "")
+    source_text = str(item.get("source_text") or "")
+    explicit_visual = _is_explicit_lite_visual(item)
+    status = resolve_execution_status(
+        item.get("execution_status"),
+        item.get("evidence"),
+        item.get("validation"),
+    )
+    if status.casefold().startswith("label_only_"):
+        return True
+    if lite_duration_change_is_label_only(kind, source_text):
+        return True
+    if explicit_visual and not lite_execution_required(kind, source_text, True):
+        return True
+    if explicit_visual:
+        return False
+    if str(evidence.get("timing_source") or "").strip().casefold() == "asr":
+        return True
+    return lite_timing_source(kind, source_text).casefold() == "asr"
+
+
 def _compile_explicit_lite_visuals(request: dict[str, Any], ledger: dict[str, Any]) -> None:
     request_items = {
         str(item.get("id") or item.get("item_id") or "").casefold(): item
@@ -599,6 +639,8 @@ def _compile_explicit_lite_visuals(request: dict[str, Any], ledger: dict[str, An
     }
     for item_id, item in request_items.items():
         if not item.get("execution_required"):
+            continue
+        if _is_lite_audio_or_asr_timing_item(item):
             continue
         is_explicit_visual = _is_explicit_lite_visual(item)
         if not is_explicit_visual and not _visual_plan_has_local_asset(item):
@@ -1751,6 +1793,8 @@ def run_review_document(
                 item_id = str(item.get("id") or item.get("item_id") or "")
                 if not item.get("execution_required"):
                     continue
+                if _is_lite_audio_or_asr_timing_item(item):
+                    continue
                 if not _is_explicit_lite_visual(item) and not _visual_plan_has_local_asset(item):
                     continue
                 try:
@@ -2212,10 +2256,39 @@ def run_review_document(
             # Parse the exact files that the low-level writer will consume.
             load_revision_request(str(paths["processed_request"]))
             load_review_items_json(str(paths["processed_items"]))
+            processed_audio = request.get("processed_audio")
+            if not isinstance(processed_audio, Mapping):
+                processed_audio = {}
+            candidate_present = bool(candidate)
             summary = {
                 "schema_version": _SCHEMA_VERSION,
                 "candidate_audio_path": str(candidate or ""),
                 "candidate_audio_sha256": sha256_file(candidate) if candidate else "",
+                # Keep the candidate identity explicit in the phase evidence:
+                # this source-time-preserving WAV is only a reverse-ASR probe,
+                # never an A1/A2 delivery or replacement asset.
+                "candidate_audio_purpose": (
+                    REVERSE_ASR_DIAGNOSTIC_PURPOSE if candidate_present else ""
+                ),
+                "candidate_audio_role": (
+                    REVERSE_ASR_DIAGNOSTIC_PURPOSE if candidate_present else ""
+                ),
+                "candidate_audio_delivery_eligible": False,
+                "candidate_audio_source_aligned": bool(
+                    processed_audio.get("candidate_audio_source_aligned", candidate_present)
+                ),
+                "candidate_audio_source_duration_seconds": processed_audio.get(
+                    "candidate_audio_source_duration_seconds"
+                ),
+                "candidate_audio_duration_seconds": processed_audio.get(
+                    "candidate_audio_duration_seconds"
+                ),
+                "candidate_audio_duration_matches_source": bool(
+                    processed_audio.get("candidate_audio_duration_matches_source", False)
+                ),
+                "candidate_audio_renderer_version": (
+                    CANDIDATE_RENDERER_VERSION if candidate_present else ""
+                ),
                 "audio_delivery_plan_sha256": plan_digest,
                 "source_asr_reused": True,
                 "reverse_asr_status": (

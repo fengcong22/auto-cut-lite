@@ -41,20 +41,23 @@ reuse task intermediates produced by a mistaken full-version run.
   screenshots. Strict mode and explicit full-workflow visual flags do not turn
   these checks back on for `workflow_mode=lite`.
 - Every issue locatable through speech or audio uses the Lite workflow's authoritative
-  word/character ASR boundary and reverse-audio checks where applicable. Spoken deletion remains
-  executable. Every request to add, extend, shorten, or otherwise adjust a pause is label-only;
-  pronunciation, breath, mouth noise, and other unsupported audio issues follow the maintained
-  execution routing. Review labels and the editable cut structure remain required.
+  word/character ASR boundary and reverse-audio checks where applicable. A precisely located
+  spoken deletion is executable only as a non-destructive editable split/cut trace: it never
+  removes source media or compresses time. Every request to add, extend, shorten, or otherwise
+  adjust a pause is label-only; pronunciation, breath, mouth noise, and other unsupported audio
+  issues follow the maintained execution routing. Review labels and the editable cut structure
+  remain required.
 - A visible JianYing label contains only the source item's exact `source_text`. Internal status,
   item IDs, warnings, and diagnostics never appear in visible label text.
 
 ## Lite Draft Contract
 
 - The only executable layout for new Lite tasks is `split_gap`. In this layout, delete windows are
-  real editable cut boundaries and deletion never shortens the project: V1 (`Original Video`)
-  and A1 (`Separated Source Audio`) contain only the non-delete intervals; V2 (`Lite Cut
-  Segments`) and A2 (`Lite Reused Audio`) contain the source-aligned delete intervals. This is
-  written directly to the JianYing timeline and does not require opening the editor. Save
+  real editable cut boundaries and are only source-aligned trace ranges: the source media remains
+  complete and the project never shortens. V1 (`Original Video`) and A1 (`Separated Source Audio`)
+  contain the non-delete intervals; V2 (`Lite Cut Segments`) and A2 (`Lite Reused Audio`) contain
+  the matching source-aligned delete intervals. These complementary lanes are written directly
+  to the JianYing timeline and do not require opening the editor. Save
   `config.maintrack_adsorb=false` in root and active-timeline content so JianYing does not
   reinterpret V1 gaps through its default magnetic-main-track state. Linked-edit is a local
   JianYing toolbar preference (`ToolbarCfg.linkageEnable`), not a portable per-draft field;
@@ -65,10 +68,11 @@ reuse task intermediates produced by a mistaken full-version run.
   and `lark-cli config strict-mode user` after the one-time user login. Never use an app/bot
   identity for document reads, copy another computer's login state, or include tokens in a
   plugin/package. Never copy a review timestamp directly into a spoken-word cut. Resolve every executable cut boundary from Chinese
-  word/character ASR, bind the resolved window to the edit, declare the delete phrase, adjacent
-  `must_keep` phrases and strategy, then run reverse validation. Start that review item's label
-  at the final ASR-resolved cut start rather than the rough review timestamp. Lite draft generation fails
-  closed when that boundary receipt is absent or does not match the saved cut.
+  word/character ASR, bind the resolved window to the non-destructive split trace, declare the
+  delete phrase, adjacent `must_keep` phrases and strategy, then run source-preservation/boundary
+  validation. Start that review item's label at the final ASR-resolved cut start rather than the
+  rough review timestamp. Lite draft generation fails closed when that boundary receipt is absent
+  or does not match the saved trace.
 - Apply the same timing-source rule to every other audio-identifiable problem. For any request to
   add, extend, shorten, or otherwise adjust a pause, resolve the real adjacent utterance gap from
   source ASR when possible and use that boundary only for its verbatim label; never create a pause edit. For
@@ -86,11 +90,13 @@ reuse task intermediates produced by a mistaken full-version run.
 - Recognize `lite_cut_layout=copy` only while reading or validating an older Lite draft that
   intentionally kept a full V1/A1 reference layout. Reject `copy` for every new execution.
 
-- Final project duration always equals source duration. Except for a word/character-ASR-proved
-  spoken deletion, every request that can change duration is non-executing. This includes `+Ns`,
-  `-Ns`, pause edits, speed changes, holds, still frames, and every
-  `semantic_pause_adjustment`. Place exactly one `source_text` label at the ASR point when uniquely
-  located, otherwise at the review-comment time, and do not change the timeline duration.
+- Final project duration always equals source duration, including for a precisely ASR-located
+  spoken deletion. That deletion only records a non-destructive split/cut boundary; it does not
+  remove media, compress the timeline, or offset later material. Every other request that can
+  change duration is non-executing. This includes `+Ns`, `-Ns`, pause edits, speed changes, holds,
+  still frames, and every `semantic_pause_adjustment`. Place exactly one `source_text` label at
+  the ASR point when uniquely located, otherwise at the review-comment time, and do not change
+  the timeline duration.
 
 - Import local video, audio, images, text, subtitles, flower text, and local BGM through the
   maintained repository APIs.
@@ -98,7 +104,7 @@ reuse task intermediates produced by a mistaken full-version run.
   and `Separated Source Audio`, and write every logical delete interval (after same-item overlap
   merging only) to `Lite Cut Segments` and `Lite Reused Audio` at the same source and target time.
   Preserve the full source range; deletion and pause-review items do not change duration.
-- Lite execution applies ASR-resolved delete cuts and supplied visual/pointer assets only. Every
+- Lite execution applies ASR-resolved non-destructive delete boundaries and supplied visual/pointer assets only. Every
   pause addition, extension, shortening, or adjustment is label-only. A
   supplied pointer insertion is execution-required, but an existing-hand occlusion, removal,
   clean-cover, cleanup, or residual-cover request is label-only. Animation or other
@@ -179,17 +185,19 @@ Before delivery, validate the saved root and active timeline variants:
 - review labels equal only `source_text`, are mapped-start-aligned, top-safe, and no longer than
   `2s`; internal execution status never appears in their text;
 - lite visual assets contain no generated animation, keyframes, or automatic scale adjustment.
-- every spoken delete has a passing word/character ASR boundary receipt; the review timestamp is
-  recorded only as `search_hint`, and audio precision/reverse-ASR gates remain enabled. The
-  receipt binds source-audio SHA-256, provider/model or resource, adapter version, ordered
-  matched word/character rows, and `authoritative_cut_boundary=true`; fallback candidates cannot
-  be promoted to cuts merely because their rough time or transcript text looks plausible;
+- every spoken delete has a passing word/character ASR boundary receipt for its non-destructive
+  split trace; the review timestamp is recorded only as `search_hint`, and source-preservation /
+  boundary checks remain enabled. The receipt binds source-audio SHA-256, provider/model or
+  resource, adapter version, ordered matched word/character rows, and
+  `authoritative_cut_boundary=true`; fallback candidates cannot be promoted to boundaries merely
+  because their rough time or transcript text looks plausible;
 - every visual/pointer item has a real editable overlay whose material is saved and whose
   timeline start equals the edit start. No pointer binding, lifecycle, placement, geometry,
   occlusion, clean-cover, or opened-state evidence is required in lite mode.
 
-Report split-gap delete requests as editable cut boundaries with the deleted source intervals
-isolated on V2/A2. Report that final duration stayed equal to source duration and list pause
+Report split-gap delete requests as non-destructive editable cut boundaries with the requested
+source intervals isolated as complementary V2/A2 trace lanes. Report that source media was kept
+complete and final duration stayed equal to source duration, and list pause
 requests as ASR-first, review-time-fallback source-text-only labels rather than executed edits.
 
 Before a non-mock installed-runtime execution, validate the deployment report, package-manifest

@@ -404,6 +404,11 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 }
                 for index in range(42)
             ]
+            # An audio row may carry an attachment/visual plan for diagnosis;
+            # it must remain owned by the ASR/audio compiler.
+            audio_items[0]["visual_plan"] = {
+                "segments": [{"asset_path": str(asset), "duration": 0.2}]
+            }
             visual_items = [
                 {
                     "id": "visual-with-asset",
@@ -459,6 +464,34 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertFalse(request_empty["execution_required"])
             self.assertEqual(request_empty["execution_status"], "label_only_unresolved")
             self.assertEqual(ledger_empty["execution_status"], "label_only_unresolved")
+
+    def test_stale_pointer_cleanup_receipt_with_asset_remains_label_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            asset = root / "clean-cover.png"
+            asset.write_bytes(b"png")
+            item = {
+                "id": "pointer-cleanup",
+                "kind": "pointer_overlay",
+                "source_text": "00:02 清理原小手遮挡",
+                "start": 2.0,
+                "end": 3.0,
+                # Simulate a stale v1 classification that incorrectly marked
+                # a cleanup request executable.
+                "execution_required": True,
+                "evidence": {"asset_path": str(asset)},
+            }
+            request = {"review_items": [deepcopy(item)], "edits": []}
+            ledger = {"review_items": [deepcopy(item)]}
+
+            runner._compile_explicit_lite_visuals(request, ledger)
+
+            self.assertEqual(request["edits"], [])
+            self.assertTrue(request["review_items"][0]["execution_required"])
+            self.assertNotEqual(
+                request["review_items"][0].get("execution_status"),
+                "label_only_unresolved",
+            )
 
     def test_visual_asset_failures_are_structured_without_leaking_references(self):
         with tempfile.TemporaryDirectory() as tmpdir:

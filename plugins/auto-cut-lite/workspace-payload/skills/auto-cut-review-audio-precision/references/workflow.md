@@ -8,7 +8,7 @@ caller owns the rest of the phase DAG. Reuse source ASR only when source audio S
 preprocessing, provider/model/resource ID, and adapter version all match. Reuse reverse ASR only
 for the identical complete final candidate audio SHA256, normalized plan SHA-256, and ASR
 identity; any spoken-audio change still needs the final full-candidate gate. Its real attributable
-result rows must match each item's strategy, delete/must-keep phrases, physical cut windows,
+result rows must match each item's strategy, delete/must-keep phrases, source-aligned logical cut windows,
 plan-derived join times, local transcript, delete/keep hits, and semantic-join status; aggregate
 status counts or a generic item-level pass cannot substitute for rows. Candidate duration must
 equal the source timeline. Cache hits never waive `delete`, `must_keep`, semantic-join, or final
@@ -49,7 +49,7 @@ If the review text only says "delete this" near a timestamp, transcribe the loca
 - Use `hybrid` for most normal review edits: ASR boundary first, then listening-based edge tuning.
 - Use `listening_first` only when the user wants the cleanest spoken flow and accepts dropping short fillers, particles, or function words.
 
-Do not hide the strategy. Put it in the working notes and final label.
+Do not hide the strategy. Put it in internal working notes and the report; the visible JianYing label remains exactly the item's `source_text`.
 
 ## 3. Get Alignment Evidence
 
@@ -70,7 +70,7 @@ python scripts/portable/volc_setup.py status --json
 
 Accept a Volcengine adapter run only when the normalized alignment records `input_sha256`, `service_job_id`, `service_result_sha256`, the request-bound `resource_id`, `adapter_version`, and a non-empty `words` list whose timing values are finite, whose intervals have positive duration, and whose rows are monotonic. If authorization is absent, the required state is `status=pending`, `code=requires_user_authorization`, and `service_probe=not_run`; do not execute spoken deletion. Use the review-comment time only for non-executing items, keep `must_keep` intact, and do not claim the service or adapter ran.
 
-The bundled adapter produces normalized alignment only. It does not replace the complete candidate's attributable full-candidate reverse-ASR report with rich per-item result rows, and it does not replace final acceptance. This repository still decides `delete`, `must_keep`, strategy, buffers, physical removal, Lite pause-label routing, and acceptance status.
+The bundled adapter produces normalized alignment only. It does not replace the complete candidate's attributable full-candidate reverse-ASR report with rich per-item result rows, and it does not replace final acceptance. In this packaged Lite workflow, the repository records `delete`, `must_keep`, strategy, buffers, and a source-preserving logical split trace; it never physically removes source media or compresses the timeline. Lite pause-label routing and acceptance status remain separate gates.
 
 ## 4. Decide Cut Windows
 
@@ -83,49 +83,53 @@ For each phrase:
 5. Keep detached-filler absorption narrow. Only absorb isolated oral residue or half-words unrelated to the kept sentence. Normal neighboring words are hard `must_keep` unless the user explicitly accepts a listening-first tradeoff.
 6. Do not merge short delete windows into adjacent long sentence windows. A one-word delete such as `na` must keep its own source-time window.
 7. Select a cut window by strategy:
-   - `precision_first`: phrase start to phrase end, shortened away from protected onsets if needed.
-   - `hybrid`: ASR phrase boundary plus small 80 to 200 ms buffer, then adjust by listening.
-   - `listening_first`: include accepted fillers/function words only when they are listed in `accepted_tradeoffs`.
+   - `precision_first`: phrase start to phrase end as a logical source-time window, narrowed away from protected onsets if needed.
+   - `hybrid`: ASR phrase boundary plus small 80 to 200 ms logical-window buffer, then adjust by listening.
+   - `listening_first`: include accepted fillers/function words in the logical window only when they are listed in `accepted_tradeoffs`; this never authorizes physical removal in Lite.
 8. Choose crossfade:
    - 8 to 15 ms when the boundary touches a character onset or vowel start.
    - 25 to 35 ms for a normal fluent join.
 
 If repeated phrases exist, identify the occurrence by local context, not phrase text alone.
 
-## 5. Physically Remove Spoken Segments
+## 5. Record The Lite Split/Cut Trace
 
-Use the integrated segment removal script from the Auto-Cut runtime root:
+Lite never physically removes spoken segments. When a spoken deletion has one unique,
+authoritative word/character-ASR boundary, record that source-time interval as a logical cut
+window and keep the source media bytes complete. The editable writer represents the interval with
+complementary source-aligned lanes: V1/A1 keep intervals and V2/A2 keep the matching delete
+intervals at the same timeline times. This exposes the cut without shortening or offsetting the
+project.
 
-```powershell
-python scripts/audio/remove_spoken_segments.py run "<audio-or-video>" --cut "START,END" --removed-phrase "<delete>"
-```
-
-For multiple cuts in one file, repeat `--cut` or use `run-batch` with a JSON jobs file. Use a blank end time only for intentional tail deletion.
-
-Standalone compatibility outputs may be written under the ignored directory:
-
-```text
-output\修音成品\
-```
-
-For a JianYing revision job, treat those files as processing artifacts and write the accepted audio through the segmented editable-draft contract instead of importing one flattened full-track candidate.
+Do not run `remove_spoken_segments.py`, hard-mute, duck, trim, speed-change, hold, or still-frame
+operations for a Lite review-document job. A reverse-ASR candidate may be rendered under ignored
+`tmp/` storage solely as a source-time-preserving diagnostic probe; it is not a replacement or
+delivery audio asset. Every non-executing or ASR-unresolved item receives only its exact label at
+the ASR point or review-comment time.
 
 ## 6. Reverse Validate
 
-For each output:
+For each Lite diagnostic candidate and saved split layout:
 
-1. Re-run ASR on the processed file when possible.
-2. Confirm `delete` is absent.
-3. Confirm `must_keep` is present and audible.
-4. Listen from at least 300 ms before to 500 ms after every join.
-5. If a word was swallowed or an unrequested word disappeared, reject that version and revise the window.
-6. If delete residue remains but widening the physical cut would touch a protected word, add an exact post-splice duck/mute window and validate it with reverse ASR plus an attenuation check.
+1. Re-run reverse ASR on the source-time-preserving diagnostic candidate when available.
+2. Confirm the logical delete interval maps one-to-one to the V2/A2 source-aligned trace while the
+   original source media remains present; do not require the phrase to be absent from the source.
+3. Confirm every `must_keep` phrase remains in the audible source-aligned material.
+4. Listen from at least 300 ms before to 500 ms after each recorded boundary without changing any
+   later target time.
+5. If a boundary would swallow an unrequested word, narrow the logical window and revalidate the
+   trace; never widen it with physical removal or cleanup.
+6. Confirm the saved project duration equals the source duration and no duck/mute, gap, hold,
+   still-frame, speed, or offset was introduced.
 
 Typical failure checks:
 
-- "语言" sounds clipped: the cut window or crossfade touched the onset. Move the boundary away and shorten crossfade.
-- "所以" disappeared: it was not listed as `must_keep`, or a broad buffer crossed into the next word. Add it to `must_keep` and re-cut from ASR boundaries.
-- A cleaner version removed "它": only acceptable under `listening_first` or explicit accepted tradeoff.
+- "语言" sounds clipped: the logical window or crossfade touched the onset. Move the boundary
+  away and shorten the trace crossfade; do not alter the source media.
+- "所以" disappeared from an audible source-aligned lane: it was not listed as `must_keep`, or a
+  broad logical window crossed into the next word. Add it to `must_keep` and re-resolve ASR.
+- A diagnostic candidate may be silent inside a logical delete window, but that probe is never
+  imported as delivery audio and does not change the source timeline.
 
 ## 7. Append Back To The Document
 
@@ -147,7 +151,8 @@ Report:
 - strategy used per clip
 - ASR result and any review-time fallback used for non-executing items
 - output paths
-- validation result for removed and kept phrases
+- validation result for each logical delete trace and protected `must_keep` phrase (source media is
+  preserved in Lite)
 - any accepted listening tradeoffs
 
 ## 9. V4 Precision Gate For JianYing Drafts
@@ -160,15 +165,24 @@ Use this gate when Feishu/Lark review-document audio edits are delivered as an e
 - `gap_delete`: in Lite, keep both anchors as ASR context and create only the exact source-text
   label at the unique gap point, or at the review-comment time when ASR fails or is non-unique. Do
   not delete the gap or filler.
-- `ellipsis_range_delete`: delete the full spoken range between prefix and suffix. Do not match only the suffix phrase.
-- `tail_particle_delete`: protect the next word onset. If the particle tail remains but extending the physical cut would swallow the next word, add a post-splice exact duck/mute window instead.
+- `ellipsis_range_delete`: record the full spoken range between prefix and suffix as one logical
+  source-time window. Do not match only the suffix phrase, and do not physically remove the range
+  in Lite.
+- `tail_particle_delete`: protect the next word onset. If the particle tail remains, narrow the
+  logical trace and keep the source media; do not add a post-splice duck/mute cleanup in Lite.
 
 ### Keep Timeline And Audio Cleanup Separate
 
-- Use source-time physical cut windows for spoken words that must shorten the video and audio together.
-- Keep the complete processed narration as a validation-only artifact under `tmp/` unless the user explicitly requests whole-track replacement.
-- For editable delivery, write explicit audible source, replacement-video, and local-repair segments, and preserve the approved separated source audio as a muted reference track.
-- Map any `exact_window_cleanup.py` duck/mute window to the processed output timeline and record its source reason, target phrase, gain, and fade.
+- Use source-time logical cut windows for uniquely ASR-located spoken deletions. In Lite these are
+  source-preserving split boundaries only; they never shorten video or audio together.
+- Keep the complete source-aligned diagnostic candidate under `tmp/` when reverse ASR needs it.
+  Mark it validation-only and never import it as a replacement or delivery track.
+- For editable delivery, write V1/A1 complement segments and one independent V2/A2 source-aligned
+  clip per logical delete window. Keep all lanes at their original source times and preserve the
+  complete source media.
+- Do not map an `exact_window_cleanup.py` duck/mute window for a Lite spoken deletion. Independently
+  requested non-duration cleanup must follow its own maintained route and still preserve total
+  duration.
 
 ### Lite Pause Label Gate
 
@@ -178,7 +192,7 @@ otherwise adjust a pause, including input named `semantic_pause_adjustment`.
 1. Attempt authoritative word/character ASR bound to the current source audio bytes,
    provider/model or resource identity, adapter version, and ordered timing rows.
 2. If ASR yields one unique adjacent-utterance point, require it to be attributable to the current
-   source and outside spoken words and physical delete windows. Utterance-only or transcript-only
+   source and outside spoken words and logical delete windows. Utterance-only or transcript-only
    ASR is insufficient for claiming an ASR-resolved point.
 3. Set effective `execution_required=false`. Place exactly one visible label equal only to the
    source item's `source_text` at the unique ASR point, or at the review-comment time when ASR fails
@@ -208,6 +222,6 @@ otherwise adjust a pause, including input named `semantic_pause_adjustment`.
 
 Do not claim a precise audio revision complete until the reverse-ASR report has zero unresolved `fail` rows.
 
-Allow at most one automatic targeted repair. Invoke it on a deep copy, validate the raw callback result against the authorized scope before normalization or media access, then normalize/preflight and run the same scope check again before saving. It may narrow a physical delete or use a local non-destructive repair, but it must not widen the delete window across `must_keep`, alter unrelated review items, or skip the global acceptance gates. Restore the pre-repair files if the callback aborts, scope validation fails, or the attempted save is structurally invalid. When a structurally valid repair still fails media acceptance, preserve it and report the draft path plus unresolved item IDs for manual handling.
+Allow at most one automatic targeted repair. Invoke it on a deep copy, validate the raw callback result against the authorized scope before normalization or media access, then normalize/preflight and run the same scope check again before saving. In Lite a repair may only narrow a logical source-aligned trace or fix metadata; it must not physically remove, mute, widen the delete window across `must_keep`, alter unrelated review items, or skip the global acceptance gates. Restore the pre-repair files if the callback aborts, scope validation fails, or the attempted save is structurally invalid. When a structurally valid repair still fails media acceptance, preserve it and report the draft path plus unresolved item IDs for manual handling.
 
 The repair callback must not mutate the live project and must not write saved draft files directly; it must return a scoped `RevisionRequest` for those raw and prepared scope checks.

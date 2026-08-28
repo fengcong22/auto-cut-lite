@@ -37,7 +37,11 @@ from audio_sound.volc_asr import (
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
 CUT_PLANNER_VERSION = "lite-asr-cut-planner-v1"
-CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v1"
+# This WAV is a source-time-preserving probe for reverse ASR only.  It is never
+# an editable replacement or a delivery asset, even though the reverse-ASR
+# report needs a path and hash for reproducibility.
+CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v2"
+REVERSE_ASR_DIAGNOSTIC_PURPOSE = "reverse_asr_diagnostic_only"
 REVERSE_REPORT_VERSION = "lite-reverse-report-v1"
 ASR_REQUEST_OPTIONS = {
     "enable_ddc": True,
@@ -295,12 +299,21 @@ def render_source_aligned_candidate(
         os.replace(temporary, output_path)
     finally:
         temporary.unlink(missing_ok=True)
+    candidate_duration = round(wav_duration_seconds(output_path), 6)
+    source_duration = round(duration, 6)
     return {
         "schema_version": _SCHEMA_VERSION,
         "path": str(output_path),
         "sha256": sha256_file(output_path),
         "source_sha256": sha256_file(source_path),
-        "duration_seconds": round(wav_duration_seconds(output_path), 6),
+        "duration_seconds": candidate_duration,
+        "source_duration_seconds": source_duration,
+        "candidate_duration_seconds": candidate_duration,
+        "source_aligned": True,
+        "duration_matches_source": abs(candidate_duration - source_duration) <= 1e-6,
+        "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "delivery_eligible": False,
         "delete_windows": [
             {
                 "item_id": str(row.get("item_id") or ""),
@@ -691,7 +704,9 @@ def resolve_lite_audio_items(
             row["execution_status"] = "label_only_unresolved"
             row["reason"] = "overlapping_audio_items_require_manual_resolution"
             row["resolved_time"] = row.get("start", row.get("resolved_time"))
-            row["asr_alignment"]["authoritative_cut_boundary"] = False
+            alignment = row.get("asr_alignment")
+            if isinstance(alignment, dict):
+                alignment["authoritative_cut_boundary"] = False
 
     executable = [row for row in rows if row["execution_required"]]
     return {
@@ -776,12 +791,27 @@ def build_lite_split_gap_audio_plan(
                 "reason": "Independent audible A2 review clip restored by Lite writer",
             }
         )
+    candidate_duration = round(wav_duration_seconds(candidate), 6)
+    source_duration = round(duration, 6)
+    candidate_metadata = {
+        "path": candidate,
+        "sha256": sha256_file(candidate),
+        "source_duration_seconds": source_duration,
+        "candidate_duration_seconds": candidate_duration,
+        "source_aligned": True,
+        "duration_matches_source": abs(candidate_duration - source_duration) <= 1e-6,
+        "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "delivery_eligible": False,
+        "renderer_version": CANDIDATE_RENDERER_VERSION,
+    }
     return {
         "mode": "segmented",
         "pending": False,
         "forbid_full_length_segments": True,
         "max_single_segment_ratio": 1.0,
         "validation_only_audio_paths": [candidate],
+        "validation_only_audio_metadata": candidate_metadata,
         "segments": segments,
     }
 
@@ -905,9 +935,22 @@ def apply_audio_plan_to_compiled_payloads(
 
     if candidate_audio_path is not None:
         candidate = str(Path(candidate_audio_path).expanduser().resolve(strict=True))
+        candidate_duration = round(wav_duration_seconds(candidate), 6)
+        source_duration = round(float(cut_plan["source_duration_seconds"]), 6)
         request["processed_audio"] = {
             "output_wav": candidate,
             "candidate_audio_sha256": sha256_file(candidate),
+            "candidate_audio_purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+            "candidate_audio_role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+            "candidate_audio_delivery_eligible": False,
+            "candidate_audio_source_aligned": True,
+            "candidate_audio_source_duration_seconds": source_duration,
+            "candidate_audio_duration_seconds": candidate_duration,
+            "candidate_audio_duration_matches_source": abs(
+                candidate_duration - source_duration
+            )
+            <= 1e-6,
+            "candidate_audio_renderer_version": CANDIDATE_RENDERER_VERSION,
             "status": "pending_reverse_asr",
         }
     else:
@@ -1108,6 +1151,19 @@ def build_full_candidate_reverse_report(
         "candidate_audio_path": str(candidate),
         "candidate_audio_sha256": sha256_file(candidate),
         "candidate_audio_duration_seconds": round(wav_duration_seconds(candidate), 6),
+        "candidate_audio_purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "candidate_audio_role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+        "candidate_audio_delivery_eligible": False,
+        "candidate_audio_source_aligned": True,
+        "candidate_audio_source_duration_seconds": round(
+            float(cut_plan["source_duration_seconds"]), 6
+        ),
+        "candidate_audio_duration_matches_source": abs(
+            round(wav_duration_seconds(candidate), 6)
+            - round(float(cut_plan["source_duration_seconds"]), 6)
+        )
+        <= 1e-6,
+        "candidate_audio_renderer_version": CANDIDATE_RENDERER_VERSION,
         "audio_delivery_plan_sha256": audio_delivery_plan_sha256,
         "asr_identity": {
             "provider": str(candidate_asr.get("provider") or ""),
@@ -1138,6 +1194,37 @@ def apply_reverse_report_to_payloads(
         raise ValueError(
             "Full-candidate reverse ASR did not pass for: " + ", ".join(unresolved)
         )
+    # A reverse-ASR candidate is accepted only as a source-time-preserving
+    # diagnostic artifact.  Older or hand-authored reports may omit these
+    # proofs, so migration fails closed instead of silently treating the WAV as
+    # a valid delivery/replacement asset.
+    source_aligned = report.get("candidate_audio_source_aligned")
+    if source_aligned is None:
+        source_aligned = report.get("source_aligned")
+    duration_matches = report.get("candidate_audio_duration_matches_source")
+    if duration_matches is None:
+        duration_matches = report.get("duration_matches_source")
+    if source_aligned is not True or duration_matches is not True:
+        raise ValueError(
+            "Reverse-ASR candidate must prove source alignment and source-duration equality"
+        )
+    source_duration = report.get("candidate_audio_source_duration_seconds")
+    candidate_duration = report.get("candidate_audio_duration_seconds")
+    try:
+        source_duration_value = float(source_duration)
+        candidate_duration_value = float(candidate_duration)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            "Reverse-ASR candidate is missing finite source-duration evidence"
+        ) from exc
+    if not (
+        math.isfinite(source_duration_value)
+        and math.isfinite(candidate_duration_value)
+        and abs(source_duration_value - candidate_duration_value) <= 1e-6
+    ):
+        raise ValueError(
+            "Reverse-ASR candidate duration does not match the source duration"
+        )
     request = deepcopy(dict(revision_request))
     ledger = deepcopy(dict(doc_items))
     rows = {
@@ -1166,6 +1253,17 @@ def apply_reverse_report_to_payloads(
     processed.update(
         {
             "candidate_audio_sha256": report["candidate_audio_sha256"],
+            # A reverse-ASR candidate is a validation probe, never a delivery
+            # or replacement asset.  Do not let stale reports override this
+            # identity when they are migrated into the current request.
+            "candidate_audio_purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+            "candidate_audio_role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+            "candidate_audio_delivery_eligible": False,
+            "candidate_audio_source_aligned": True,
+            "candidate_audio_source_duration_seconds": round(source_duration_value, 6),
+            "candidate_audio_duration_seconds": round(candidate_duration_value, 6),
+            "candidate_audio_duration_matches_source": True,
+            "candidate_audio_renderer_version": CANDIDATE_RENDERER_VERSION,
             "validation_summary": str(Path(report_path).expanduser().resolve(strict=False)),
             "audio_delivery_plan_sha256": report["audio_delivery_plan_sha256"],
             "status": "pass",
@@ -1415,6 +1513,7 @@ __all__ = [
     "ASR_REQUEST_OPTIONS",
     "CANDIDATE_RENDERER_VERSION",
     "CUT_PLANNER_VERSION",
+    "REVERSE_ASR_DIAGNOSTIC_PURPOSE",
     "REVERSE_REPORT_VERSION",
     "alignment_cache_identity",
     "apply_audio_plan_to_compiled_payloads",
