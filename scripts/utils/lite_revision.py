@@ -1034,6 +1034,24 @@ def _validate_lite_segmented_split_gap_plan(
         ],
     }
     problems: List[str] = []
+    unexpected_track_names = sorted(
+        {
+            segment.track_name
+            for segment in plan.segments
+            if segment.track_name not in expected
+        }
+    )
+    if unexpected_track_names:
+        problems.append(
+            "segmented audio track names must be exactly "
+            f"{LITE_TRACKS['source_audio']} and {LITE_TRACKS['reused_audio']}; "
+            "found unexpected track(s): " + ", ".join(unexpected_track_names)
+        )
+    if not kept_pairs:
+        problems.append(
+            f"{LITE_TRACKS['source_audio']} must retain at least one source window; "
+            f"full-length {LITE_TRACKS['reused_audio']} audio is forbidden"
+        )
     for track_name, expected_windows in expected.items():
         actual = sorted(
             (

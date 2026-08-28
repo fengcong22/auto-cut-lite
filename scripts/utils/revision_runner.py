@@ -874,6 +874,7 @@ def _validate_revision_execution_preflight(
     profile = derive_acceptance_profile(request, doc_items=doc_items)
     source_spoken_edit = any(
         record.get("has_review_item")
+        and record.get("execution_required")
         and {"audio_precision", "audio_join"}.intersection(record.get("gates") or [])
         for record in profile["items"]
     )

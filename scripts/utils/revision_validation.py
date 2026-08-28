@@ -3151,7 +3151,15 @@ def derive_acceptance_profile(
             )
 
     explicit_item_gates: List[tuple[str, str]] = []
-    if acceptance.require_audio_validation:
+    lite_has_executable_audio = any(
+        record.get("execution_required")
+        and {"audio_precision", "audio_join"}.intersection(record.get("gates") or [])
+        for record in records
+    )
+    require_explicit_audio = acceptance.require_audio_validation and (
+        request.workflow_mode != "lite" or lite_has_executable_audio
+    )
+    if require_explicit_audio:
         for gate in ("audio_precision", "audio_join"):
             explicit_item_gates.append(
                 (gate, "Explicit require_audio_validation=true adds this gate.")
@@ -3207,7 +3215,7 @@ def derive_acceptance_profile(
     ]
     explicit_carrier_requirements = (
         (
-            acceptance.require_audio_validation,
+            require_explicit_audio,
             "audio_precision",
             "require_audio_validation",
         ),

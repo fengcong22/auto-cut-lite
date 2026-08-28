@@ -29,6 +29,7 @@ from utils.review_audio_precision import (
     cache_identity_lock,
     candidate_cache_identity,
     canonical_json_sha256,
+    downgrade_reverse_asr_failures,
     extract_alignment_wav,
     ffmpeg_identity,
     render_source_aligned_candidate,
@@ -82,7 +83,7 @@ from utils.revision_runner import (
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v2"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v3"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
@@ -842,13 +843,16 @@ def _phase_paths(job_root: Path) -> dict[str, Path]:
         "source_asr": workspace / "evidence" / "source_asr.json",
         "alignment_wav": workspace / "materials" / "source_alignment.wav",
         "candidate_wav": workspace / "materials" / "candidate_source_aligned.wav",
+        "initial_candidate_wav": workspace / "materials" / "candidate_source_aligned_initial.wav",
         "classified_dir": workspace / "classified",
         "cut_plan": workspace / "classified" / "audio_cut_plan.json",
         "acceptance_plan": workspace / "classified" / "acceptance_plan.json",
         "processed_dir": workspace / "processed",
         "processed_request": workspace / "processed" / "revision_request.json",
         "processed_items": workspace / "processed" / "doc_items.json",
+        "processed_cut_plan": workspace / "processed" / "audio_cut_plan.json",
         "audio_plan": workspace / "processed" / "audio_delivery_plan.json",
+        "initial_reverse_report": workspace / "processed" / "reverse_asr_initial_report.json",
         "reverse_report": workspace / "processed" / "reverse_asr_report.json",
         "processed_summary": workspace / "processed" / "processed_media_evidence.json",
         "execution_dir": workspace / "execution",
@@ -1241,6 +1245,18 @@ def run_review_document(
                 **run_record,
             }
 
+        processed_plan_is_current = bool(
+            store is not None
+            and paths["processed_cut_plan"].is_file()
+            and _phase_receipt_valid(
+                store,
+                "reverse_asr",
+                root / "reverse_asr.receipt.json",
+            )
+        )
+        effective_cut_plan_path = (
+            paths["processed_cut_plan"] if processed_plan_is_current else paths["cut_plan"]
+        )
         artifact_candidates = {
             "document_snapshot": paths["snapshot"],
             "project_lite": paths["project_lite"],
@@ -1248,7 +1264,7 @@ def run_review_document(
             "visual_asset_index": paths["visual_index"],
             "source_asr_index": paths["source_index"],
             "source_asr": paths["source_asr"],
-            "audio_cut_plan": paths["cut_plan"],
+            "audio_cut_plan": effective_cut_plan_path,
             "revision_request": paths["processed_request"],
             "doc_items": paths["processed_items"],
             "audio_delivery_plan": paths["audio_plan"],
@@ -1279,8 +1295,8 @@ def run_review_document(
             if str(value).strip():
                 unresolved.add(str(value).strip())
         try:
-            if paths["cut_plan"].is_file():
-                cut_plan = _read_json_object(paths["cut_plan"], "audio cut plan")
+            if effective_cut_plan_path.is_file():
+                cut_plan = _read_json_object(effective_cut_plan_path, "audio cut plan")
                 unresolved.update(
                     str(value).strip()
                     for value in cut_plan.get("unresolved_item_ids") or []
@@ -2169,7 +2185,6 @@ def run_review_document(
             if not isinstance(source_audio_row, Mapping):
                 raise ValueError("Source material ledger is missing editable source audio")
             source_audio = Path(str(source_audio_row.get("path") or "")).resolve(strict=True)
-            executable_cuts = list(cut_plan.get("executable_cuts") or [])
             audio_rows = [
                 row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)
             ]
@@ -2179,74 +2194,91 @@ def run_review_document(
             cache_hits: list[bool] = []
             artifacts: list[Path] = []
             candidate: Path | None = None
+            audio_plan: dict[str, Any] = {"mode": "legacy"}
+            plan_digest = ""
+            reverse_attempt_count = 0
+            downgraded_item_ids: list[str] = []
             reverse_report: dict[str, Any] = {
                 "schema_version": _SCHEMA_VERSION,
                 "status": "not_required",
                 "unresolved_ids": [],
                 "rows": [],
             }
-            if executable_cuts:
-                if not paths["alignment_wav"].is_file():
-                    raise FileNotFoundError("Executable audio cuts require the cached alignment WAV")
-                candidate_identity_payload = candidate_cache_identity(
-                    alignment_audio_sha256=sha256_file(paths["alignment_wav"]),
-                    executable_cuts=executable_cuts,
-                )
-                candidate_identity = CacheIdentity(
-                    "source_aligned_candidate",
-                    inputs=candidate_identity_payload["inputs"],
-                    versions=candidate_identity_payload["versions"],
-                )
-                cached_candidate, candidate_hit = _cached_file(
-                    cache,
-                    candidate_identity,
-                    build=lambda output: render_source_aligned_candidate(
-                        paths["alignment_wav"], output, delete_windows=executable_cuts
-                    ),
-                    suffix=".wav",
-                )
-                cache_hits.append(candidate_hit)
-                _copy_cached_file(cached_candidate, paths["candidate_wav"])
-                candidate = paths["candidate_wav"]
-                audio_plan = build_lite_split_gap_audio_plan(
-                    cut_plan,
-                    source_audio_path=source_audio,
-                    candidate_audio_path=candidate,
-                )
-            else:
-                audio_plan = {"mode": "legacy"}
+            while True:
+                request = deepcopy(before_request)
+                ledger = deepcopy(before_ledger)
+                candidate = None
+                executable_cuts = list(cut_plan.get("executable_cuts") or [])
+                if executable_cuts:
+                    if not paths["alignment_wav"].is_file():
+                        raise FileNotFoundError(
+                            "Executable audio cuts require the cached alignment WAV"
+                        )
+                    candidate_identity_payload = candidate_cache_identity(
+                        alignment_audio_sha256=sha256_file(paths["alignment_wav"]),
+                        executable_cuts=executable_cuts,
+                    )
+                    candidate_identity = CacheIdentity(
+                        "source_aligned_candidate",
+                        inputs=candidate_identity_payload["inputs"],
+                        versions=candidate_identity_payload["versions"],
+                    )
+                    cached_candidate, candidate_hit = _cached_file(
+                        cache,
+                        candidate_identity,
+                        build=lambda output: render_source_aligned_candidate(
+                            paths["alignment_wav"], output, delete_windows=executable_cuts
+                        ),
+                        suffix=".wav",
+                    )
+                    cache_hits.append(candidate_hit)
+                    _copy_cached_file(cached_candidate, paths["candidate_wav"])
+                    candidate = paths["candidate_wav"]
+                    audio_plan = build_lite_split_gap_audio_plan(
+                        cut_plan,
+                        source_audio_path=source_audio,
+                        candidate_audio_path=candidate,
+                    )
+                else:
+                    audio_plan = {"mode": "legacy"}
 
-            if audio_rows:
-                request, ledger = apply_audio_plan_to_compiled_payloads(
-                    request,
-                    ledger,
-                    cut_plan,
-                    audio_delivery_plan=audio_plan,
-                    source_audio_path=source_audio,
-                    candidate_audio_path=candidate,
+                if audio_rows:
+                    request, ledger = apply_audio_plan_to_compiled_payloads(
+                        request,
+                        ledger,
+                        cut_plan,
+                        audio_delivery_plan=audio_plan,
+                        source_audio_path=source_audio,
+                        candidate_audio_path=candidate,
+                    )
+                    _restore_non_asr_items(
+                        before_request,
+                        before_ledger,
+                        request,
+                        ledger,
+                        audio_item_ids,
+                    )
+                else:
+                    request["audio_delivery_plan"] = {"mode": "legacy"}
+                atomic_write_json(paths["processed_request"], request)
+                plan_digest = audio_delivery_plan_sha256(
+                    load_revision_request(str(paths["processed_request"]))
                 )
-                _restore_non_asr_items(
-                    before_request,
-                    before_ledger,
-                    request,
-                    ledger,
-                    audio_item_ids,
-                )
-            else:
-                request["audio_delivery_plan"] = {"mode": "legacy"}
-            try:
-                _compile_explicit_lite_visuals(request, ledger)
-            except LiteVisualAssetError as exc:
-                failure_details["reverse_asr"] = exc.public_data()
-                raise
-            if request.get("pause_adjustments"):
-                raise ValueError("Lite review-document runner refuses executable pause adjustments")
-            atomic_write_json(paths["processed_request"], request)
-            plan_digest = audio_delivery_plan_sha256(
-                load_revision_request(str(paths["processed_request"]))
-            )
 
-            if candidate is not None:
+                if candidate is None:
+                    reverse_report = {
+                        "schema_version": _SCHEMA_VERSION,
+                        "status": "not_required",
+                        "attempt_count": reverse_attempt_count,
+                        "downgraded_item_ids": list(downgraded_item_ids),
+                        "unresolved_ids": [],
+                        "rows": [],
+                    }
+                    atomic_write_json(paths["reverse_report"], reverse_report)
+                    artifacts.append(paths["reverse_report"])
+                    break
+
+                reverse_attempt_count += 1
                 config = load_volc_asr_config()
                 cut_plan_digest = canonical_json_sha256(cut_plan)
                 reverse_identity_payload = reverse_asr_cache_identity(
@@ -2289,6 +2321,37 @@ def run_review_document(
                     candidate_audio_path=candidate,
                     audio_delivery_plan_sha256=plan_digest,
                 )
+                unresolved_ids = [
+                    str(value).strip()
+                    for value in reverse_report.get("unresolved_ids") or []
+                    if str(value).strip()
+                ]
+                reverse_report["status"] = "review" if unresolved_ids else "pass"
+                reverse_report["attempt_count"] = reverse_attempt_count
+                reverse_report["downgraded_item_ids"] = list(downgraded_item_ids)
+                if unresolved_ids and reverse_attempt_count == 1:
+                    atomic_copy_file(candidate, paths["initial_candidate_wav"])
+                    initial_report = deepcopy(reverse_report)
+                    initial_report["candidate_audio_path"] = str(
+                        paths["initial_candidate_wav"]
+                    )
+                    initial_report["fallback_action"] = (
+                        "downgrade_attributable_failures_and_revalidate"
+                    )
+                    atomic_write_json(paths["initial_reverse_report"], initial_report)
+                    artifacts.extend(
+                        [paths["initial_candidate_wav"], paths["initial_reverse_report"]]
+                    )
+                    cut_plan = downgrade_reverse_asr_failures(cut_plan, unresolved_ids)
+                    downgraded_item_ids = list(
+                        (cut_plan.get("reverse_asr_fallback") or {}).get(
+                            "downgraded_item_ids"
+                        )
+                        or []
+                    )
+                    continue
+
+                reverse_report["downgraded_item_ids"] = list(downgraded_item_ids)
                 atomic_write_json(paths["reverse_report"], reverse_report)
                 request, ledger = apply_reverse_report_to_payloads(
                     request,
@@ -2297,9 +2360,15 @@ def run_review_document(
                     report_path=paths["reverse_report"],
                 )
                 artifacts.extend([candidate, paths["reverse_report"]])
-            else:
-                atomic_write_json(paths["reverse_report"], reverse_report)
-                artifacts.append(paths["reverse_report"])
+                break
+
+            try:
+                _compile_explicit_lite_visuals(request, ledger)
+            except LiteVisualAssetError as exc:
+                failure_details["reverse_asr"] = exc.public_data()
+                raise
+            if request.get("pause_adjustments"):
+                raise ValueError("Lite review-document runner refuses executable pause adjustments")
 
             base_ledger = _read_json_object(
                 _compiled_paths(paths["compiled_base"])[1], "base source ledger"
@@ -2308,6 +2377,7 @@ def run_review_document(
             _assert_authoritative_starts(ledger)
             atomic_write_json(paths["processed_request"], request)
             atomic_write_json(paths["processed_items"], ledger)
+            atomic_write_json(paths["processed_cut_plan"], cut_plan)
             atomic_write_json(paths["audio_plan"], audio_plan)
             # Parse the exact files that the low-level writer will consume.
             load_revision_request(str(paths["processed_request"]))
@@ -2347,9 +2417,9 @@ def run_review_document(
                 ),
                 "audio_delivery_plan_sha256": plan_digest,
                 "source_asr_reused": True,
-                "reverse_asr_status": (
-                    "pass" if not reverse_report.get("unresolved_ids") else "review"
-                ),
+                "reverse_asr_status": str(reverse_report.get("status") or "not_required"),
+                "reverse_asr_attempt_count": reverse_attempt_count,
+                "reverse_asr_downgraded_item_ids": list(downgraded_item_ids),
                 "unresolved_item_ids": list(cut_plan.get("unresolved_item_ids") or []),
             }
             atomic_write_json(paths["processed_summary"], summary)
@@ -2357,6 +2427,7 @@ def run_review_document(
                 [
                     paths["processed_request"],
                     paths["processed_items"],
+                    paths["processed_cut_plan"],
                     paths["audio_plan"],
                     paths["processed_summary"],
                 ]
@@ -2372,6 +2443,7 @@ def run_review_document(
                 result={
                     "revision_request": str(paths["processed_request"]),
                     "doc_items": str(paths["processed_items"]),
+                    "audio_cut_plan": str(paths["processed_cut_plan"]),
                     "processed_media_evidence": str(paths["processed_summary"]),
                 },
                 cache_hit=(all(cache_hits) if cache_hits else None),

@@ -220,6 +220,49 @@ def wav_duration_seconds(path: str | os.PathLike[str]) -> float:
         return source.getnframes() / float(source.getframerate())
 
 
+def _pcm_frame_count_matches_duration(
+    frame_count: int,
+    sample_rate: int,
+    duration_seconds: float,
+) -> bool:
+    try:
+        duration = float(duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if frame_count < 0 or sample_rate <= 0 or not math.isfinite(duration):
+        return False
+    expected_frame_count = round(duration * sample_rate)
+    return abs(frame_count - expected_frame_count) <= 1
+
+
+def _wav_duration_matches_media_duration(
+    path: str | os.PathLike[str], duration_seconds: float
+) -> bool:
+    with wave.open(str(path), "rb") as source:
+        return _pcm_frame_count_matches_duration(
+            source.getnframes(),
+            source.getframerate(),
+            duration_seconds,
+        )
+
+
+def _reported_pcm_durations_match(
+    candidate_duration_seconds: float, source_duration_seconds: float
+) -> bool:
+    try:
+        candidate_duration = float(candidate_duration_seconds)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if not math.isfinite(candidate_duration):
+        return False
+    candidate_frame_count = round(candidate_duration * ALIGNMENT_SAMPLE_RATE)
+    return _pcm_frame_count_matches_duration(
+        candidate_frame_count,
+        ALIGNMENT_SAMPLE_RATE,
+        source_duration_seconds,
+    )
+
+
 def _normalize_windows(
     windows: Sequence[Mapping[str, Any]], duration_seconds: float
 ) -> list[dict[str, Any]]:
@@ -310,7 +353,9 @@ def render_source_aligned_candidate(
         "source_duration_seconds": source_duration,
         "candidate_duration_seconds": candidate_duration,
         "source_aligned": True,
-        "duration_matches_source": abs(candidate_duration - source_duration) <= 1e-6,
+        "duration_matches_source": _wav_duration_matches_media_duration(
+            output_path, duration
+        ),
         "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "delivery_eligible": False,
@@ -536,8 +581,11 @@ def resolve_lite_audio_items(
             item.get("validation"),
         )
         routed_label_only = routed_status.casefold().startswith("label_only_")
+        retryable_unresolved = routed_status.casefold() == "label_only_unresolved"
         requested_execute = (
-            bool(item.get("execution_required")) and not pause_label_only and not routed_label_only
+            (bool(item.get("execution_required")) or retryable_unresolved)
+            and not pause_label_only
+            and (not routed_label_only or retryable_unresolved)
         )
         executable_kind = kind in _AUDIO_KINDS
         selected: dict[str, Any] | None = None
@@ -730,6 +778,88 @@ def resolve_lite_audio_items(
     }
 
 
+def downgrade_reverse_asr_failures(
+    cut_plan: Mapping[str, Any],
+    failed_item_ids: Sequence[str],
+) -> dict[str, Any]:
+    """Turn only attributable reverse-ASR failures into non-executing labels."""
+
+    requested_ids = [str(value).strip() for value in failed_item_ids if str(value).strip()]
+    normalized_ids = {value.casefold() for value in requested_ids}
+    if not normalized_ids:
+        raise ValueError("Reverse-ASR fallback requires attributable item IDs")
+
+    updated = deepcopy(dict(cut_plan))
+    rows = updated.get("rows")
+    if not isinstance(rows, list):
+        raise ValueError("Audio cut plan rows must be a list")
+
+    executable_ids = {
+        str(row.get("item_id") or "").strip().casefold()
+        for row in rows
+        if isinstance(row, Mapping) and row.get("execution_required")
+    }
+    unknown_ids = sorted(normalized_ids - executable_ids)
+    if unknown_ids:
+        raise ValueError(
+            "Reverse-ASR fallback referenced non-executable audio items: "
+            + ", ".join(unknown_ids)
+        )
+
+    downgraded_ids: list[str] = []
+    for raw_row in rows:
+        if not isinstance(raw_row, dict):
+            continue
+        item_id = str(raw_row.get("item_id") or "").strip()
+        if item_id.casefold() not in normalized_ids:
+            continue
+        start = float(raw_row.pop("start"))
+        end = float(raw_row.pop("end"))
+        raw_row["status"] = "label_only"
+        raw_row["execution_required"] = False
+        raw_row["execution_status"] = "label_only_unresolved"
+        raw_row["reason"] = "reverse_asr_validation_unresolved"
+        raw_row["resolved_time"] = round(start, 6)
+        raw_row["timing_source"] = "asr"
+        raw_row["rejected_cut_window"] = [round(start, 6), round(end, 6)]
+        alignment = raw_row.get("asr_alignment")
+        if isinstance(alignment, dict):
+            alignment["authoritative_timing"] = True
+            alignment["authoritative_cut_boundary"] = False
+            alignment["resolved_time"] = round(start, 6)
+            alignment.pop("resolved_cut_window", None)
+        downgraded_ids.append(item_id)
+
+    remaining = [
+        row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("execution_required")
+    ]
+    updated["executable_cuts"] = [
+        {
+            "item_id": str(row.get("item_id") or ""),
+            "start": float(row["start"]),
+            "end": float(row["end"]),
+        }
+        for row in remaining
+    ]
+    updated["unresolved_item_ids"] = list(
+        dict.fromkeys(
+            [
+                *[str(value) for value in updated.get("unresolved_item_ids") or []],
+                *downgraded_ids,
+            ]
+        )
+    )
+    updated["reverse_asr_fallback"] = {
+        "policy": "downgrade_attributable_failures_once",
+        "downgraded_item_ids": downgraded_ids,
+        "source_media_mutated": False,
+        "cut_windows_widened": False,
+    }
+    return updated
+
+
 def _complement_windows(
     cuts: Sequence[Mapping[str, Any]], duration_seconds: float
 ) -> list[tuple[float, float]]:
@@ -799,7 +929,9 @@ def build_lite_split_gap_audio_plan(
         "source_duration_seconds": source_duration,
         "candidate_duration_seconds": candidate_duration,
         "source_aligned": True,
-        "duration_matches_source": abs(candidate_duration - source_duration) <= 1e-6,
+        "duration_matches_source": _wav_duration_matches_media_duration(
+            candidate, duration
+        ),
         "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "delivery_eligible": False,
@@ -822,6 +954,26 @@ def _row_by_id(cut_plan: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         for row in cut_plan.get("rows") or []
         if isinstance(row, Mapping) and str(row.get("item_id") or "")
     }
+
+
+def _clear_retryable_label_only_statuses(value: Any) -> Any:
+    """Remove stale unresolved statuses after a fresh authoritative ASR match."""
+
+    if isinstance(value, list):
+        return [_clear_retryable_label_only_statuses(item) for item in value]
+    if not isinstance(value, Mapping):
+        return deepcopy(value)
+    cleaned: dict[str, Any] = {}
+    for key, nested in value.items():
+        normalized_key = re.sub(r"[^a-z0-9]+", "", str(key or "").casefold())
+        normalized_value = re.sub(r"[\s-]+", "_", str(nested or "")).casefold()
+        if (
+            normalized_key in {"executionstatus", "status"}
+            and normalized_value == "label_only_unresolved"
+        ):
+            continue
+        cleaned[str(key)] = _clear_retryable_label_only_statuses(nested)
+    return cleaned
 
 
 def apply_audio_plan_to_compiled_payloads(
@@ -857,7 +1009,7 @@ def apply_audio_plan_to_compiled_payloads(
                 # This pass owns only items selected by the ASR timing router.
                 # Visual and other maintained Lite executors run in later phases.
                 continue
-            evidence = dict(item.get("evidence") or {})
+            evidence = _clear_retryable_label_only_statuses(item.get("evidence") or {})
             evidence.update(
                 {
                     "strategy": row["strategy"],
@@ -877,6 +1029,9 @@ def apply_audio_plan_to_compiled_payloads(
             if row["execution_required"]:
                 evidence["cut_windows"] = [[row["start"], row["end"]]]
                 evidence["resolved_cut_window"] = [row["start"], row["end"]]
+                item["validation"] = _clear_retryable_label_only_statuses(
+                    item.get("validation") or {}
+                )
             else:
                 evidence["execution_status"] = row["execution_status"]
                 evidence["reason"] = row.get("reason")
@@ -946,10 +1101,11 @@ def apply_audio_plan_to_compiled_payloads(
             "candidate_audio_source_aligned": True,
             "candidate_audio_source_duration_seconds": source_duration,
             "candidate_audio_duration_seconds": candidate_duration,
-            "candidate_audio_duration_matches_source": abs(
-                candidate_duration - source_duration
-            )
-            <= 1e-6,
+            "candidate_audio_duration_matches_source": (
+                _wav_duration_matches_media_duration(
+                    candidate, float(cut_plan["source_duration_seconds"])
+                )
+            ),
             "candidate_audio_renderer_version": CANDIDATE_RENDERER_VERSION,
             "status": "pending_reverse_asr",
         }
@@ -1081,6 +1237,8 @@ def build_full_candidate_reverse_report(
     audio_delivery_plan_sha256: str,
 ) -> dict[str, Any]:
     candidate = Path(candidate_audio_path).expanduser().resolve(strict=True)
+    candidate_duration = round(wav_duration_seconds(candidate), 6)
+    source_duration = round(float(cut_plan["source_duration_seconds"]), 6)
     words = candidate_asr.get("words")
     if not isinstance(words, list) or not words:
         raise ValueError("Candidate reverse ASR must contain word timing rows")
@@ -1150,19 +1308,17 @@ def build_full_candidate_reverse_report(
         "report_builder_version": REVERSE_REPORT_VERSION,
         "candidate_audio_path": str(candidate),
         "candidate_audio_sha256": sha256_file(candidate),
-        "candidate_audio_duration_seconds": round(wav_duration_seconds(candidate), 6),
+        "candidate_audio_duration_seconds": candidate_duration,
         "candidate_audio_purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "candidate_audio_role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "candidate_audio_delivery_eligible": False,
         "candidate_audio_source_aligned": True,
-        "candidate_audio_source_duration_seconds": round(
-            float(cut_plan["source_duration_seconds"]), 6
+        "candidate_audio_source_duration_seconds": source_duration,
+        "candidate_audio_duration_matches_source": (
+            _wav_duration_matches_media_duration(
+                candidate, float(cut_plan["source_duration_seconds"])
+            )
         ),
-        "candidate_audio_duration_matches_source": abs(
-            round(wav_duration_seconds(candidate), 6)
-            - round(float(cut_plan["source_duration_seconds"]), 6)
-        )
-        <= 1e-6,
         "candidate_audio_renderer_version": CANDIDATE_RENDERER_VERSION,
         "audio_delivery_plan_sha256": audio_delivery_plan_sha256,
         "asr_identity": {
@@ -1220,7 +1376,9 @@ def apply_reverse_report_to_payloads(
     if not (
         math.isfinite(source_duration_value)
         and math.isfinite(candidate_duration_value)
-        and abs(source_duration_value - candidate_duration_value) <= 1e-6
+        and _reported_pcm_durations_match(
+            candidate_duration_value, source_duration_value
+        )
     ):
         raise ValueError(
             "Reverse-ASR candidate duration does not match the source duration"
@@ -1526,6 +1684,7 @@ __all__ = [
     "cache_identity_lock",
     "candidate_cache_identity",
     "canonical_json_sha256",
+    "downgrade_reverse_asr_failures",
     "extract_alignment_wav",
     "ffmpeg_identity",
     "render_source_aligned_candidate",

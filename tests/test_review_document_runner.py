@@ -378,6 +378,145 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             )
             self.assertEqual(processed["review_items"][0]["source_text"], "00:01 删除“测试”")
 
+    def test_reverse_asr_retry_downgrades_only_failed_item_and_revalidates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            snapshot_payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            snapshot_payload["items"].append(
+                {
+                    "id": "spoken-2",
+                    "kind": "spoken_delete",
+                    "source_text": "00:02 删除“第二”",
+                    "start": 1.7,
+                    "end": 2.5,
+                    "execution_required": True,
+                    "evidence": {"delete": "第二", "strategy": "precision_first"},
+                }
+            )
+            _write_json(snapshot, snapshot_payload)
+
+            def two_item_asr(audio_path, **_kwargs):
+                path = Path(audio_path)
+                is_candidate = path.name == "candidate_source_aligned.wav"
+                words = (
+                    [
+                        {"text": "前", "start": 0.2, "end": 0.5},
+                        {"text": "后", "start": 2.5, "end": 2.8},
+                    ]
+                    if is_candidate
+                    else [
+                        {"text": "前", "start": 0.2, "end": 0.5},
+                        {"text": "测试", "start": 1.0, "end": 1.3},
+                        {"text": "第二", "start": 2.0, "end": 2.3},
+                        {"text": "后", "start": 2.5, "end": 2.8},
+                    ]
+                )
+                return {
+                    "schema_version": 1,
+                    "provider": "volc_asr",
+                    "resource_id": "volc.bigasr.auc",
+                    "adapter_version": "test-adapter-v1",
+                    "input_sha256": runner.sha256_file(path),
+                    "service_job_id": "candidate-job" if is_candidate else "source-job",
+                    "service_result_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    "words": words,
+                }
+
+            original_builder = runner.build_full_candidate_reverse_report
+            report_calls = 0
+
+            def controlled_report(*args, **kwargs):
+                nonlocal report_calls
+                report_calls += 1
+                report = original_builder(*args, **kwargs)
+                for row in report["rows"]:
+                    row["status"] = "pass"
+                    row["delete_hits"] = []
+                    row["keep_hits"] = {
+                        phrase: True for phrase in row.get("must_keep") or []
+                    }
+                    row["semantic_join_validation"] = {
+                        "status": "pass",
+                        "method": "test",
+                        "forbidden_patterns": [],
+                    }
+                if report_calls == 1:
+                    report["unresolved_ids"] = ["spoken-1"]
+                    report["rows"][0]["status"] = "review"
+                else:
+                    report["unresolved_ids"] = []
+                report["status_counts"] = {
+                    "pass": sum(row["status"] == "pass" for row in report["rows"]),
+                    "review": sum(row["status"] != "pass" for row in report["rows"]),
+                }
+                return report
+
+            with self._patched_runtime() as mocks:
+                with (
+                    patch.object(
+                        runner,
+                        "run_resumable_volc_asr",
+                        side_effect=two_item_asr,
+                    ),
+                    patch.object(
+                        runner,
+                        "build_full_candidate_reverse_report",
+                        side_effect=controlled_report,
+                    ),
+                ):
+                    result = self._run(
+                        snapshot,
+                        project,
+                        job_root=root / "job",
+                        drafts_root=root / "drafts",
+                        package_zip=root / "delivery.zip",
+                        cache_root=root / "cache",
+                    )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(report_calls, 2)
+            self.assertEqual(mocks["render"].call_count, 2)
+            cut_plan = json.loads(
+                Path(result["output_artifacts"]["audio_cut_plan"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            rows = {row["item_id"]: row for row in cut_plan["rows"]}
+            self.assertFalse(rows["spoken-1"]["execution_required"])
+            self.assertEqual(
+                rows["spoken-1"]["execution_status"], "label_only_unresolved"
+            )
+            self.assertFalse(
+                rows["spoken-1"]["asr_alignment"]["authoritative_cut_boundary"]
+            )
+            self.assertTrue(rows["spoken-2"]["execution_required"])
+            self.assertEqual(
+                [row["item_id"] for row in cut_plan["executable_cuts"]], ["spoken-2"]
+            )
+            processed_request = json.loads(
+                Path(result["output_artifacts"]["revision_request"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                [edit["doc_item_id"] for edit in processed_request["edits"]], ["spoken-2"]
+            )
+            summary = json.loads(
+                Path(
+                    result["output_artifacts"]["processed_media_evidence"]["path"]
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(summary["reverse_asr_status"], "pass")
+            self.assertEqual(summary["reverse_asr_attempt_count"], 2)
+            self.assertEqual(
+                summary["reverse_asr_downgraded_item_ids"], ["spoken-1"]
+            )
+            self.assertIn("spoken-1", result["unresolved_item_ids"])
+            self.assertTrue(
+                (root / "job" / "workspace" / "processed" / "reverse_asr_initial_report.json").is_file()
+            )
+
     def test_lark_block_ids_remain_unique_in_internal_marker_receipts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -560,6 +699,74 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 ledger["review_items"][0].get("execution_status"),
                 "label_only_unresolved",
             )
+
+    def test_pointer_removal_with_asset_does_not_compile_overlay_but_readd_does(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            asset = Path(tmpdir) / "hand.png"
+            asset.write_bytes(b"png")
+
+            for index, source_text in enumerate(
+                (
+                    "00:02 删除屏幕上的小手",
+                    "00:03 删除小手",
+                    "00:04 去除画面中的小手",
+                    "00:05 把小手拿掉",
+                    "00:06 这里不要小手",
+                    "00:07 删除小手添加的动画",
+                    "00:07 删除小手，再添加动画",
+                ),
+                start=1,
+            ):
+                with self.subTest(source_text=source_text):
+                    item = {
+                        "id": f"pointer-remove-{index}",
+                        "kind": "pointer_overlay",
+                        "source_text": source_text,
+                        "start": float(index + 1),
+                        "end": float(index + 2),
+                        "execution_required": True,
+                        "evidence": {"asset_path": str(asset)},
+                    }
+                    request = {"review_items": [deepcopy(item)], "edits": []}
+                    ledger = {"review_items": [deepcopy(item)]}
+
+                    runner._compile_explicit_lite_visuals(request, ledger)
+
+                    self.assertEqual(request["edits"], [])
+                    self.assertFalse(request["review_items"][0]["execution_required"])
+                    self.assertEqual(
+                        request["review_items"][0]["execution_status"],
+                        "label_only_unresolved",
+                    )
+                    self.assertFalse(ledger["review_items"][0]["execution_required"])
+
+            for index, source_text in enumerate(
+                (
+                    "00:08 删除原小手并重新添加",
+                    "00:09 小手移除后再加一个",
+                    "00:10 移除后再加一个",
+                ),
+                start=1,
+            ):
+                with self.subTest(source_text=source_text):
+                    readd_item = {
+                        "id": f"pointer-readd-{index}",
+                        "kind": "pointer_overlay",
+                        "source_text": source_text,
+                        "start": float(index + 7),
+                        "end": float(index + 8),
+                        "execution_required": True,
+                        "evidence": {"asset_path": str(asset)},
+                    }
+                    request = {"review_items": [deepcopy(readd_item)], "edits": []}
+                    ledger = {"review_items": [deepcopy(readd_item)]}
+
+                    runner._compile_explicit_lite_visuals(request, ledger)
+
+                    self.assertEqual(
+                        [edit["type"] for edit in request["edits"]],
+                        ["add_overlay"],
+                    )
 
     def test_unknown_visual_kind_with_local_plan_is_label_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:

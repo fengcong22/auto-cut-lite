@@ -2434,6 +2434,80 @@ class LiteRevisionTests(unittest.TestCase):
                     "forbid_full_length_segments": True,
                     "segments": [
                         {
+                            "id": "a2-full",
+                            "role": "reference",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["reused_audio"],
+                            "source_start": 0.0,
+                            "timeline_start": 0.0,
+                            "duration": 10.0,
+                        },
+                    ],
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "spoken_delete",
+                        "start": 0.0,
+                        "end": 10.0,
+                        "doc_item_id": "item-1",
+                        "evidence": {
+                            "review_timestamp_role": "search_hint",
+                            "delete": "summary",
+                            "must_keep": ["before", "after"],
+                            "strategy": "precision_first",
+                            "asr_alignment": {
+                                "status": "pass",
+                                "provider": "test-asr",
+                                "model": "test-model",
+                                "adapter_version": "1",
+                                "granularity": "word",
+                                "input_sha256": "e" * 64,
+                                "authoritative_cut_boundary": True,
+                                "words": [{"text": "summary", "start": 0.0, "end": 10.0}],
+                                "resolved_cut_window": [0.0, 10.0],
+                            },
+                        },
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "item-1",
+                        "kind": "spoken_delete",
+                        "source_text": "00:00-00:10 delete summary",
+                        "start": 0.0,
+                        "end": 10.0,
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "independent clip per merged ASR delete"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(drafts_root, "LiteInvalidFullA2", "draft_content.json")
+                )
+            )
+
+    def test_lite_split_gap_rejects_legacy_a1_track_alongside_canonical_a1(self):
+        source_audio = "C:/media/source.wav"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "split_gap",
+                "project": {
+                    "draft_name": "LiteLegacyA1",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": source_audio,
+                    "media_duration_seconds": 10.0,
+                },
+                "audio_delivery_plan": {
+                    "mode": "segmented",
+                    "forbid_full_length_segments": True,
+                    "segments": [
+                        {
                             "id": "a1-001",
                             "role": "source",
                             "asset_path": source_audio,
@@ -2452,42 +2526,26 @@ class LiteRevisionTests(unittest.TestCase):
                             "duration": 6.0,
                         },
                         {
-                            "id": "a2-full",
+                            "id": "a2-001",
                             "role": "reference",
                             "asset_path": source_audio,
                             "track_name": LITE_TRACKS["reused_audio"],
+                            "source_start": 2.0,
+                            "timeline_start": 2.0,
+                            "duration": 2.0,
+                        },
+                        {
+                            "id": "legacy-a1",
+                            "role": "source",
+                            "asset_path": source_audio,
+                            "track_name": "Lite Source Audio",
                             "source_start": 0.0,
                             "timeline_start": 0.0,
                             "duration": 10.0,
                         },
                     ],
                 },
-                "edits": [
-                    {
-                        "type": "delete",
-                        "source_kind": "spoken_delete",
-                        "start": 2.0,
-                        "end": 4.0,
-                        "doc_item_id": "item-1",
-                        "evidence": {
-                            "review_timestamp_role": "search_hint",
-                            "delete": "summary",
-                            "must_keep": ["before", "after"],
-                            "strategy": "precision_first",
-                            "asr_alignment": {
-                                "status": "pass",
-                                "provider": "test-asr",
-                                "model": "test-model",
-                                "adapter_version": "1",
-                                "granularity": "word",
-                                "input_sha256": "e" * 64,
-                                "authoritative_cut_boundary": True,
-                                "words": [{"text": "summary", "start": 2.0, "end": 4.0}],
-                                "resolved_cut_window": [2.0, 4.0],
-                            },
-                        },
-                    }
-                ],
+                "edits": [_spoken_delete_edit("item-1", 2.0, 4.0, label="summary")],
                 "review_items": [
                     {
                         "id": "item-1",
@@ -2501,8 +2559,13 @@ class LiteRevisionTests(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as drafts_root:
-            with self.assertRaisesRegex(ValueError, "independent clip per merged ASR delete"):
+            with self.assertRaisesRegex(ValueError, "unexpected track.*Lite Source Audio"):
                 execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(drafts_root, "LiteLegacyA1", "draft_content.json")
+                )
+            )
 
     def test_lite_reuses_one_material_for_repeated_pointer_png(self):
         pointer_path = "C:/media/shared-pointer.png"
@@ -2861,6 +2924,33 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertTrue(
             lite_execution_required("spoken_delete", "00:05 删除“重复词”", True)
         )
+
+    def test_lite_pointer_removal_is_label_only_unless_readded(self):
+        for source_text in (
+            "00:06 删除屏幕上的小手",
+            "00:07 删除小手",
+            "00:08 把小手删掉",
+            "00:09 去除画面中的小手",
+            "00:10 把小手拿掉",
+            "00:11 这里不要小手",
+            "00:12 删除小手添加的动画",
+            "00:12 删除小手，再添加动画",
+        ):
+            with self.subTest(source_text=source_text):
+                self.assertFalse(
+                    lite_execution_required("pointer_overlay", source_text, True)
+                )
+
+        for source_text in (
+            "00:13 删除原小手并重新添加",
+            "00:14 小手移除后再加一个",
+            "00:15 删除原小手，然后添加一个新小手",
+            "00:16 移除后再加一个",
+        ):
+            with self.subTest(source_text=source_text):
+                self.assertTrue(
+                    lite_execution_required("pointer_overlay", source_text, True)
+                )
 
 
 if __name__ == "__main__":

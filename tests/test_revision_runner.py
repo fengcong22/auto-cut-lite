@@ -3314,6 +3314,101 @@ class TestRevisionRunner(unittest.TestCase):
 
         open_project.assert_not_called()
 
+    def test_routed_audio_gates_reject_legacy_delivery_before_opening_a_draft(self):
+        cases = (
+            ("speech_replace", "replace_audio"),
+            ("bgm_replace", "delete"),
+        )
+        for kind, op_type in cases:
+            with self.subTest(kind=kind, op_type=op_type):
+                request = self._conditional_request(
+                    kind=kind,
+                    op_type=op_type,
+                    evidence={"executed": True, "cut_window": [1.0, 2.0]},
+                    validation={"status": "pass"},
+                )
+                profile = revision_validation_api.derive_acceptance_profile(
+                    request, doc_items=request.review_items
+                )
+                self.assertTrue(
+                    {"audio_precision", "audio_join"}.intersection(
+                        profile["items"][0]["gates"]
+                    )
+                )
+
+                with patch.object(
+                    revision_runner_api,
+                    "_open_revision_project",
+                    side_effect=AssertionError("draft must not be opened"),
+                ) as open_project:
+                    with self.assertRaisesRegex(
+                        ValueError, "segmented audio delivery"
+                    ):
+                        execute_revision_request(request, mock_media=True, strict=True)
+
+                open_project.assert_not_called()
+
+    def test_lite_label_only_audio_does_not_attach_segmented_gate_to_pointer(self):
+        request = self._load_request_payload(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "split_gap",
+                "project": {
+                    "draft_name": "LiteLabelOnlyAudio",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": "C:/media/source.wav",
+                    "media_duration_seconds": 10.0,
+                },
+                "review_items": [
+                    {
+                        "id": "audio-label",
+                        "kind": "spoken_delete",
+                        "source_text": "00:01 删除“无法确认”",
+                        "start": 1.0,
+                        "execution_required": False,
+                        "execution_status": "label_only_unresolved",
+                        "evidence": {
+                            "asr_alignment": {
+                                "status": "pass",
+                                "authoritative_timing": True,
+                                "authoritative_cut_boundary": False,
+                                "resolved_time": 1.0,
+                            }
+                        },
+                    },
+                    {
+                        "id": "pointer-add",
+                        "kind": "pointer_overlay",
+                        "source_text": "00:02 添加小手指向标题",
+                        "start": 2.0,
+                        "execution_required": True,
+                    },
+                ],
+                "edits": [
+                    {
+                        "type": "add_overlay",
+                        "source_kind": "pointer_overlay",
+                        "doc_item_id": "pointer-add",
+                        "start": 2.0,
+                        "end": 3.0,
+                        "label": "00:02 添加小手指向标题",
+                        "asset_paths": ["C:/media/hand.png"],
+                    }
+                ],
+                "audio_delivery_plan": {"mode": "legacy"},
+                "acceptance": {"require_audio_validation": True},
+            }
+        )
+
+        profile = revision_validation_api.derive_acceptance_profile(
+            request, doc_items=request.review_items
+        )
+        self.assertNotIn("audio_precision", profile["enabled_gates"])
+        self.assertNotIn("audio_join", profile["enabled_gates"])
+        revision_runner_api._validate_revision_execution_preflight(
+            request, request.review_items
+        )
+
     def test_targeted_audio_repair_rejects_widened_delete_window(self):
         request = self._conditional_request(
             kind="spoken_delete",

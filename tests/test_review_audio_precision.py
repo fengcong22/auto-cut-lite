@@ -24,13 +24,19 @@ from utils.review_audio_precision import (
     build_lite_split_gap_audio_plan,
     candidate_cache_identity,
     canonical_json_sha256,
+    downgrade_reverse_asr_failures,
     render_source_aligned_candidate,
     resolve_lite_audio_items,
     reverse_asr_cache_identity,
     source_asr_cache_identity,
     wav_duration_seconds,
 )
-from utils.revision_models import load_revision_request
+from utils.revision_models import (
+    lite_review_item_execution_required,
+    load_review_items_json,
+    load_revision_request,
+    review_item_execution_status,
+)
 from utils.revision_validation import (
     _saved_audio_delivery_volume,
     _spoken_reverse_asr_row_evidence_problems,
@@ -95,6 +101,175 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             [match["text"] for match in row["asr_alignment"]["matches"]],
             ["口头", "赘词"],
         )
+
+    def test_stale_unresolved_audio_retries_but_lite_policy_remains_label_only(self):
+        source_asr = _source_asr(
+            [
+                {"text": "前文", "start": 0.4, "end": 0.8},
+                {"text": "测试", "start": 1.0, "end": 1.4},
+                {"text": "后文", "start": 1.6, "end": 2.0},
+            ]
+        )
+        common = {
+            "kind": "spoken_delete",
+            "source_text": "00:01 删除“测试”",
+            "start": 0.8,
+            "end": 1.6,
+            "execution_required": False,
+            "evidence": {"delete": "测试"},
+        }
+        review_items = [
+            {
+                **common,
+                "id": "retry",
+                "execution_status": "label_only_unresolved",
+                "evidence": {
+                    "delete": "测试",
+                    "execution_status": "label_only_unresolved",
+                },
+                "validation": {
+                    "layers": [{"status": "LABEL-ONLY-UNRESOLVED"}]
+                },
+            },
+            {
+                **common,
+                "id": "policy",
+                "execution_status": "label_only_lite_policy",
+                "evidence": {
+                    "delete": "测试",
+                    "execution_status": "label_only_lite_policy",
+                },
+            },
+        ]
+        result = resolve_lite_audio_items(
+            review_items,
+            source_asr,
+            source_duration_seconds=3.0,
+        )
+
+        rows = {row["item_id"]: row for row in result["rows"]}
+        self.assertTrue(rows["retry"]["execution_required"])
+        self.assertEqual(rows["retry"]["execution_status"], "asr_resolved")
+        self.assertTrue(rows["retry"]["asr_alignment"]["authoritative_cut_boundary"])
+        self.assertFalse(rows["policy"]["execution_required"])
+        self.assertEqual(rows["policy"]["execution_status"], "label_only_lite_policy")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_audio = root / "source.wav"
+            _write_pcm16_wav(source_audio, 3.0)
+            updated_request, updated_ledger = apply_audio_plan_to_compiled_payloads(
+                {
+                    "workflow_mode": "lite",
+                    "project": {
+                        "draft_name": "RetryableAudio",
+                        "source_video": "C:/media/source.mp4",
+                    },
+                    "review_items": review_items,
+                    "edits": [],
+                },
+                {"review_items": review_items},
+                result,
+                audio_delivery_plan={
+                    "mode": "segmented",
+                    "pending": False,
+                    "segments": [
+                        {
+                            "id": "source-1",
+                            "role": "source",
+                            "asset_path": str(source_audio),
+                            "track_name": "Separated Source Audio",
+                            "source_start": 0.0,
+                            "timeline_start": 0.0,
+                            "duration": 3.0,
+                        }
+                    ],
+                },
+                source_audio_path=source_audio,
+                candidate_audio_path=None,
+            )
+            request_path = root / "request.json"
+            ledger_path = root / "ledger.json"
+            request_path.write_text(
+                json.dumps(updated_request, ensure_ascii=False), encoding="utf-8"
+            )
+            ledger_path.write_text(
+                json.dumps(updated_ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            loaded_request = load_revision_request(str(request_path))
+            loaded_ledger = load_review_items_json(str(ledger_path))
+
+        loaded_request_items = {item.item_id: item for item in loaded_request.review_items}
+        loaded_ledger_items = {item.item_id: item for item in loaded_ledger}
+        for items in (loaded_request_items, loaded_ledger_items):
+            self.assertTrue(lite_review_item_execution_required(items["retry"]))
+            self.assertEqual(review_item_execution_status(items["retry"]), "asr_resolved")
+            self.assertFalse(lite_review_item_execution_required(items["policy"]))
+            self.assertEqual(
+                review_item_execution_status(items["policy"]),
+                "label_only_lite_policy",
+            )
+
+    def test_reverse_asr_fallback_downgrades_only_attributable_failures(self):
+        alignment = {
+            "status": "pass",
+            "authoritative_timing": True,
+            "authoritative_cut_boundary": True,
+            "resolved_cut_window": [2.0, 2.4],
+        }
+        cut_plan = {
+            "rows": [
+                {
+                    "item_id": "keep-cut",
+                    "execution_required": True,
+                    "execution_status": "asr_resolved",
+                    "start": 1.0,
+                    "end": 1.4,
+                    "asr_alignment": dict(alignment),
+                },
+                {
+                    "item_id": "failed-cut",
+                    "execution_required": True,
+                    "execution_status": "asr_resolved",
+                    "start": 2.0,
+                    "end": 2.4,
+                    "asr_alignment": dict(alignment),
+                },
+                {
+                    "item_id": "already-label",
+                    "execution_required": False,
+                    "execution_status": "label_only_unresolved",
+                    "resolved_time": 3.0,
+                },
+            ],
+            "executable_cuts": [
+                {"item_id": "keep-cut", "start": 1.0, "end": 1.4},
+                {"item_id": "failed-cut", "start": 2.0, "end": 2.4},
+            ],
+            "unresolved_item_ids": ["already-label"],
+        }
+
+        updated = downgrade_reverse_asr_failures(cut_plan, ["failed-cut"])
+        rows = {row["item_id"]: row for row in updated["rows"]}
+        self.assertTrue(rows["keep-cut"]["execution_required"])
+        self.assertTrue(
+            rows["keep-cut"]["asr_alignment"]["authoritative_cut_boundary"]
+        )
+        self.assertFalse(rows["failed-cut"]["execution_required"])
+        self.assertEqual(rows["failed-cut"]["execution_status"], "label_only_unresolved")
+        self.assertEqual(rows["failed-cut"]["rejected_cut_window"], [2.0, 2.4])
+        self.assertFalse(
+            rows["failed-cut"]["asr_alignment"]["authoritative_cut_boundary"]
+        )
+        self.assertNotIn("start", rows["failed-cut"])
+        self.assertEqual(
+            [row["item_id"] for row in updated["executable_cuts"]], ["keep-cut"]
+        )
+        self.assertEqual(
+            updated["unresolved_item_ids"], ["already-label", "failed-cut"]
+        )
+        with self.assertRaisesRegex(ValueError, "non-executable"):
+            downgrade_reverse_asr_failures(cut_plan, ["already-label"])
 
     def test_ambiguous_phrase_uses_review_timestamp_label(self):
         result = resolve_lite_audio_items(
@@ -377,6 +552,97 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             _saved_audio_delivery_volume(lite_request, SimpleNamespace(**row)) for row in a2
         ]
         self.assertEqual(saved_volumes, [1.0, 1.0])
+
+    def test_pcm_duration_quantization_allows_one_frame_but_rejects_two(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 1.0)
+            _write_pcm16_wav(candidate, 1.0)
+
+            def build_evidence(source_duration_seconds):
+                cut_plan = {
+                    "source_duration_seconds": source_duration_seconds,
+                    "rows": [],
+                    "executable_cuts": [
+                        {"item_id": "cut", "start": 0.25, "end": 0.5}
+                    ],
+                }
+                delivery_plan = build_lite_split_gap_audio_plan(
+                    cut_plan,
+                    source_audio_path=source,
+                    candidate_audio_path=candidate,
+                )
+                request, ledger = apply_audio_plan_to_compiled_payloads(
+                    {"project": {}, "review_items": [], "edits": []},
+                    {"review_items": []},
+                    cut_plan,
+                    audio_delivery_plan=delivery_plan,
+                    source_audio_path=source,
+                    candidate_audio_path=candidate,
+                )
+                report = build_full_candidate_reverse_report(
+                    request,
+                    cut_plan,
+                    {
+                        "provider": "volc_asr",
+                        "resource_id": "volc.bigasr.auc",
+                        "adapter_version": "test-adapter-v1",
+                        "service_job_id": "reverse-job",
+                        "service_result_sha256": "c" * 64,
+                        "words": [{"text": "保留", "start": 0.6, "end": 0.8}],
+                    },
+                    candidate_audio_path=candidate,
+                    audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+                )
+                return delivery_plan, request, ledger, report
+
+            one_frame_duration = 1.0 + (1.0 / 16_000)
+            delivery_plan, request, ledger, report = build_evidence(
+                one_frame_duration
+            )
+            self.assertTrue(
+                delivery_plan["validation_only_audio_metadata"][
+                    "duration_matches_source"
+                ]
+            )
+            self.assertTrue(
+                request["processed_audio"][
+                    "candidate_audio_duration_matches_source"
+                ]
+            )
+            self.assertTrue(report["candidate_audio_duration_matches_source"])
+            apply_reverse_report_to_payloads(
+                request,
+                ledger,
+                report,
+                report_path=root / "reverse-report.json",
+            )
+
+            two_frame_duration = 1.0 + (2.0 / 16_000)
+            delivery_plan, request, ledger, report = build_evidence(
+                two_frame_duration
+            )
+            self.assertFalse(
+                delivery_plan["validation_only_audio_metadata"][
+                    "duration_matches_source"
+                ]
+            )
+            self.assertFalse(
+                request["processed_audio"][
+                    "candidate_audio_duration_matches_source"
+                ]
+            )
+            self.assertFalse(report["candidate_audio_duration_matches_source"])
+            report["candidate_audio_duration_matches_source"] = True
+            with self.assertRaisesRegex(ValueError, "duration does not match"):
+                apply_reverse_report_to_payloads(
+                    request,
+                    ledger,
+                    report,
+                    report_path=root / "reverse-report.json",
+                )
 
     def test_reverse_report_maps_first_window_from_segmented_candidate_not_source_start(self):
         with tempfile.TemporaryDirectory() as temp_dir:

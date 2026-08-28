@@ -353,21 +353,29 @@ _LITE_POINTER_CLEANUP_HINTS = (
     "盖住原小手",
     "覆盖原小手",
 )
-_LITE_POINTER_INSERT_HINTS = (
-    "add",
-    "insert",
-    "place",
-    "paste",
-    "新增",
-    "添加",
-    "加一个",
-    "加小手",
-    "贴上",
-    "贴入",
-    "放入",
-    "放置",
-    "插入",
-    "替换成",
+_LITE_POINTER_REMOVAL_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:删除|删掉|去掉|去除|移除|拿掉|清除|清理|取消).{0,16}?(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜)",
+        r"(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜).{0,16}?(?:删除|删掉|去掉|去除|移除|拿掉|清除|清理|取消)",
+        r"不要(?!\s*(?:删除|删掉|去掉|去除|移除|拿掉|清除|清理)).{0,12}?(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜)",
+        r"(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜).{0,12}?不要(?:了|即可|就行)?",
+        r"(?:删除|删掉|去掉|去除|移除|拿掉|清除|清理|取消)(?=\s*(?:后|$|[，,。；;]))",
+        r"(?:remove|delete|clear).{0,16}?(?:hand|pointer|arrow|underline|circle|highlight|magnifier)",
+        r"(?:hand|pointer|arrow|underline|circle|highlight|magnifier).{0,16}?(?:remove|delete|clear)",
+    )
+)
+_LITE_POINTER_REINSERT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"(?:重新|再)\s*(?:添加|新增|加|插入|放置|放入|贴上|贴入)\s*(?:一个)?\s*(?:新的?)?\s*(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜)",
+        r"(?:重新|再)\s*(?:添加|新增|加|插入|放置|放入|贴上|贴入)(?:\s*一个)?(?:\s*新的?)?\s*(?=$|[，,。；;、])",
+        r"(?:加回|放回|贴回|补回)",
+        r"(?:添加|新增|加|插入|放置|放入|贴上|贴入)\s*(?:一个)?\s*(?:新的?)?\s*(?:小手|手指|指针|箭头|下划线|圈出|圈选|标注|高亮|放大镜)",
+        r"(?:re-?add|add\s+back|put\s+back|reinsert).{0,12}(?:hand|pointer|arrow|underline|circle|highlight|magnifier)",
+        r"(?:re-?add|add\s+back|put\s+back|reinsert)\s*(?=$|[,.;])",
+        r"(?:then|after(?:wards)?|and)\s+(?:add|insert|place).{0,12}(?:hand|pointer|arrow|underline|circle|highlight|magnifier)",
+    )
 )
 _LITE_DURATION_CHANGE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -399,6 +407,27 @@ _LITE_KNOWN_VISUAL_KINDS = _LITE_POINTER_KINDS | {
 }
 
 
+def _lite_pointer_cleanup_suffix(source_text: str) -> Optional[str]:
+    """Return text after the last explicit pointer cleanup, if present."""
+
+    folded = str(source_text or "").casefold()
+    removal_ends = [
+        match.end()
+        for pattern in _LITE_POINTER_REMOVAL_PATTERNS
+        for match in pattern.finditer(folded)
+    ]
+    if removal_ends:
+        return folded[max(removal_ends) :]
+
+    hint_ends = []
+    for hint in _LITE_POINTER_CLEANUP_HINTS:
+        normalized_hint = hint.casefold()
+        start = folded.rfind(normalized_hint)
+        if start >= 0:
+            hint_ends.append(start + len(normalized_hint))
+    return folded[max(hint_ends) :] if hint_ends else None
+
+
 def lite_execution_required(
     kind: str,
     source_text: str,
@@ -416,11 +445,13 @@ def lite_execution_required(
     if normalized_kind not in _LITE_KNOWN_VISUAL_KINDS:
         return False
 
-    folded = str(source_text or "").casefold()
-    cleanup_only = any(hint.casefold() in folded for hint in _LITE_POINTER_CLEANUP_HINTS)
-    insert_requested = any(hint.casefold() in folded for hint in _LITE_POINTER_INSERT_HINTS)
-    if cleanup_only and not insert_requested:
-        return False
+    cleanup_suffix = _lite_pointer_cleanup_suffix(source_text)
+    if cleanup_suffix is not None:
+        reinsert_requested = any(
+            pattern.search(cleanup_suffix) for pattern in _LITE_POINTER_REINSERT_PATTERNS
+        )
+        if not reinsert_requested:
+            return False
     return bool(requested)
 
 
