@@ -13,7 +13,7 @@ SCRIPTS_ROOT = REPO_ROOT / "scripts"
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from utils.lite_revision import _validate_lite_audio_timing_sources
+from utils.lite_revision import LITE_TRACKS, _validate_lite_audio_timing_sources
 from utils.review_audio_precision import (
     CANDIDATE_RENDERER_VERSION,
     REVERSE_ASR_DIAGNOSTIC_PURPOSE,
@@ -354,6 +354,15 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
 
         a1 = [row for row in plan["segments"] if row["role"] == "source"]
         a2 = [row for row in plan["segments"] if row["role"] == "reference"]
+        self.assertEqual(
+            {row["track_name"] for row in a1},
+            {LITE_TRACKS["source_audio"]},
+        )
+        self.assertEqual(
+            {row["track_name"] for row in a2},
+            {LITE_TRACKS["reused_audio"]},
+        )
+        self.assertEqual(LITE_TRACKS["source_audio"], "Separated Source Audio")
         self.assertEqual(
             [(row["source_start"], row["duration"]) for row in a1],
             [(0.0, 0.5), (1.25, 1.75)],

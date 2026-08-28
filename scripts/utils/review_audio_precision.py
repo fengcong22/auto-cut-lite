@@ -764,7 +764,7 @@ def build_lite_split_gap_audio_plan(
                 "id": f"a1-kept-{index:03d}",
                 "role": "source",
                 "asset_path": source,
-                "track_name": "Lite Source Audio",
+                "track_name": "Separated Source Audio",
                 "source_start": round(start, 6),
                 "timeline_start": round(start, 6),
                 "duration": round(end - start, 6),
