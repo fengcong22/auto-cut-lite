@@ -481,12 +481,11 @@ def _is_explicit_lite_visual(item: Mapping[str, Any]) -> bool:
         )
         if str(value or "").strip()
     }
-    return any(
-        kind in _LITE_EXECUTABLE_VISUAL_KINDS
-        or kind.startswith("visual_")
-        or kind.startswith("pointer_")
-        for kind in kinds
-    )
+    # Lite executes only the maintained, explicit visual vocabulary.  A
+    # generic prefix is intentionally not enough: a newly introduced or
+    # misspelled kind must remain label-only even when it carries a local
+    # visual_plan, until it has a dedicated execution contract and tests.
+    return any(kind in _LITE_EXECUTABLE_VISUAL_KINDS for kind in kinds)
 
 
 def _visual_plan_has_local_asset(item: Mapping[str, Any]) -> bool:
@@ -641,9 +640,52 @@ def _compile_explicit_lite_visuals(request: dict[str, Any], ledger: dict[str, An
         if not item.get("execution_required"):
             continue
         if _is_lite_audio_or_asr_timing_item(item):
+            # A stale pre-v2 pointer classification can still carry
+            # execution_required=true.  Cleanup/removal requests are
+            # label-only in Lite; normalize both request and ledger rows so
+            # later phases cannot mistake the stale flag for executable work.
+            kind = str(item.get("kind") or item.get("type") or item.get("source_kind") or "")
+            source_text = str(item.get("source_text") or "")
+            if kind.strip().casefold() in _LITE_EXECUTABLE_VISUAL_KINDS:
+                if not lite_execution_required(kind, source_text, True):
+                    for target in (item, ledger_items.get(item_id)):
+                        if not isinstance(target, dict):
+                            continue
+                        target["execution_required"] = False
+                        target["execution_status"] = "label_only_unresolved"
+                        target_evidence = dict(target.get("evidence") or {})
+                        target_evidence.update(
+                            {
+                                "execution_status": "label_only_unresolved",
+                                "reason": "lite_pointer_cleanup_label_only",
+                            }
+                        )
+                        target["evidence"] = target_evidence
             continue
         is_explicit_visual = _is_explicit_lite_visual(item)
-        if not is_explicit_visual and not _visual_plan_has_local_asset(item):
+        # A local plan is evidence for an already-maintained visual kind, not
+        # an execution permission by itself.  Unknown/new review kinds stay
+        # label-only under the Lite contract even when they happen to carry a
+        # usable asset path.
+        if not is_explicit_visual:
+            # A stale or hand-authored request can mark an unknown visual
+            # kind executable, with or without a local asset.  Downgrade it
+            # before later validation so the marker is retained without
+            # attempting a generic edit.  Audio/ASR rows have already been
+            # returned above and are therefore unaffected.
+            for target in (item, ledger_items.get(item_id)):
+                if not isinstance(target, dict):
+                    continue
+                target["execution_required"] = False
+                target["execution_status"] = "label_only_unresolved"
+                target_evidence = dict(target.get("evidence") or {})
+                target_evidence.update(
+                    {
+                        "execution_status": "label_only_unresolved",
+                        "reason": "unknown_lite_visual_kind",
+                    }
+                )
+                target["evidence"] = target_evidence
             continue
         paths, visual_plan = _normalized_local_visual_assets(item)
         evidence = dict(item.get("evidence") or {})
@@ -1795,7 +1837,7 @@ def run_review_document(
                     continue
                 if _is_lite_audio_or_asr_timing_item(item):
                     continue
-                if not _is_explicit_lite_visual(item) and not _visual_plan_has_local_asset(item):
+                if not _is_explicit_lite_visual(item):
                     continue
                 try:
                     local_assets, _visual_plan_payload = _normalized_local_visual_assets(item)

@@ -487,11 +487,75 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             runner._compile_explicit_lite_visuals(request, ledger)
 
             self.assertEqual(request["edits"], [])
-            self.assertTrue(request["review_items"][0]["execution_required"])
-            self.assertNotEqual(
+            self.assertFalse(request["review_items"][0]["execution_required"])
+            self.assertEqual(
                 request["review_items"][0].get("execution_status"),
                 "label_only_unresolved",
             )
+            self.assertFalse(ledger["review_items"][0]["execution_required"])
+            self.assertEqual(
+                ledger["review_items"][0].get("execution_status"),
+                "label_only_unresolved",
+            )
+
+    def test_unknown_visual_kind_with_local_plan_is_label_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            asset = root / "unknown.png"
+            asset.write_bytes(b"png")
+            item = {
+                "id": "unknown-visual-kind",
+                "kind": "visual_new_effect",
+                "source_text": "00:04 新增未维护视觉效果",
+                "start": 4.0,
+                "end": 5.0,
+                "execution_required": True,
+                "visual_plan": {
+                    "segments": [{"asset_path": str(asset), "duration": 1.0}],
+                },
+            }
+            request = {"review_items": [deepcopy(item)], "edits": []}
+            ledger = {"review_items": [deepcopy(item)]}
+
+            runner._compile_explicit_lite_visuals(request, ledger)
+
+            self.assertEqual(request["edits"], [])
+            self.assertFalse(request["review_items"][0]["execution_required"])
+            self.assertEqual(
+                request["review_items"][0]["execution_status"],
+                "label_only_unresolved",
+            )
+            self.assertFalse(ledger["review_items"][0]["execution_required"])
+            self.assertEqual(
+                ledger["review_items"][0]["execution_status"],
+                "label_only_unresolved",
+            )
+
+    def test_unknown_visual_kind_without_asset_is_label_only(self):
+        item = {
+            "id": "unknown-visual-no-asset",
+            "kind": "visual_new_effect",
+            "source_text": "00:05 新增未维护视觉效果",
+            "start": 5.0,
+            "end": 6.0,
+            "execution_required": True,
+        }
+        request = {"review_items": [deepcopy(item)], "edits": []}
+        ledger = {"review_items": [deepcopy(item)]}
+
+        runner._compile_explicit_lite_visuals(request, ledger)
+
+        self.assertEqual(request["edits"], [])
+        self.assertFalse(request["review_items"][0]["execution_required"])
+        self.assertEqual(
+            request["review_items"][0]["execution_status"],
+            "label_only_unresolved",
+        )
+        self.assertFalse(ledger["review_items"][0]["execution_required"])
+        self.assertEqual(
+            ledger["review_items"][0]["execution_status"],
+            "label_only_unresolved",
+        )
 
     def test_visual_asset_failures_are_structured_without_leaking_references(self):
         with tempfile.TemporaryDirectory() as tmpdir:
