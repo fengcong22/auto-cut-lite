@@ -6,8 +6,9 @@ For `workflow_mode=lite`, the [Lite execution contract](lite-execution-contract.
 authoritative and overrides every full-workflow example or field described below. In particular,
 animation/text-timing and cleanup-only pointer items are label-only, supplied visual assets use
 default geometry, and every audio-identifiable item attempts ASR first. Only uniquely ASR-located
-spoken deletion remains executable; non-executing items use the review timestamp when ASR cannot
-locate a unique point. Every new or unrecognized instruction is label-only by default;
+spoken deletion may write a non-destructive split/cut trace; no spoken deletion removes media or
+shortens the timeline. Non-executing items use the review timestamp when ASR cannot locate a unique
+point. Every new or unrecognized instruction is label-only by default;
 every pause addition, extension, shortening, or adjustment is label-only. A visible JianYing label
 always equals only the ledger item's `source_text`; execution status and diagnostic wording remain
 internal metadata and never become label text.

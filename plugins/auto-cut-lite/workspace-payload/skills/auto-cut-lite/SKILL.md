@@ -17,12 +17,12 @@ executing, or validating a review item. Read
 - Preserve editable source/cut/audio structure. A precise spoken deletion is represented only by a
   source-aligned, non-destructive editable split/cut trace; it never removes source media or
   compresses the timeline. Final duration always equals source duration.
-- Every physical duration-changing operation is label-only in Lite, including a precisely
-  ASR-located spoken deletion's physical removal, pause changes, `+Ns`, `-Ns`, speed changes,
-  holds, still frames, and `semantic_pause_adjustment`. For spoken deletion, ASR still resolves
-  the logical boundary and the split trace is execution-required; no media is removed. For all
-  other items, use a uniquely resolved ASR point when available, otherwise the time written in
-  the review comment. Keep one exact `source_text` label. Do not create `pause_adjustments`,
+- Every physical duration-changing operation is label-only in Lite. This includes the physical
+  removal that a full workflow might perform for an ASR-located spoken deletion, plus pause
+  changes, `+Ns`, `-Ns`, speed changes, holds, still frames, and `semantic_pause_adjustment`.
+  For spoken deletion, ASR still resolves the logical boundary and the split trace is
+  execution-required; no media is removed. For all other items, use a uniquely resolved ASR point
+  when available, otherwise the time written in the review comment. Keep one exact `source_text` label. Do not create `pause_adjustments`,
   holds, still frames, audio gaps, duration changes, or later-track offsets.
 - Keep exactly one two-second review label per source item, clamped at final project end. Its
   visible text must equal only `source_text` code-point-for-code-point.

@@ -150,7 +150,7 @@ Route every Lite pause request separately from deletion correctness:
 - attempt the adjacent-utterance point from word/character ASR bound to the current source bytes
   and provider/model identity;
 - when ASR yields a unique point, require it to fall in the attributable utterance gap, outside
-  spoken words and physical delete windows; utterance-only or transcript-only ASR is insufficient
+  spoken words and logical source-aligned delete windows; utterance-only or transcript-only ASR is insufficient
   for claiming an ASR-resolved point;
 - set effective `execution_required=false` and place exactly one visible label equal only to
   `source_text` at the unique ASR point, or at the review-comment time when ASR fails or is
