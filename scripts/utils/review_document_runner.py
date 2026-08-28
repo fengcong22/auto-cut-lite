@@ -761,6 +761,20 @@ def _json_safe(value: Any) -> Any:
     return sanitize_public_value(value)
 
 
+def _json_compatible(value: Any) -> Any:
+    """Normalize internal evidence without changing stable IDs or source text."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_compatible(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(child) for child in value]
+    if isinstance(value, Path):
+        return str(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
 def _path_rows_from_snapshot(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw_paths: list[str] = []
 
@@ -2384,7 +2398,11 @@ def run_review_document(
                 raise
             if not isinstance(execution, Mapping):
                 raise TypeError("Low-level revision execution must return an object")
-            execution_payload = _json_safe(execution)
+            # This artifact is internal acceptance evidence.  Preserve stable
+            # source-item IDs and verbatim marker text until both validation
+            # passes have compared them.  Public phase/state projections are
+            # sanitized separately by _phase_outcome and public_result.
+            execution_payload = _json_compatible(execution)
             if not isinstance(execution_payload, dict):
                 raise TypeError("Low-level revision execution result is not JSON-compatible")
             ledger = _read_json_object(paths["processed_items"], "processed source ledger")

@@ -378,6 +378,69 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             )
             self.assertEqual(processed["review_items"][0]["source_text"], "00:01 删除“测试”")
 
+    def test_lark_block_ids_remain_unique_in_internal_marker_receipts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            block_ids = [
+                "doxcnMGTlYvs75YGJ1Lm8iuo09c",
+                "doxcnTJeXRP93bxcYBBCgaemAkh",
+            ]
+            payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            payload["items"] = [
+                {
+                    "id": block_ids[0],
+                    "kind": "animation_timing",
+                    "source_text": "00:01 第一条仅标签",
+                    "start": 1.0,
+                    "end": 1.2,
+                    "execution_required": False,
+                },
+                {
+                    "id": block_ids[1],
+                    "kind": "animation_timing",
+                    "source_text": "00:02 第二条仅标签",
+                    "start": 2.0,
+                    "end": 2.2,
+                    "execution_required": False,
+                },
+            ]
+            _write_json(snapshot, payload)
+
+            with self._patched_runtime():
+                result = self._run(
+                    snapshot,
+                    project,
+                    job_root=root / "job",
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery.zip",
+                    cache_root=root / "cache",
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                {name: row["status"] for name, row in result["phases"].items()},
+                {name: "complete" for name in runner._RUN_PHASES},
+            )
+            execution = json.loads(
+                Path(result["output_artifacts"]["revision_result"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            receipt_ids = [
+                row["item_id"] for row in execution["review_marker_receipts"]
+            ]
+            self.assertEqual(receipt_ids, block_ids)
+            self.assertEqual(len(set(receipt_ids)), len(block_ids))
+            runner._validate_marker_receipts(
+                execution,
+                json.loads(
+                    Path(result["output_artifacts"]["doc_items"]["path"]).read_text(
+                        encoding="utf-8"
+                    )
+                ),
+            )
+
     def test_visual_compiler_only_touches_visual_items_in_large_mixed_ledger(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
