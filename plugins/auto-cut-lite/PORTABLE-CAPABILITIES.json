@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.0+codex.20260828125500",
+  "plugin_version": "1.6.0+codex.20260829042815",
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"
