@@ -17,6 +17,7 @@ from copy import deepcopy
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from utils.formatters import get_duration_ffprobe_cached
 from utils.review_marker_layout_validation import review_marker_top_layout_problems
 from utils.revision_markers import (
     _label_only_asr_marker_time,
@@ -1160,6 +1161,18 @@ def _material_duration_seconds(material: Any, fallback: float) -> float:
     return fallback
 
 
+def _source_video_duration_seconds(material: Any, source_path: str, fallback: float) -> float:
+    """Use the longest trustworthy source duration exposed by the media stack.
+
+    JianYing's ``VideoMaterial`` can report only the video-stream duration while
+    the container duration includes a slightly longer audio stream. Lite keeps
+    source time unchanged, so the container probe must not truncate that tail.
+    """
+    material_duration = _material_duration_seconds(material, fallback)
+    container_duration = get_duration_ffprobe_cached(source_path)
+    return max(material_duration, container_duration, fallback)
+
+
 def _make_video_material(draft: Any, mock_video: Any, path: str, duration: float, mock: bool):
     if mock:
         return mock_video(
@@ -2081,7 +2094,11 @@ def execute_lite_revision_request(
             total_duration = 30.0
         if not mock_media:
             source_probe = draft.VideoMaterial(request.project.source_video)
-            detected_duration = _material_duration_seconds(source_probe, 0.0)
+            detected_duration = _source_video_duration_seconds(
+                source_probe,
+                request.project.source_video,
+                0.0,
+            )
             if (
                 declared_duration > 0
                 and detected_duration > 0

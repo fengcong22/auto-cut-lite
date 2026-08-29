@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,6 +23,7 @@ from utils.lite_revision import (
     _lite_timeline_duration,
     _lite_visual_results,
     _spoken_cut_alignment_problems,
+    _source_video_duration_seconds,
     _validate_lite_content,
 )
 from utils.review_job_compiler import compile_review_job
@@ -84,6 +86,16 @@ def _spoken_delete_edit(item_id, start, end, *, label=None):
 
 
 class LiteRevisionTests(unittest.TestCase):
+    def test_source_duration_keeps_longer_container_audio_tail(self):
+        material = type("Material", (), {"duration": 627_480_000})()
+        with patch(
+            "utils.lite_revision.get_duration_ffprobe_cached",
+            return_value=627.589002,
+        ):
+            detected = _source_video_duration_seconds(material, "source.mp4", 0.0)
+
+        self.assertEqual(detected, 627.589002)
+
     def test_lite_delete_windows_keep_adjacent_source_items_separate(self):
         request = _load_request(
             {
