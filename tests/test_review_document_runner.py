@@ -243,6 +243,16 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
     @contextmanager
     def _patched_runtime(self):
         config = VolcAsrConfig(api_key="test-key")
+
+        def extract_alignment(source, output, **_kwargs):
+            try:
+                with wave.open(str(source), "rb"):
+                    pass
+            except (EOFError, wave.Error):
+                _write_wav(Path(output))
+            else:
+                runner.atomic_copy_file(source, output)
+
         with ExitStack() as stack:
             stack.enter_context(
                 patch(
@@ -274,9 +284,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 patch.object(
                     runner,
                     "extract_alignment_wav",
-                    side_effect=lambda source, output, **_kwargs: runner.atomic_copy_file(
-                        source, output
-                    ),
+                    side_effect=extract_alignment,
                 )
             )
             asr = stack.enter_context(
@@ -377,6 +385,112 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 Path(first["output_artifacts"]["doc_items"]["path"]).read_text(encoding="utf-8")
             )
             self.assertEqual(processed["review_items"][0]["source_text"], "00:01 删除“测试”")
+
+    def test_embedded_source_audio_uses_cached_editable_audio_for_a1_a2(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            project_payload = json.loads(project.read_text(encoding="utf-8"))
+            project_payload["source_audio"] = ""
+            _write_json(project, project_payload)
+            cache = root / "cache"
+
+            def extract_editable_audio(_source, output, **_kwargs):
+                _write_wav(Path(output))
+
+            with self._patched_runtime() as mocks, patch.object(
+                runner,
+                "_extract_editable_source_audio",
+                side_effect=extract_editable_audio,
+            ) as editable_extractor:
+                first = self._run(
+                    snapshot,
+                    project,
+                    job_root=root / "job-1",
+                    drafts_root=root / "drafts-1",
+                    package_zip=root / "delivery-1.zip",
+                    cache_root=cache,
+                )
+                second = self._run(
+                    snapshot,
+                    project,
+                    job_root=root / "job-2",
+                    drafts_root=root / "drafts-2",
+                    package_zip=root / "delivery-2.zip",
+                    cache_root=cache,
+                )
+
+            self.assertTrue(first["ok"] and second["ok"], (first, second))
+            editable_audio = (
+                root / "job-1" / "workspace" / "materials" / "source_audio.m4a"
+            ).resolve()
+            alignment_wav = (
+                root / "job-1" / "workspace" / "materials" / "source_alignment.wav"
+            ).resolve()
+            processed_request = json.loads(
+                Path(first["output_artifacts"]["revision_request"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                Path(processed_request["project"]["source_audio"]).resolve(),
+                editable_audio,
+            )
+            self.assertEqual(
+                {
+                    Path(segment["asset_path"]).resolve()
+                    for segment in processed_request["audio_delivery_plan"]["segments"]
+                },
+                {editable_audio},
+            )
+            self.assertNotEqual(editable_audio, alignment_wav)
+            with wave.open(str(editable_audio), "rb") as source:
+                self.assertGreater(source.getnframes(), 0)
+            with wave.open(str(alignment_wav), "rb") as source:
+                self.assertGreater(source.getnframes(), 0)
+            self.assertEqual(editable_extractor.call_count, 1)
+            self.assertEqual(mocks["extract"].call_count, 1)
+
+    def test_editable_source_audio_prefers_stream_copy_then_lossless_fallback(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "source.mp4"
+            output = root / "source.m4a"
+            source.write_bytes(b"source")
+
+            for fail_copy, expected_codecs in (
+                (False, ["copy"]),
+                (True, ["copy", "alac"]),
+            ):
+                with self.subTest(fail_copy=fail_copy):
+                    commands = []
+
+                    def run(command, **_kwargs):
+                        commands.append(list(command))
+                        codec = command[command.index("-c:a") + 1]
+                        if codec == "copy" and fail_copy:
+                            return subprocess.CompletedProcess(
+                                command,
+                                1,
+                                "",
+                                "copy is not supported by the target container",
+                            )
+                        Path(command[-1]).write_bytes(b"audio-only")
+                        return subprocess.CompletedProcess(command, 0, "", "")
+
+                    with patch.object(runner.subprocess, "run", side_effect=run):
+                        runner._extract_editable_source_audio(
+                            source,
+                            output,
+                            ffmpeg_bin="ffmpeg",
+                        )
+
+                    self.assertEqual(
+                        [command[command.index("-c:a") + 1] for command in commands],
+                        expected_codecs,
+                    )
+                    self.assertTrue(output.is_file())
+                    output.unlink()
 
     def test_reverse_asr_retry_downgrades_only_failed_item_and_revalidates(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1433,6 +1547,14 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertEqual(item["start"], 1.0)
             self.assertEqual(item["evidence"]["timing_source"], "review_timestamp_fallback")
             self.assertEqual(processed.get("edits") or [], [])
+            expected_source_audio = Path(
+                json.loads(project.read_text(encoding="utf-8"))["source_audio"]
+            ).resolve()
+            self.assertEqual(
+                Path(processed["project"]["source_audio"]).resolve(),
+                expected_source_audio,
+            )
+            self.assertEqual(processed["audio_delivery_plan"]["mode"], "legacy")
             source_index = json.loads(
                 Path(result["output_artifacts"]["source_asr_index"]["path"]).read_text(
                     encoding="utf-8"

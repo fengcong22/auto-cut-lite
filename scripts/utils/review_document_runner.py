@@ -83,10 +83,11 @@ from utils.revision_runner import (
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v3"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v4"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
+_EDITABLE_AUDIO_EXTRACTOR_VERSION = "lite-editable-source-audio-v1"
 _VIDEO_NORMALIZE_PARAMS = {
     "video_codec": "libx264",
     "pixel_format": "yuv420p",
@@ -94,6 +95,13 @@ _VIDEO_NORMALIZE_PARAMS = {
     "crf": 18,
     "audio_codec": "aac",
     "audio_bitrate": "192k",
+    "movflags": "+faststart",
+}
+_EDITABLE_AUDIO_EXTRACT_PARAMS = {
+    "audio_stream": "0:a:0",
+    "container": "ipod",
+    "primary_codec": "copy",
+    "fallback_codec": "alac",
     "movflags": "+faststart",
 }
 
@@ -373,6 +381,52 @@ def _normalize_webm(
     if completed.returncode != 0 or not output.is_file():
         detail = (completed.stderr or completed.stdout or "normalization failed").strip()
         raise RuntimeError(f"Source video normalization failed: {detail[-1000:]}")
+
+
+def _extract_editable_source_audio(
+    source: Path,
+    output: Path,
+    *,
+    ffmpeg_bin: str,
+) -> None:
+    """Create an audio-only source without introducing another lossy encode."""
+
+    common = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-nostdin",
+        "-v",
+        "error",
+        "-i",
+        str(source),
+        "-map",
+        "0:a:0",
+        "-vn",
+    ]
+    attempts = (
+        ("copy", "Source audio stream copy failed"),
+        ("alac", "Lossless source audio extraction failed"),
+    )
+    failures: list[str] = []
+    for codec, label in attempts:
+        output.unlink(missing_ok=True)
+        command = [
+            *common,
+            "-c:a",
+            codec,
+            "-movflags",
+            "+faststart",
+            "-f",
+            "ipod",
+            str(output),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, check=False)
+        if completed.returncode == 0 and output.is_file() and output.stat().st_size > 0:
+            return
+        detail = (completed.stderr or completed.stdout or label).strip()
+        failures.append(f"{label}: {detail[-500:]}")
+    raise RuntimeError("; ".join(failures))
 
 
 _LITE_EXECUTABLE_VISUAL_KINDS = frozenset(
@@ -842,6 +896,7 @@ def _phase_paths(job_root: Path) -> dict[str, Path]:
         "source_index": workspace / "evidence" / "source_asr_index.json",
         "source_asr": workspace / "evidence" / "source_asr.json",
         "alignment_wav": workspace / "materials" / "source_alignment.wav",
+        "editable_audio": workspace / "materials" / "source_audio.m4a",
         "candidate_wav": workspace / "materials" / "candidate_source_aligned.wav",
         "initial_candidate_wav": workspace / "materials" / "candidate_source_aligned_initial.wav",
         "classified_dir": workspace / "classified",
@@ -1726,6 +1781,8 @@ def run_review_document(
             normalized = source_video.suffix.casefold() == ".webm"
             normalization_hit: bool | None = None
             normalization_identity_digest = ""
+            editable_audio_hit: bool | None = None
+            editable_audio_identity_digest = ""
             effective_video = source_video
             if normalized:
                 identity = CacheIdentity(
@@ -1775,14 +1832,51 @@ def run_review_document(
                 if not has_audio and "source_audio" not in optional_materials:
                     raise ValueError("Source media has no audio stream for authoritative ASR")
 
+            explicit_source_audio = optional_materials.get("source_audio")
+            if explicit_source_audio is not None:
+                effective_audio = explicit_source_audio
+            else:
+                editable_audio_identity = CacheIdentity(
+                    "editable_source_audio",
+                    inputs={
+                        "source_sha256": sha256_file(effective_video),
+                        "parameters": _EDITABLE_AUDIO_EXTRACT_PARAMS,
+                    },
+                    versions={
+                        "extractor": _EDITABLE_AUDIO_EXTRACTOR_VERSION,
+                        "ffmpeg": ffmpeg_info,
+                        "mock_media": mock_media,
+                    },
+                )
+                editable_audio_identity_digest = editable_audio_identity.digest()
+
+                def extract_editable_audio(output: Path) -> None:
+                    if mock_media:
+                        atomic_copy_file(effective_video, output)
+                    else:
+                        _extract_editable_source_audio(
+                            effective_video,
+                            output,
+                            ffmpeg_bin=ffmpeg_bin,
+                        )
+
+                cached_audio, editable_audio_hit = _cached_file(
+                    cache,
+                    editable_audio_identity,
+                    build=extract_editable_audio,
+                    suffix=".m4a",
+                )
+                effective_audio = paths["editable_audio"]
+                _copy_cached_file(cached_audio, effective_audio)
+
             effective_project = deepcopy(project)
             effective_project["source_video"] = str(effective_video)
-            effective_project["source_audio"] = str(optional_materials.get("source_audio") or "")
+            effective_project["source_audio"] = str(effective_audio)
             effective_project["replacement_audio"] = str(
                 optional_materials.get("replacement_audio") or ""
             )
             effective_project["media_duration_seconds"] = duration
-            alignment_source = optional_materials.get("source_audio", effective_video)
+            alignment_source = effective_audio
             material_rows = {
                 "source_video_original": {
                     "path": str(source_video),
@@ -1796,6 +1890,16 @@ def run_review_document(
                     "path": str(alignment_source),
                     "sha256": sha256_file(alignment_source),
                 },
+                "source_audio_effective": {
+                    "path": str(effective_audio),
+                    "sha256": sha256_file(effective_audio),
+                    "extraction_identity_digest": editable_audio_identity_digest,
+                    "extraction_policy": (
+                        "provided_audio_file"
+                        if explicit_source_audio is not None
+                        else "stream_copy_preferred_lossless_alac_fallback"
+                    ),
+                },
             }
             for field, candidate in optional_materials.items():
                 material_rows[field] = {"path": str(candidate), "sha256": sha256_file(candidate)}
@@ -1806,6 +1910,7 @@ def run_review_document(
                 "has_video": has_video,
                 "normalized_webm": normalized,
                 "normalization_identity_digest": normalization_identity_digest,
+                "editable_audio_identity_digest": editable_audio_identity_digest,
                 "ffmpeg_identity": ffmpeg_info,
                 "ffprobe_identity": ffprobe_info,
                 "materials": material_rows,
@@ -1817,6 +1922,7 @@ def run_review_document(
                 paths["effective_project"],
                 source_video,
                 effective_video,
+                effective_audio,
                 *optional_materials.values(),
             ]
             return _phase_outcome(
@@ -1826,6 +1932,7 @@ def run_review_document(
                 data={
                     "normalized_webm": normalized,
                     "normalization_identity_digest": normalization_identity_digest,
+                    "editable_audio_identity_digest": editable_audio_identity_digest,
                     "ffmpeg_identity": ffmpeg_info,
                     "ffprobe_identity": ffprobe_info,
                 },
@@ -1833,7 +1940,18 @@ def run_review_document(
                     "source_materials": str(paths["materials_ledger"]),
                     "effective_project": str(paths["effective_project"]),
                 },
-                cache_hit=normalization_hit,
+                cache_hit=(
+                    all(
+                        value
+                        for value in (normalization_hit, editable_audio_hit)
+                        if value is not None
+                    )
+                    if any(
+                        value is not None
+                        for value in (normalization_hit, editable_audio_hit)
+                    )
+                    else None
+                ),
             )
 
         def source_materials_resume() -> bool:
@@ -2175,19 +2293,19 @@ def run_review_document(
             request = deepcopy(before_request)
             ledger = deepcopy(before_ledger)
             cut_plan = _read_json_object(paths["cut_plan"], "audio cut plan")
-            materials = _read_json_object(paths["materials_ledger"], "source materials")
-            material_rows = materials.get("materials")
-            if not isinstance(material_rows, Mapping):
-                raise ValueError("Source material ledger is missing material identities")
-            source_audio_row = material_rows.get("source_audio") or material_rows.get(
-                "source_video_effective"
-            )
-            if not isinstance(source_audio_row, Mapping):
-                raise ValueError("Source material ledger is missing editable source audio")
-            source_audio = Path(str(source_audio_row.get("path") or "")).resolve(strict=True)
             audio_rows = [
                 row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)
             ]
+            source_audio: Path | None = None
+            if audio_rows:
+                materials = _read_json_object(paths["materials_ledger"], "source materials")
+                material_rows = materials.get("materials")
+                if not isinstance(material_rows, Mapping):
+                    raise ValueError("Source material ledger is missing material identities")
+                source_audio_row = material_rows.get("source_audio_effective")
+                if not isinstance(source_audio_row, Mapping):
+                    raise ValueError("Source material ledger is missing editable source audio")
+                source_audio = Path(str(source_audio_row.get("path") or "")).resolve(strict=True)
             audio_item_ids = {
                 str(row.get("item_id") or "").casefold() for row in audio_rows
             }
