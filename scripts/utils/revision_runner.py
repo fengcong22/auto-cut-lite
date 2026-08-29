@@ -316,6 +316,9 @@ def _clamp_segment_duration(
     return max(0.0, min(float(requested_duration), available_duration))
 
 
+_AUDIO_MATERIAL_ROUNDING_TOLERANCE_US = 1_000
+
+
 def _write_segmented_audio_delivery(
     project: Any,
     request: RevisionRequest,
@@ -368,15 +371,55 @@ def _write_segmented_audio_delivery(
                 material = draft.AudioMaterial(normalized_path_by_key[cache_key])
             audio_materials[cache_key] = material
 
+            required_end_us = _seconds_to_us(required_duration_by_path[cache_key])
+            parsed_duration_us = int(getattr(material, "duration", 0) or 0)
+            if parsed_duration_us <= 0:
+                if mock_media:
+                    parsed_duration_us = required_end_us
+                else:
+                    parsed_duration_us = _seconds_to_us(
+                        get_duration_ffprobe_cached(normalized_path_by_key[cache_key])
+                    )
+                if parsed_duration_us <= 0:
+                    raise ValueError(
+                        "Segmented audio delivery cannot resolve audio material duration: "
+                        f"{normalized_path}."
+                    )
+                material.duration = parsed_duration_us
+
+            if parsed_duration_us < required_end_us:
+                duration_shortfall_us = required_end_us - parsed_duration_us
+                if duration_shortfall_us > _AUDIO_MATERIAL_ROUNDING_TOLERANCE_US:
+                    raise ValueError(
+                        "Segmented audio delivery exceeds parsed audio material duration by "
+                        f"{duration_shortfall_us / 1_000_000.0:.6f}s: required source end "
+                        f"{required_end_us / 1_000_000.0:.6f}s, material duration "
+                        f"{parsed_duration_us / 1_000_000.0:.6f}s ({normalized_path})."
+                    )
+                probed_duration_us = _seconds_to_us(
+                    get_duration_ffprobe_cached(normalized_path_by_key[cache_key])
+                )
+                if probed_duration_us < required_end_us:
+                    raise ValueError(
+                        "Segmented audio delivery cannot confirm parsed audio duration "
+                        f"rounding: required source end "
+                        f"{required_end_us / 1_000_000.0:.6f}s, ffprobe duration "
+                        f"{probed_duration_us / 1_000_000.0:.6f}s ({normalized_path})."
+                    )
+                material.duration = required_end_us
+
+        source_start_us = _seconds_to_us(plan_segment.source_start)
+        requested_duration_us = _seconds_to_us(plan_segment.duration)
+
         audio_segment = draft.AudioSegment(
             material,
             draft.Timerange(
                 _seconds_to_us(plan_segment.timeline_start),
-                _seconds_to_us(plan_segment.duration),
+                requested_duration_us,
             ),
             source_timerange=draft.Timerange(
-                _seconds_to_us(plan_segment.source_start),
-                _seconds_to_us(plan_segment.duration),
+                source_start_us,
+                requested_duration_us,
             ),
             volume=plan_segment.volume,
         )
@@ -398,7 +441,7 @@ def _write_segmented_audio_delivery(
                 "segment_id": str(getattr(audio_segment, "segment_id", "")),
                 "source_start": plan_segment.source_start,
                 "timeline_start": plan_segment.timeline_start,
-                "duration": plan_segment.duration,
+                "duration": requested_duration_us / 1_000_000.0,
                 "volume": plan_segment.volume,
                 "fade_in": plan_segment.fade_in,
                 "fade_out": plan_segment.fade_out,

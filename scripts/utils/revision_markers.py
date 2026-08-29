@@ -9,7 +9,9 @@ from utils.revision_models import (
     RevisionReviewItem,
     _collect_delete_windows,
     lite_pause_change_is_label_only,
+    lite_review_item_execution_status,
     lite_timing_source,
+    lite_unresolved_timebase_status,
     review_item_execution_status,
 )
 
@@ -165,6 +167,70 @@ def _label_only_asr_marker_time(source_item: RevisionReviewItem) -> Optional[flo
             + "."
         )
     return resolved_time
+
+
+def lite_unresolved_timebase_marker_time(source_item: RevisionReviewItem) -> Optional[float]:
+    """Map an unresolved Lite item from its review timestamp, never its ASR match."""
+
+    status = lite_unresolved_timebase_status(source_item)
+    if not status:
+        return None
+    evidence = source_item.evidence if isinstance(source_item.evidence, Mapping) else {}
+    timebase = evidence.get("timebase")
+    if not isinstance(timebase, Mapping):
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no timebase evidence."
+        )
+
+    timestamp_role = str(evidence.get("review_timestamp_role") or "").strip().casefold()
+    timestamp_parse = str(evidence.get("review_timestamp_parse") or "").strip().casefold()
+    raw_hint = evidence.get("review_search_hint_seconds")
+    if raw_hint is None:
+        source_range = evidence.get("source_time_range")
+        if isinstance(source_range, (list, tuple)) and source_range:
+            raw_hint = source_range[0]
+    if (
+        timestamp_role not in {"search_hint", "authoritative_fallback"}
+        or timestamp_parse not in {"point", "range"}
+        or raw_hint is None
+    ):
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable review timestamp."
+        )
+    try:
+        review_time = float(raw_hint)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable review timestamp."
+        ) from exc
+    if not math.isfinite(review_time) or review_time < 0.0:
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable review timestamp."
+        )
+
+    kind = str(timebase.get("kind") or "").strip().casefold()
+    if kind == "main_global":
+        return review_time
+    if kind != "replacement_local" or status == "unresolved_no_anchor":
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable replacement offset."
+        )
+    if "offset_seconds" not in timebase:
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable replacement offset."
+        )
+    try:
+        offset = float(timebase.get("offset_seconds"))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable replacement offset."
+        ) from exc
+    marker_time = review_time + offset
+    if not math.isfinite(offset) or offset < 0.0 or not math.isfinite(marker_time):
+        raise ValueError(
+            f"Lite unresolved review item {source_item.item_id} has no reliable replacement offset."
+        )
+    return marker_time
 
 
 def _deleted_duration_before(point: float, delete_windows: List[List[float]]) -> float:
@@ -848,6 +914,10 @@ def build_marker_plan(
         actions = action_index.get(normalized_item_id, [])
         source_kind = str(source_item.kind or "").strip().casefold()
         execution_status = _execution_status_from_source_item(source_item)
+        unresolved_timebase_marker_time = None
+        if request.workflow_mode == "lite":
+            execution_status = lite_review_item_execution_status(source_item)
+            unresolved_timebase_marker_time = lite_unresolved_timebase_marker_time(source_item)
         if (
             request.workflow_mode == "lite"
             and lite_pause_change_is_label_only(source_kind, source_item.source_text)
@@ -859,9 +929,14 @@ def build_marker_plan(
         )
         pauses = pause_index.get(normalized_item_id, [])
         label_only_asr_time = (
-            _label_only_asr_marker_time(source_item) if asr_aligned_lite_marker else None
+            _label_only_asr_marker_time(source_item)
+            if asr_aligned_lite_marker and unresolved_timebase_marker_time is None
+            else None
         )
-        if label_only_asr_time is not None:
+        if unresolved_timebase_marker_time is not None:
+            start = unresolved_timebase_marker_time
+            end = unresolved_timebase_marker_time + 0.8
+        elif label_only_asr_time is not None:
             start, end = label_only_asr_time, label_only_asr_time + 0.8
         elif asr_aligned_lite_marker and pauses:
             pause_start = min(float(pause.source_time) for pause in pauses)

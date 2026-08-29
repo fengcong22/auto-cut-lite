@@ -96,6 +96,51 @@ class LiteRevisionTests(unittest.TestCase):
 
         self.assertEqual(detected, 627.589002)
 
+    def test_lite_video_track_stops_at_stream_end_while_audio_keeps_container_tail(self):
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LiteContainerTail",
+                    "source_video": "C:/media/source.mp4",
+                    "media_duration_seconds": 627.589002,
+                },
+            }
+        )
+
+        def shorter_video(_draft, mock_video, path, _duration, _mock):
+            return mock_video(
+                "mock-lite-video-source",
+                627_480_000,
+                "source.mp4",
+                path,
+            )
+
+        with tempfile.TemporaryDirectory() as drafts_root, patch(
+            "utils.lite_revision._make_video_material",
+            side_effect=shorter_video,
+        ):
+            result = execute_revision_request(
+                request,
+                drafts_root=drafts_root,
+                mock_media=True,
+            )
+            with open(
+                os.path.join(result["draft_path"], "draft_content.json"),
+                "r",
+                encoding="utf-8",
+            ) as content_file:
+                content = json.load(content_file)
+
+        video_segment = _track(content, LITE_TRACKS["original_video"])["segments"][0]
+        audio_segment = _track(content, LITE_TRACKS["source_audio"])["segments"][0]
+        self.assertEqual(video_segment["source_timerange"]["duration"], 627_480_000)
+        self.assertEqual(audio_segment["source_timerange"]["duration"], 627_589_002)
+        self.assertEqual(content["duration"], 627_589_002)
+        self.assertEqual(result["source_video_duration_seconds"], 627.48)
+        self.assertEqual(result["source_duration_seconds"], 627.589002)
+        self.assertTrue(result["validation"]["ok"], result["validation"])
+
     def test_lite_delete_windows_keep_adjacent_source_items_separate(self):
         request = _load_request(
             {
@@ -2500,6 +2545,97 @@ class LiteRevisionTests(unittest.TestCase):
             self.assertFalse(
                 os.path.exists(
                     os.path.join(drafts_root, "LiteInvalidFullA2", "draft_content.json")
+                )
+            )
+
+    def test_lite_unresolved_timebase_rejects_stale_segmented_cut_plan(self):
+        source_audio = "C:/media/source.wav"
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "lite_cut_layout": "split_gap",
+                "project": {
+                    "draft_name": "LiteStaleUnresolvedAudioPlan",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": source_audio,
+                    "media_duration_seconds": 10.0,
+                },
+                "audio_delivery_plan": {
+                    "mode": "segmented",
+                    "segments": [
+                        {
+                            "id": "a1-001",
+                            "role": "source",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["source_audio"],
+                            "source_start": 0.0,
+                            "timeline_start": 0.0,
+                            "duration": 2.0,
+                        },
+                        {
+                            "id": "a1-002",
+                            "role": "source",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["source_audio"],
+                            "source_start": 4.0,
+                            "timeline_start": 4.0,
+                            "duration": 6.0,
+                        },
+                        {
+                            "id": "a2-stale",
+                            "role": "reference",
+                            "asset_path": source_audio,
+                            "track_name": LITE_TRACKS["reused_audio"],
+                            "source_start": 2.0,
+                            "timeline_start": 2.0,
+                            "duration": 2.0,
+                            "doc_item_id": "replacement-local",
+                        },
+                    ],
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "phrase_delete",
+                        "start": 2.0,
+                        "end": 4.0,
+                        "doc_item_id": "replacement-local",
+                    }
+                ],
+                "review_items": [
+                    {
+                        "id": "replacement-local",
+                        "kind": "phrase_delete",
+                        "source_text": "00：02-00：04，删除重复词",
+                        "start": 2.0,
+                        "end": 4.0,
+                        "execution_required": True,
+                        "execution_status": "asr_resolved",
+                        "evidence": {
+                            "review_search_hint_seconds": 2.0,
+                            "review_timestamp_parse": "range",
+                            "review_timestamp_role": "authoritative_fallback",
+                            "timebase": {
+                                "kind": "replacement_local",
+                                "offset_seconds": 0.0,
+                                "status": "unresolved_missing_local_range",
+                            },
+                        },
+                    }
+                ],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as drafts_root:
+            with self.assertRaisesRegex(ValueError, "segment count must equal"):
+                execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
+            self.assertFalse(
+                os.path.exists(
+                    os.path.join(
+                        drafts_root,
+                        "LiteStaleUnresolvedAudioPlan",
+                        "draft_content.json",
+                    )
                 )
             )
 

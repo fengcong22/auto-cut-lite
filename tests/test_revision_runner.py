@@ -7649,6 +7649,51 @@ class TestRevisionRunner(unittest.TestCase):
             any("unresolved audio validation status" in message for message in validation["errors"])
         )
 
+    def test_strict_acceptance_allows_unresolved_timebase_only_for_lite_label(self):
+        item = {
+            "id": "replacement-local",
+            "source_text": "00：05-00：13，删除重复词",
+            "kind": "phrase_delete",
+            "execution_required": True,
+            "execution_status": "asr_resolved",
+            "evidence": {
+                "review_search_hint_seconds": 5.0,
+                "review_timestamp_parse": "range",
+                "review_timestamp_role": "authoritative_fallback",
+                "timebase": {
+                    "kind": "replacement_local",
+                    "offset_seconds": 453.0,
+                    "status": "unresolved_missing_local_range",
+                },
+            },
+        }
+        base_payload = {
+            "project": {
+                "draft_name": "UnresolvedReplacementAcceptance",
+                "source_video": "C:/media/source.mp4",
+            },
+            "review_items": [item],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "request.json")
+            with open(path, "w", encoding="utf-8") as request_file:
+                json.dump({**base_payload, "workflow_mode": "lite"}, request_file)
+            lite_request = load_revision_request(path)
+            with open(path, "w", encoding="utf-8") as request_file:
+                json.dump({**base_payload, "workflow_mode": "full"}, request_file)
+            full_request = load_revision_request(path)
+
+        lite_validation = validate_revision_acceptance(lite_request, strict=True)
+        full_validation = validate_revision_acceptance(full_request, strict=True)
+
+        self.assertTrue(lite_validation["ok"], lite_validation["errors"])
+        self.assertFalse(full_validation["ok"])
+        self.assertTrue(
+            any("unresolved timebase" in message for message in full_validation["errors"]),
+            full_validation["errors"],
+        )
+
     def test_strict_acceptance_rejects_unresolved_processed_audio_summary(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             summary_path = os.path.join(tmpdir, "summary.json")

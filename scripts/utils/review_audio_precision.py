@@ -20,6 +20,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from utils.revision_models import (
     lite_pause_change_is_label_only,
     lite_timing_source,
+    lite_unresolved_timebase_status,
     resolve_execution_status,
 )
 
@@ -36,7 +37,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v1"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v2"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
@@ -575,13 +576,20 @@ def resolve_lite_audio_items(
         )
         delete_phrase = _extract_delete_phrase(item)
         pause_label_only = lite_pause_change_is_label_only(kind, source_text)
-        routed_status = resolve_execution_status(
-            item.get("execution_status"),
-            item.get("evidence"),
-            item.get("validation"),
+        unresolved_timebase = lite_unresolved_timebase_status(item)
+        routed_status = (
+            "label_only_unresolved"
+            if unresolved_timebase
+            else resolve_execution_status(
+                item.get("execution_status"),
+                item.get("evidence"),
+                item.get("validation"),
+            )
         )
         routed_label_only = routed_status.casefold().startswith("label_only_")
-        retryable_unresolved = routed_status.casefold() == "label_only_unresolved"
+        retryable_unresolved = (
+            routed_status.casefold() == "label_only_unresolved" and not unresolved_timebase
+        )
         requested_execute = (
             (bool(item.get("execution_required")) or retryable_unresolved)
             and not pause_label_only
@@ -591,7 +599,7 @@ def resolve_lite_audio_items(
         selected: dict[str, Any] | None = None
         match_method = ""
 
-        if delete_phrase and executable_kind:
+        if delete_phrase and executable_kind and not unresolved_timebase:
             anchor_parts = [part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()]
             if len(anchor_parts) >= 2:
                 first_matches = find_phrase_matches(
@@ -704,11 +712,12 @@ def resolve_lite_audio_items(
             resolved_time = review_time
             timing_source = "review_timestamp_fallback"
             alignment = None
-        reason = (
-            "pause_duration_change_is_label_only"
-            if pause_label_only
-            else match_method or "no_unique_executable_phrase_match"
-        )
+        if unresolved_timebase:
+            reason = unresolved_timebase
+        elif pause_label_only:
+            reason = "pause_duration_change_is_label_only"
+        else:
+            reason = match_method or "no_unique_executable_phrase_match"
         if routed_label_only:
             label_only_status = routed_status
         elif pause_label_only:

@@ -70,6 +70,8 @@ from utils.revision_models import (
     _visual_plan_segments,
     build_revision_summary,
     lite_review_item_execution_required,
+    lite_review_item_execution_status,
+    lite_unresolved_timebase_status,
     review_item_execution_status,
 )
 
@@ -4203,9 +4205,13 @@ def validate_revision_acceptance(
         item_gates = set(route.get("gates") or [])
         kind = str(route.get("kind") or item.kind or _classify_review_text(item.source_text))
         timebase = item.evidence.get("timebase") if isinstance(item.evidence, dict) else None
-        if isinstance(timebase, dict) and str(timebase.get("status") or "").startswith(
-            "unresolved"
-        ):
+        unresolved_timebase = lite_unresolved_timebase_status(item)
+        lite_label_only_unresolved = (
+            request.workflow_mode == "lite"
+            and not item.execution_required
+            and lite_review_item_execution_status(item) == "label_only_unresolved"
+        )
+        if unresolved_timebase and not lite_label_only_unresolved:
             reason = (
                 f"Review item {item.item_id} has unresolved timebase "
                 f"{timebase.get('status')}; a replacement-local timestamp cannot be executed."

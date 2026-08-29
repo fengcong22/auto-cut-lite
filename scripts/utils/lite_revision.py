@@ -22,6 +22,7 @@ from utils.review_marker_layout_validation import review_marker_top_layout_probl
 from utils.revision_markers import (
     _label_only_asr_marker_time,
     build_marker_plan,
+    lite_unresolved_timebase_marker_time,
     map_marker_plan_to_timeline,
 )
 from utils.revision_models import (
@@ -32,7 +33,9 @@ from utils.revision_models import (
     lite_execution_required,
     lite_pause_change_is_label_only,
     lite_review_item_execution_required,
+    lite_review_item_execution_status,
     lite_timing_source,
+    lite_unresolved_timebase_status,
     review_item_execution_status,
 )
 
@@ -437,7 +440,7 @@ def _prepare_lite_execution_request(
     unresolved_ids = {
         item.item_id
         for item in authoritative
-        if review_item_execution_status(item).casefold() == "label_only_unresolved"
+        if lite_review_item_execution_status(item).casefold() == "label_only_unresolved"
     }
     unresolved_ids.update(
         str(edit.doc_item_id or f"edit_{index + 1:03d}")
@@ -818,6 +821,8 @@ def _validate_spoken_cut_alignment(
         source_kind = str(edit.source_kind or "").strip().casefold()
         review_item = by_id.get(edit.doc_item_id.casefold()) if edit.doc_item_id else None
         review_kind = str(review_item.kind if review_item is not None else "").strip().casefold()
+        if review_item is not None and lite_unresolved_timebase_status(review_item):
+            continue
         if (
             review_item is not None
             and lite_pause_change_is_label_only(review_item.kind, review_item.source_text)
@@ -949,6 +954,12 @@ def _validate_lite_audio_timing_sources(
 
     problems: List[str] = []
     for item in authoritative:
+        if lite_unresolved_timebase_status(item):
+            try:
+                lite_unresolved_timebase_marker_time(item)
+            except ValueError as exc:
+                problems.append(str(exc))
+            continue
         if lite_timing_source(item.kind, item.source_text) != "asr":
             continue
         normalized_id = item.item_id.strip().casefold()
@@ -1639,6 +1650,7 @@ def _validate_lite_content(
     content: Dict[str, Any],
     *,
     total_duration: float,
+    video_duration: Optional[float] = None,
     marker_plan: Iterable[Any],
     marker_receipts: List[Dict[str, Any]],
     reused_audio_expected: bool,
@@ -1695,6 +1707,12 @@ def _validate_lite_content(
         errors.append("Lite draft must not contain semantic_pause_hold segments.")
 
     expected_timeline_duration = _lite_timeline_duration(total_duration, pauses)
+    video_total = min(
+        total_duration,
+        max(0.0, float(video_duration if video_duration is not None else total_duration)),
+    )
+    if video_total <= 0:
+        errors.append("Lite validation requires a positive source video-stream duration.")
     saved_duration = int(content.get("duration", 0) or 0) / 1_000_000.0
     if abs(saved_duration - expected_timeline_duration) > 0.01:
         errors.append(
@@ -1850,9 +1868,17 @@ def _validate_lite_content(
     original = by_name.get(LITE_TRACKS["original_video"])
     if layout == "split_gap":
         delete_rows = list(delete_windows or [])
-        delete_pairs = [(window.start, window.end) for window in delete_rows]
+        video_delete_rows = [
+            _LiteDeleteWindow(window.item_id, window.start, min(window.end, video_total))
+            for window in delete_rows
+            if window.start < video_total
+            and min(window.end, video_total) - window.start > 1e-6
+        ]
+        video_delete_pairs = [
+            (window.start, window.end) for window in video_delete_rows
+        ]
         keep_video_sources = _split_lite_source_windows(
-            _complement_windows(delete_pairs, total_duration),
+            _complement_windows(video_delete_pairs, video_total),
             pauses,
         )
         keep_video = _mapped_lite_windows(keep_video_sources, pauses)
@@ -1863,7 +1889,7 @@ def _validate_lite_content(
                 + (window.end - window.start),
                 window.start,
             )
-            for window in delete_rows
+            for window in video_delete_rows
         ]
         if original is not None:
             _expect_windows(
@@ -1923,8 +1949,8 @@ def _validate_lite_content(
             errors.append("V1 and V2 source ranges must not overlap.")
         if _has_source_overlap(a1_windows, a2_windows):
             errors.append("A1 and A2 source ranges must not overlap.")
-        if not _coverage_matches([*v1_windows, *v2_windows], total_duration):
-            errors.append("V1 and V2 must cover the complete source exactly once.")
+        if not _coverage_matches([*v1_windows, *v2_windows], video_total):
+            errors.append("V1 and V2 must cover the complete source video stream exactly once.")
         if not _coverage_matches([*a1_windows, *a2_windows], audio_total):
             errors.append("A1 and A2 must cover the complete source audio exactly once.")
 
@@ -2004,6 +2030,7 @@ def _validate_lite_content(
         "warnings": [],
         "metrics": {
             "saved_duration_seconds": saved_duration,
+            "source_video_duration_seconds": video_total,
             "marker_count": len(saved_markers),
             "required_tracks": [name for name, _track_type in required],
             "reused_audio_expected": reused_audio_expected,
@@ -2119,7 +2146,6 @@ def execute_lite_revision_request(
                 )
         delete_window_items = _collect_lite_delete_windows(request, total_duration)
         _validate_pause_delete_boundaries(delete_window_items, request.pause_adjustments)
-        delete_windows = [(window.start, window.end) for window in delete_window_items]
         _validate_lite_segmented_split_gap_plan(
             request,
             delete_window_items,
@@ -2167,8 +2193,27 @@ def execute_lite_revision_request(
             total_duration,
             mock_media,
         )
+        source_video_duration = min(
+            total_duration,
+            _material_duration_seconds(video_material, total_duration),
+        )
+        if source_video_duration <= 0:
+            raise ValueError("Lite mode requires a positive source video-stream duration.")
+        video_delete_window_items = [
+            _LiteDeleteWindow(
+                window.item_id,
+                window.start,
+                min(window.end, source_video_duration),
+            )
+            for window in delete_window_items
+            if window.start < source_video_duration
+            and min(window.end, source_video_duration) - window.start > 1e-6
+        ]
+        video_delete_windows = [
+            (window.start, window.end) for window in video_delete_window_items
+        ]
         keep_video_windows = _split_lite_source_windows(
-            _complement_windows(delete_windows, total_duration),
+            _complement_windows(video_delete_windows, source_video_duration),
             request.pause_adjustments,
         )
         for keep_start, keep_end in keep_video_windows:
@@ -2187,7 +2232,7 @@ def execute_lite_revision_request(
                 volume=0.0,
             )
 
-        for window in delete_window_items:
+        for window in video_delete_window_items:
             target_start = _map_lite_source_time(
                 window.start,
                 request.pause_adjustments,
@@ -2581,6 +2626,7 @@ def execute_lite_revision_request(
             variant_validation = _validate_lite_content(
                 content,
                 total_duration=total_duration,
+                video_duration=source_video_duration,
                 marker_plan=marker_plan,
                 marker_receipts=marker_receipt_dicts,
                 reused_audio_expected=reused_audio_expected,
@@ -2708,6 +2754,7 @@ def execute_lite_revision_request(
             "lite_cut_layout": layout,
             "draft_path": save_result.get("draft_path", ""),
             "source_duration_seconds": total_duration,
+            "source_video_duration_seconds": source_video_duration,
             "timeline_duration_seconds": timeline_duration,
             "added_pause_duration_seconds": 0.0,
             "tracks": list(LITE_TRACKS.values()),

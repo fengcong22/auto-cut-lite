@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from unittest.mock import patch
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(CURRENT_DIR)
@@ -17,6 +18,7 @@ if SCRIPTS_PATH not in sys.path:
 from utils.revision_runner import (
     _request_with_pause_results,
     _request_with_visual_results,
+    _write_segmented_audio_delivery,
     audio_delivery_plan_sha256,
     build_revision_summary,
     execute_revision_request,
@@ -92,6 +94,120 @@ class TestSegmentedAudioDelivery(unittest.TestCase):
                 "keep_review_markers_separate": True,
             },
         }
+
+    def _write_with_material_duration(self, request, material_duration_us):
+        class FakeMaterial:
+            material_id = "parsed-audio-material"
+            duration = material_duration_us
+
+        class FakeTimerange:
+            def __init__(self, start, duration):
+                self.start = start
+                self.duration = duration
+
+            @property
+            def end(self):
+                return self.start + self.duration
+
+        class FakeAudioSegment:
+            def __init__(
+                self,
+                material,
+                target_timerange,
+                *,
+                source_timerange,
+                volume,
+            ):
+                self.material = material
+                self.target_timerange = target_timerange
+                self.source_timerange = source_timerange
+                self.volume = volume
+                self.segment_id = "parsed-audio-segment"
+                if source_timerange.end > material.duration:
+                    raise ValueError("source timerange exceeds material duration")
+
+        class FakeDraft:
+            class TrackType:
+                audio = "audio"
+
+            Timerange = FakeTimerange
+            AudioSegment = FakeAudioSegment
+
+            @staticmethod
+            def AudioMaterial(_path):
+                return FakeMaterial()
+
+        class FakeScript:
+            def __init__(self):
+                self.segments = []
+
+            def add_track(self, _track_type, _track_name):
+                return None
+
+            def add_segment(self, segment, track_name):
+                self.segments.append((track_name, segment))
+
+        class FakeProject:
+            def __init__(self):
+                self.script = FakeScript()
+
+            def add_audio_fade_to_segment(self, *_args, **_kwargs):
+                return None
+
+        project = FakeProject()
+        _track_names, results = _write_segmented_audio_delivery(
+            project,
+            request,
+            draft=FakeDraft,
+            MockAudioMaterial=None,
+            mock_media=False,
+            fallback_duration=0.0,
+        )
+        return project.script.segments, results
+
+    def test_segmented_writer_preserves_confirmed_two_microsecond_material_rounding_tail(self):
+        payload = self._segmented_payload()
+        segment = payload["audio_delivery_plan"]["segments"][0]
+        segment["source_start"] = 0.0
+        segment["timeline_start"] = 0.0
+        segment["duration"] = 627.589002
+        request = self._load_request(payload)
+
+        with patch(
+            "utils.revision_runner.get_duration_ffprobe_cached",
+            return_value=627.589002,
+        ):
+            segments, results = self._write_with_material_duration(request, 627_589_000)
+
+        written_segment = segments[0][1]
+        self.assertEqual(written_segment.source_timerange.duration, 627_589_002)
+        self.assertEqual(written_segment.target_timerange.duration, 627_589_002)
+        self.assertEqual(results[0]["duration"], 627.589002)
+
+    def test_segmented_writer_rejects_unconfirmed_sub_millisecond_material_rounding(self):
+        payload = self._segmented_payload()
+        segment = payload["audio_delivery_plan"]["segments"][0]
+        segment["source_start"] = 0.0
+        segment["timeline_start"] = 0.0
+        segment["duration"] = 627.589002
+        request = self._load_request(payload)
+
+        with patch(
+            "utils.revision_runner.get_duration_ffprobe_cached",
+            return_value=627.589,
+        ), self.assertRaisesRegex(ValueError, "cannot confirm parsed audio duration rounding"):
+            self._write_with_material_duration(request, 627_589_000)
+
+    def test_segmented_writer_rejects_material_overrun_beyond_rounding_tolerance(self):
+        payload = self._segmented_payload()
+        segment = payload["audio_delivery_plan"]["segments"][0]
+        segment["source_start"] = 0.0
+        segment["timeline_start"] = 0.0
+        segment["duration"] = 627.591
+        request = self._load_request(payload)
+
+        with self.assertRaisesRegex(ValueError, "exceeds parsed audio material duration"):
+            self._write_with_material_duration(request, 627_589_000)
 
     def _validation_request(
         self,

@@ -210,6 +210,135 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 "label_only_lite_policy",
             )
 
+    def test_unresolved_replacement_timebase_never_retries_against_main_video_asr(self):
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "replacement-local",
+                    "kind": "phrase_delete",
+                    "source_text": "00：05-00：13，删除“测试”",
+                    "start": 451.0,
+                    "end": 452.0,
+                    "execution_required": True,
+                    "execution_status": "asr_resolved",
+                    "evidence": {
+                        "delete": "测试",
+                        "review_search_hint_seconds": 5.0,
+                        "review_timestamp_parse": "range",
+                        "review_timestamp_role": "search_hint",
+                        "timebase": {
+                            "kind": "replacement_local",
+                            "offset_seconds": 453.0,
+                            "status": "unresolved_missing_local_range",
+                        },
+                    },
+                }
+            ],
+            _source_asr(
+                [
+                    {"text": "测试", "start": 451.0, "end": 451.4},
+                    {"text": "后文", "start": 451.5, "end": 451.9},
+                ]
+            ),
+            source_duration_seconds=627.589002,
+        )
+
+        row = result["rows"][0]
+        self.assertFalse(row["execution_required"])
+        self.assertEqual(row["execution_status"], "label_only_unresolved")
+        self.assertEqual(row["resolved_time"], 5.0)
+        self.assertEqual(row["reason"], "unresolved_missing_local_range")
+        self.assertEqual(result["executable_cuts"], [])
+        self.assertEqual(result["unresolved_item_ids"], ["replacement-local"])
+
+    def test_unresolved_replacement_is_removed_from_rebuilt_edits_and_a2_plan(self):
+        review_items = [
+            {
+                "id": "replacement-local",
+                "kind": "phrase_delete",
+                "source_text": "00：01，删除“误匹配”",
+                "start": 1.0,
+                "execution_required": True,
+                "execution_status": "asr_resolved",
+                "evidence": {
+                    "delete": "误匹配",
+                    "review_search_hint_seconds": 1.0,
+                    "review_timestamp_parse": "point",
+                    "review_timestamp_role": "search_hint",
+                    "timebase": {
+                        "kind": "replacement_local",
+                        "offset_seconds": 1.0,
+                        "status": "unresolved_missing_local_range",
+                    },
+                },
+            },
+            {
+                "id": "valid-cut",
+                "kind": "phrase_delete",
+                "source_text": "00：02，删除“有效切词”",
+                "start": 1.8,
+                "end": 2.8,
+                "execution_required": True,
+                "evidence": {"delete": "有效切词"},
+            },
+        ]
+        cut_plan = resolve_lite_audio_items(
+            review_items,
+            _source_asr(
+                [
+                    {"text": "误匹配", "start": 1.0, "end": 1.4},
+                    {"text": "有效", "start": 2.0, "end": 2.2},
+                    {"text": "切词", "start": 2.2, "end": 2.5},
+                ]
+            ),
+            source_duration_seconds=3.0,
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 3.0)
+            _write_pcm16_wav(candidate, 3.0)
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+            request, _ledger = apply_audio_plan_to_compiled_payloads(
+                {
+                    "workflow_mode": "lite",
+                    "project": {},
+                    "review_items": review_items,
+                    "edits": [
+                        {"type": "delete", "doc_item_id": "replacement-local"},
+                        {"type": "delete", "doc_item_id": "valid-cut"},
+                    ],
+                },
+                {"review_items": review_items},
+                cut_plan,
+                audio_delivery_plan=delivery_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+
+        a2_ids = [
+            row["doc_item_id"]
+            for row in delivery_plan["segments"]
+            if row["track_name"] == LITE_TRACKS["reused_audio"]
+        ]
+        self.assertEqual(a2_ids, ["valid-cut"])
+        self.assertEqual(
+            [edit["doc_item_id"] for edit in request["edits"]],
+            ["valid-cut"],
+        )
+        by_id = {item["id"]: item for item in request["review_items"]}
+        self.assertFalse(by_id["replacement-local"]["execution_required"])
+        self.assertEqual(
+            by_id["replacement-local"]["execution_status"],
+            "label_only_unresolved",
+        )
+
     def test_reverse_asr_fallback_downgrades_only_attributable_failures(self):
         alignment = {
             "status": "pass",

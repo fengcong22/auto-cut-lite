@@ -1705,6 +1705,79 @@ class TestRevisionMarkerPlan(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid ASR receipt"):
                     build_marker_plan(request)
 
+    def test_lite_unresolved_replacement_marker_uses_review_time_plus_offset(self):
+        item = RevisionReviewItem(
+            item_id="replacement-local",
+            kind="phrase_delete",
+            source_text="00：05-00：13，删除主视频中也出现的词",
+            start=451.0,
+            end=452.0,
+            execution_required=True,
+            execution_status="asr_resolved",
+            evidence={
+                "review_search_hint_seconds": 5.0,
+                "review_timestamp_parse": "range",
+                "review_timestamp_role": "authoritative_fallback",
+                "resolved_time": 451.0,
+                "timebase": {
+                    "kind": "replacement_local",
+                    "offset_seconds": 453.0,
+                    "status": "unresolved_missing_local_range",
+                },
+            },
+        )
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="UnresolvedReplacementMarker",
+                source_video="C:/media/source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            review_items=[item],
+            workflow_mode="lite",
+        )
+
+        plan = build_marker_plan(request)
+
+        self.assertEqual(len(plan), 1)
+        self.assertEqual((plan[0].start, plan[0].end), (458.0, 458.8))
+        self.assertEqual(plan[0].source_text, item.source_text)
+        self.assertEqual(plan[0].execution_status, "label_only_unresolved")
+
+    def test_lite_unresolved_replacement_marker_fails_without_review_time(self):
+        request = RevisionRequest(
+            project=RevisionProject(
+                draft_name="MissingUnresolvedReplacementTime",
+                source_video="C:/media/source.mp4",
+            ),
+            edits=[],
+            markers=[],
+            preserve=PreservationRules(),
+            review_items=[
+                RevisionReviewItem(
+                    item_id="replacement-local",
+                    kind="phrase_delete",
+                    source_text="删除主视频中也出现的词",
+                    start=451.0,
+                    execution_required=True,
+                    execution_status="asr_resolved",
+                    evidence={
+                        "resolved_time": 451.0,
+                        "timebase": {
+                            "kind": "replacement_local",
+                            "offset_seconds": 453.0,
+                            "status": "unresolved_missing_local_range",
+                        },
+                    },
+                )
+            ],
+            workflow_mode="lite",
+        )
+
+        with self.assertRaisesRegex(ValueError, "no reliable review timestamp"):
+            build_marker_plan(request)
+
     def test_legacy_plan_and_summary_keep_one_marker_per_explicit_action(self):
         request = self._request(
             edits=[

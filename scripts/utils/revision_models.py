@@ -563,10 +563,34 @@ def review_item_execution_status(item: RevisionReviewItem) -> str:
     )
 
 
+def lite_unresolved_timebase_status(item: Any) -> str:
+    """Return an unresolved canonical timebase status carried by a Lite item."""
+
+    if isinstance(item, Mapping):
+        evidence = item.get("evidence")
+    else:
+        evidence = getattr(item, "evidence", None)
+    if not isinstance(evidence, Mapping):
+        return ""
+    timebase = evidence.get("timebase")
+    if not isinstance(timebase, Mapping):
+        return ""
+    status = str(timebase.get("status") or "").strip().casefold()
+    return status if status.startswith("unresolved") else ""
+
+
+def lite_review_item_execution_status(item: RevisionReviewItem) -> str:
+    """Make an unresolved timebase an authoritative Lite marker-only state."""
+
+    if lite_unresolved_timebase_status(item):
+        return "label_only_unresolved"
+    return review_item_execution_status(item)
+
+
 def lite_review_item_execution_required(item: RevisionReviewItem) -> bool:
     """Apply internal label-only state and the fixed Lite kind policy."""
 
-    if review_item_execution_status(item).casefold().startswith("label_only_"):
+    if lite_review_item_execution_status(item).casefold().startswith("label_only_"):
         return False
     return lite_execution_required(
         item.kind,
@@ -1275,6 +1299,7 @@ def load_revision_request(path: str) -> RevisionRequest:
             replace(
                 item,
                 execution_required=lite_review_item_execution_required(item),
+                execution_status=lite_review_item_execution_status(item),
             )
             for item in review_items
         ]
