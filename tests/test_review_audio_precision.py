@@ -17,6 +17,7 @@ from utils.lite_revision import LITE_TRACKS, _validate_lite_audio_timing_sources
 from utils.review_audio_precision import (
     CANDIDATE_RENDERER_VERSION,
     REVERSE_ASR_DIAGNOSTIC_PURPOSE,
+    _semantic_join_forbidden_patterns,
     alignment_cache_identity,
     apply_audio_plan_to_compiled_payloads,
     apply_reverse_report_to_payloads,
@@ -28,7 +29,6 @@ from utils.review_audio_precision import (
     render_source_aligned_candidate,
     resolve_lite_audio_items,
     reverse_asr_cache_identity,
-    _semantic_join_forbidden_patterns,
     source_asr_cache_identity,
     wav_duration_seconds,
 )
@@ -508,45 +508,170 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 self.assertEqual(row["end"], words[-1]["end"])
                 self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
 
-    def test_source_asr_never_promotes_missing_edge_or_remote_occurrence(self):
-        cases = [
-            {
-                "id": "missing-leading-character",
-                "source_text": "00:10 删除它解决不了",
-                "delete": "它解决不了",
-                "words": _character_words("解决不了", 10.0),
-                "expected_time": 10.0,
-            },
-            {
-                "id": "remote-occurrence",
-                "source_text": "00:10 删除对吧",
-                "delete": "对吧",
-                "words": _character_words("对吧", 1.0),
-                "expected_time": 10.0,
-            },
-        ]
+    def test_source_asr_time_anchored_partial_match_cuts_recognized_remainder(self):
+        words = _character_words("解决不了", 10.0)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "missing-leading-character",
+                    "kind": "phrase_delete",
+                    "source_text": "00:10 删除它解决不了",
+                    "execution_required": True,
+                    "evidence": {"delete": "它解决不了"},
+                }
+            ],
+            _source_asr(words),
+            source_duration_seconds=20.0,
+        )
 
-        for case in cases:
-            with self.subTest(case["id"]):
+        row = result["rows"][0]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(row["match_method"], "time_anchored_partial_phrase")
+        self.assertEqual(row["resolved_delete"], "解决不了")
+        self.assertEqual(row["asr_match"]["omitted_review_text"], "它")
+        self.assertEqual(row["asr_match"]["keyword_coverage"], 0.8)
+        self.assertEqual(row["start"], words[0]["start"])
+        self.assertEqual(row["end"], words[-1]["end"])
+        self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
+
+    def test_source_asr_uses_nearest_word_span_without_joining_repeat(self):
+        first = _character_words("哎就有这么个地方叫德意志", 54.45, 0.14)
+        second = _character_words("哎就有这么个地方叫德意志", 57.51, 0.14)
+        tail = _character_words("对吧", 59.75, 0.2)
+        source_asr = _source_asr(first + second + tail)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "nearby-repeat",
+                    "kind": "phrase_delete",
+                    "source_text": (
+                        "00:53-00:57 删除哎就是有这么一个地方叫德意志，对吧"
+                    ),
+                    "execution_required": True,
+                    "evidence": {
+                        "delete": "哎就是有这么一个地方叫德意志，对吧",
+                        "must_keep": [],
+                    },
+                },
+                {
+                    "id": "separate-tail",
+                    "kind": "phrase_delete",
+                    "source_text": "00:59 删除对吧",
+                    "execution_required": True,
+                    "evidence": {"delete": "对吧", "must_keep": []},
+                },
+            ],
+            source_asr,
+            source_duration_seconds=70.0,
+        )
+
+        rows = {row["item_id"]: row for row in result["rows"]}
+        row = rows["nearby-repeat"]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(
+            row["match_method"], "time_anchored_fuzzy_phrase_nearest_anchor"
+        )
+        self.assertEqual(row["resolved_delete"], "哎就有这么个地方叫德意志")
+        self.assertEqual(row["asr_match"]["omitted_review_text"], "是一对吧")
+        self.assertEqual(row["start"], first[0]["start"])
+        self.assertEqual(row["end"], first[-1]["end"])
+        tail_row = rows["separate-tail"]
+        self.assertTrue(tail_row["execution_required"])
+        self.assertEqual(tail_row["start"], tail[0]["start"])
+        self.assertEqual(tail_row["end"], tail[-1]["end"])
+
+    def test_source_asr_rejects_short_multi_omission_and_content_replacement(self):
+        cases = [
+            ("two-missing", "它能解决不了", "解决不了"),
+            ("content-replacement", "它解决得了", "解决不了"),
+        ]
+        for item_id, delete, transcript in cases:
+            with self.subTest(item_id):
                 result = resolve_lite_audio_items(
                     [
                         {
-                            "id": case["id"],
+                            "id": item_id,
                             "kind": "phrase_delete",
-                            "source_text": case["source_text"],
+                            "source_text": f"00:10 删除{delete}",
                             "execution_required": True,
-                            "evidence": {"delete": case["delete"]},
+                            "evidence": {"delete": delete},
                         }
                     ],
-                    _source_asr(case["words"]),
+                    _source_asr(_character_words(transcript, 10.0)),
                     source_duration_seconds=20.0,
                 )
 
                 row = result["rows"][0]
                 self.assertFalse(row["execution_required"])
                 self.assertEqual(row["reason"], "phrase_not_found")
-                self.assertEqual(row["resolved_time"], case["expected_time"])
-                self.assertEqual(row["timing_source"], "review_timestamp_fallback")
+
+    def test_source_asr_keeps_supported_pause_inside_contiguous_word_span(self):
+        words = [
+            {"text": "萨", "start": 688.55, "end": 688.59},
+            {"text": "丁", "start": 688.75, "end": 688.79},
+            {"text": "哎", "start": 690.07, "end": 690.15},
+        ]
+        source_asr = _source_asr(words)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "same-utterance-pause",
+                    "kind": "phrase_delete",
+                    "source_text": "11:28 删除萨丁哎",
+                    "execution_required": True,
+                    "evidence": {"delete": "萨丁哎"},
+                }
+            ],
+            source_asr,
+            source_duration_seconds=700.0,
+        )
+
+        row = result["rows"][0]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(row["start"], 688.55)
+        self.assertEqual(row["end"], 690.15)
+
+    def test_source_asr_does_not_join_words_across_separate_utterances(self):
+        words = _character_words("甲乙", 10.0) + _character_words("丙丁戊", 12.0)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "cross-utterance",
+                    "kind": "phrase_delete",
+                    "source_text": "00:11 删除甲乙丙丁戊",
+                    "execution_required": True,
+                    "evidence": {"delete": "甲乙丙丁戊"},
+                }
+            ],
+            _source_asr(words),
+            source_duration_seconds=20.0,
+        )
+
+        row = result["rows"][0]
+        self.assertFalse(row["execution_required"])
+        self.assertEqual(row["reason"], "phrase_not_found")
+        self.assertEqual(row["timing_source"], "review_timestamp_fallback")
+
+    def test_source_asr_never_promotes_remote_occurrence(self):
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "remote-occurrence",
+                    "kind": "phrase_delete",
+                    "source_text": "00:10 删除远处词语",
+                    "execution_required": True,
+                    "evidence": {"delete": "远处词语"},
+                }
+            ],
+            _source_asr(_character_words("远处词语", 1.0)),
+            source_duration_seconds=20.0,
+        )
+
+        row = result["rows"][0]
+        self.assertFalse(row["execution_required"])
+        self.assertEqual(row["reason"], "phrase_not_found")
+        self.assertEqual(row["resolved_time"], 10.0)
+        self.assertEqual(row["timing_source"], "review_timestamp_fallback")
 
     def test_automatic_must_keep_context_excludes_other_delete_windows(self):
         words = _character_words("保留目标一后删留下", 1.0)

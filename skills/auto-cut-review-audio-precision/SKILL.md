@@ -76,6 +76,13 @@ If the review document contains blue or red deletion text, inspect the document 
 - When importing ASR capability from another local repository, adapt it as an alignment dependency only. Keep this repository's review-item schema, must-keep contract, visual-aware pause gate, reverse validation, and editable-draft evidence rules as the controlling workflow.
 - Do not infer the final cut window from the rough review timestamp alone. Use rough time only to find the local sentence.
 - For repeated phrases, match by local context and adjacent words, not by phrase text alone.
+- In Lite, permit a time-anchored high-confidence fuzzy match only when it selects one continuous
+  ASR word span, retains at least 80% ordered keyword coverage, and wins uniquely by review-time
+  distance and text confidence. Permit one non-tail omitted character for short phrases and two
+  for phrases of at least 16 normalized characters; a detached optional discourse tail such as
+  `对吧` may also be absent when it belongs to another utterance. Cut only the ASR-recognized
+  remainder, record omitted review characters, and never skip intervening ASR words. An inter-word
+  gap over 1.5 seconds breaks continuity; a provider utterance boundary alone does not.
 
 ## Resumable ASR Evidence
 

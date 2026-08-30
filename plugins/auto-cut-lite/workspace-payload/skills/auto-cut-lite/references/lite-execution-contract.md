@@ -68,6 +68,13 @@ correct Lite output.
   deletion its unique ASR window is mandatory and equals the saved non-destructive split boundary;
   the source interval remains present and the project duration is unchanged. A non-executing item
   uses its unique ASR point when available and otherwise the time written in the review comment.
+- A spoken deletion may resolve through a time-anchored high-confidence fuzzy match only when one
+  continuous ASR word span retains at least 80% ordered keyword coverage and wins uniquely by time
+  and text confidence. Permit one non-tail omitted review character for short phrases and two for
+  phrases of at least 16 normalized characters; a detached optional discourse tail such as `对吧`
+  may also be absent when it belongs to another utterance. The cut covers only recognized ASR
+  words, records omitted review text, and never skips intervening ASR words. An inter-word gap over
+  1.5 seconds breaks continuity; a provider utterance boundary alone does not.
 - For spoken deletion specifically, this remains the word/character ASR-resolved logical split start.
 - Review-only and ASR-unresolved items use review timestamps. Prefer a requested target after cues
   such as `提前到`, `推迟到`, `移到`, or `调到`; a point timestamp is sufficient.

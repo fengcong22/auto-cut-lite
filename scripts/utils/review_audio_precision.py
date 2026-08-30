@@ -38,7 +38,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v3"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v4"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
@@ -95,7 +95,8 @@ _FORBIDDEN_JOIN_PATTERNS = (
     "它说明。",
     "夏朝。立的",
 )
-_ASR_SEARCH_PADDING_SECONDS = 2.0
+_ASR_SEARCH_PADDING_SECONDS = 4.0
+_ASR_CONTIGUOUS_WORD_GAP_SECONDS = 1.5
 _ASR_EQUIVALENT_CHARACTERS = {
     "她": "他",
     "它": "他",
@@ -103,6 +104,7 @@ _ASR_EQUIVALENT_CHARACTERS = {
     "牠": "他",
 }
 _OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
+_OPTIONAL_REVIEW_TAILS = frozenset({"对吧"})
 
 
 def canonical_json_sha256(payload: Any) -> str:
@@ -390,13 +392,19 @@ def render_source_aligned_candidate(
     }
 
 
-def _normalized_text(value: Any) -> str:
+def _normalized_text_with_sources(value: Any) -> tuple[str, list[str]]:
     result: list[str] = []
+    sources: list[str] = []
     for character in unicodedata.normalize("NFKC", str(value or "")).casefold():
         if not character.isalnum():
             continue
         result.append(_ASR_EQUIVALENT_CHARACTERS.get(character, character))
-    return "".join(result)
+        sources.append(character)
+    return "".join(result), sources
+
+
+def _normalized_text(value: Any) -> str:
+    return _normalized_text_with_sources(value)[0]
 
 
 def _phrase_supported(transcript: str, phrase: str) -> bool:
@@ -501,6 +509,7 @@ def _match_payload(
     anchor_end: float | None,
     match_method: str = "",
     edit_distance: int = 0,
+    match_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     selected_words = words[start_index : end_index + 1]
     start = float(selected_words[0]["start"])
@@ -524,7 +533,31 @@ def _match_payload(
         payload["match_method"] = match_method
     if edit_distance:
         payload["edit_distance"] = edit_distance
+    if match_evidence:
+        payload.update(dict(match_evidence))
     return payload
+
+
+def _is_contiguous_word_span(
+    words: Sequence[Mapping[str, Any]], start_index: int, end_index: int
+) -> bool:
+    selected_words = words[start_index : end_index + 1]
+    previous_end: float | None = None
+    for word in selected_words:
+        try:
+            start = float(word["start"])
+            end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+            return False
+        if (
+            previous_end is not None
+            and start - previous_end > _ASR_CONTIGUOUS_WORD_GAP_SECONDS
+        ):
+            return False
+        previous_end = end
+    return True
 
 
 def _normalized_exact_phrase_matches(
@@ -568,6 +601,7 @@ def _normalized_exact_phrase_matches(
             and end_bound is not None
             and found == start_bound[0]
             and end_character + 1 == end_bound[1]
+            and _is_contiguous_word_span(words, start_word_index, end_word_index)
         ):
             payload = _match_payload(
                 words,
@@ -583,44 +617,85 @@ def _normalized_exact_phrase_matches(
     return matches
 
 
-def _conservative_fuzzy_distance(target: str, candidate: str) -> int | None:
-    if len(target) < 5 or not candidate or target[0] != candidate[0] or target[-1] != candidate[-1]:
+def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
+    if len(target) < 5 or len(candidate) < 4:
         return None
-    maximum = 1 if len(target) < 16 else 2
+    maximum_generic_omissions = 2 if len(target) >= 16 else 1
+    maximum = maximum_generic_omissions + 2
     matcher = SequenceMatcher(a=target, b=candidate, autojunk=False)
     distance = 0
     generic_target_omissions = 0
+    edge_target_omissions = 0
+    equal_characters = 0
+    omitted_review_parts: list[str] = []
+    omitted_review_ranges: list[list[int]] = []
+    optional_difference_characters = 0
+    extra_asr_parts: list[str] = []
     for tag, target_start, target_end, candidate_start, candidate_end in matcher.get_opcodes():
         if tag == "equal":
+            equal_characters += target_end - target_start
             continue
         if tag == "replace":
             return None
         if tag == "delete":
             removed = target[target_start:target_end]
+            omitted_review_parts.append(removed)
+            omitted_review_ranges.append([target_start, target_end])
             distance += len(removed)
-            non_fillers = [char for char in removed if char not in _OPTIONAL_SPEECH_FILLERS]
+            optional_tail = (
+                target_end == len(target) and removed in _OPTIONAL_REVIEW_TAILS
+            )
+            non_fillers = (
+                []
+                if optional_tail
+                else [char for char in removed if char not in _OPTIONAL_SPEECH_FILLERS]
+            )
             generic_target_omissions += len(non_fillers)
-            if target_start == 0 or target_end == len(target):
-                return None
+            optional_difference_characters += len(removed) - len(non_fillers)
+            if (target_start == 0 or target_end == len(target)) and not optional_tail:
+                edge_target_omissions += len(removed)
         elif tag == "insert":
             inserted = candidate[candidate_start:candidate_end]
+            extra_asr_parts.append(inserted)
             distance += len(inserted)
             if any(char not in _OPTIONAL_SPEECH_FILLERS for char in inserted):
                 return None
+            optional_difference_characters += len(inserted)
             if candidate_start == 0 or candidate_end == len(candidate):
                 return None
         if distance > maximum:
             return None
     if distance == 0 or distance > maximum:
         return None
-    if generic_target_omissions and (
-        len(target) < 12 or generic_target_omissions > 1 or distance > 1
+    if generic_target_omissions > maximum_generic_omissions:
+        return None
+    if edge_target_omissions > 1:
+        return None
+    if optional_difference_characters > 2:
+        return None
+    similarity = matcher.ratio()
+    keyword_denominator = max(1, len(target) - optional_difference_characters)
+    keyword_coverage = equal_characters / keyword_denominator
+    minimum_similarity = 0.85 if generic_target_omissions else 0.8
+    if similarity < minimum_similarity or keyword_coverage < 0.8:
+        return None
+    method = "conservative_fuzzy_phrase"
+    if edge_target_omissions:
+        method = "time_anchored_partial_phrase"
+    elif generic_target_omissions > 1 or (
+        generic_target_omissions and len(target) < 12
     ):
-        return None
-    minimum_similarity = 0.9 if generic_target_omissions else 0.8
-    if 1.0 - distance / max(len(target), len(candidate)) < minimum_similarity:
-        return None
-    return distance
+        method = "time_anchored_fuzzy_phrase"
+    return {
+        "edit_distance": distance,
+        "text_similarity": round(similarity, 6),
+        "keyword_coverage": round(keyword_coverage, 6),
+        "matched_keyword_characters": equal_characters,
+        "omitted_review_text": "".join(omitted_review_parts),
+        "omitted_review_ranges": omitted_review_ranges,
+        "extra_asr_text": "".join(extra_asr_parts),
+        "match_method": method,
+    }
 
 
 def _conservative_fuzzy_phrase_matches(
@@ -630,11 +705,11 @@ def _conservative_fuzzy_phrase_matches(
     anchor_start: float | None,
     anchor_end: float | None,
 ) -> list[dict[str, Any]]:
-    target = _normalized_text(phrase)
+    target, target_sources = _normalized_text_with_sources(phrase)
     bounds = _search_bounds(anchor_start, anchor_end)
     if len(target) < 5 or bounds is None:
         return []
-    maximum = 1 if len(target) < 16 else 2
+    maximum = 1 if len(target) < 16 else 4
     normalized_words = [_normalized_text(word.get("text")) for word in words]
     matches: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
@@ -649,6 +724,11 @@ def _conservative_fuzzy_phrase_matches(
             continue
         candidate_parts: list[str] = []
         for end_index in range(start_index, len(words)):
+            if (
+                end_index > start_index
+                and not _is_contiguous_word_span(words, end_index - 1, end_index)
+            ):
+                break
             candidate_parts.append(normalized_words[end_index])
             candidate = "".join(candidate_parts)
             if len(candidate) > len(target) + maximum:
@@ -661,10 +741,15 @@ def _conservative_fuzzy_phrase_matches(
                 continue
             if not _match_in_search_bounds(start_time, end_time, bounds):
                 continue
-            distance = _conservative_fuzzy_distance(target, candidate)
+            fuzzy_evidence = _fuzzy_match_evidence(target, candidate)
             identity = (start_index, end_index)
-            if distance is None or identity in seen:
+            if fuzzy_evidence is None or identity in seen:
                 continue
+            omitted_ranges = fuzzy_evidence.pop("omitted_review_ranges", [])
+            fuzzy_evidence["omitted_review_text"] = "".join(
+                "".join(target_sources[start:end])
+                for start, end in omitted_ranges
+            )
             seen.add(identity)
             matches.append(
                 _match_payload(
@@ -674,11 +759,44 @@ def _conservative_fuzzy_phrase_matches(
                     end_index,
                     anchor_start=anchor_start,
                     anchor_end=anchor_end,
-                    match_method="conservative_fuzzy_phrase",
-                    edit_distance=distance,
+                    match_method=str(fuzzy_evidence["match_method"]),
+                    edit_distance=int(fuzzy_evidence["edit_distance"]),
+                    match_evidence=fuzzy_evidence,
                 )
             )
-    return matches
+    ranked = sorted(
+        matches,
+        key=lambda row: (
+            -float(row.get("text_similarity", 0.0)),
+            int(row.get("edit_distance", 99)),
+            -float(row.get("keyword_coverage", 0.0)),
+        ),
+    )
+    deduplicated: list[dict[str, Any]] = []
+    for candidate in ranked:
+        candidate_start = int(candidate["word_start_index"])
+        candidate_end = int(candidate["word_end_index"])
+        candidate_length = candidate_end - candidate_start + 1
+        dominated = False
+        for selected in deduplicated:
+            selected_start = int(selected["word_start_index"])
+            selected_end = int(selected["word_end_index"])
+            overlap = max(
+                0,
+                min(candidate_end, selected_end)
+                - max(candidate_start, selected_start)
+                + 1,
+            )
+            selected_length = selected_end - selected_start + 1
+            if overlap / min(candidate_length, selected_length) >= 0.8:
+                dominated = True
+                break
+        if not dominated:
+            deduplicated.append(candidate)
+    return sorted(
+        deduplicated,
+        key=lambda row: (float(row["start"]), float(row["end"])),
+    )
 
 
 def _find_phrase_matches(
@@ -759,6 +877,15 @@ def _unique_nearest_match(
     first_distance = _match_distance(ordered[0], anchor)
     second_distance = _match_distance(ordered[1], anchor)
     if second_distance - first_distance < 0.35:
+        first_similarity = float(ordered[0].get("text_similarity", 1.0))
+        second_similarity = float(ordered[1].get("text_similarity", 1.0))
+        if abs(first_similarity - second_similarity) >= 0.08:
+            selected = max(
+                (ordered[0], ordered[1]),
+                key=lambda row: float(row.get("text_similarity", 1.0)),
+            )
+            method = str(selected.get("match_method") or "matched")
+            return selected, f"{method}_best_text_near_anchor"
         return None, "ambiguous_near_anchor"
     method = str(ordered[0].get("match_method") or "matched")
     return ordered[0], f"{method}_nearest_anchor"
@@ -880,9 +1007,10 @@ def resolve_lite_audio_items(
 ) -> dict[str, Any]:
     """Resolve executable speech cuts and fail closed to ASR-positioned labels."""
 
-    words = source_asr.get("words")
-    if not isinstance(words, list) or not words:
+    raw_words = source_asr.get("words")
+    if not isinstance(raw_words, list) or not raw_words:
         raise ValueError("Source ASR must contain word-level timing rows")
+    words = [dict(word) for word in raw_words if isinstance(word, Mapping)]
     rows: list[dict[str, Any]] = []
     for index, raw_item in enumerate(review_items):
         item = dict(raw_item)
@@ -999,6 +1127,25 @@ def resolve_lite_audio_items(
                         "execution_status": "asr_resolved",
                         "strategy": str(explicit_evidence.get("strategy") or "precision_first"),
                         "delete": delete_phrase,
+                        "resolved_delete": str(selected.get("text") or delete_phrase),
+                        "asr_match": {
+                            "match_method": match_method or "exact_phrase",
+                            "text_similarity": float(selected.get("text_similarity", 1.0)),
+                            "keyword_coverage": float(selected.get("keyword_coverage", 1.0)),
+                            "matched_keyword_characters": int(
+                                selected.get(
+                                    "matched_keyword_characters",
+                                    len(_normalized_text(delete_phrase)),
+                                )
+                            ),
+                            "omitted_review_text": str(
+                                selected.get("omitted_review_text") or ""
+                            ),
+                            "extra_asr_text": str(selected.get("extra_asr_text") or ""),
+                            "anchor_distance_seconds": round(
+                                _match_distance(selected, anchor), 6
+                            ),
+                        },
                         "must_keep": must_keep,
                         "must_keep_source_windows": must_keep_source_windows,
                         "start": round(start, 6),
@@ -1351,6 +1498,8 @@ def apply_audio_plan_to_compiled_payloads(
                 {
                     "strategy": row["strategy"],
                     "delete": row["delete"],
+                    "resolved_delete": row.get("resolved_delete", row["delete"]),
+                    "asr_match": deepcopy(row.get("asr_match") or {}),
                     "must_keep": list(row.get("must_keep") or []),
                     "match_method": row.get("match_method"),
                     "resolved_time": row.get("resolved_time"),
@@ -1399,6 +1548,8 @@ def apply_audio_plan_to_compiled_payloads(
             "review_timestamp_role": "search_hint",
             "strategy": row["strategy"],
             "delete": row["delete"],
+            "resolved_delete": row.get("resolved_delete", row["delete"]),
+            "asr_match": deepcopy(row.get("asr_match") or {}),
             "must_keep": list(row.get("must_keep") or []),
             "asr_alignment": deepcopy(row["asr_alignment"]),
             "source_cut_windows": [[row["start"], row["end"]]],

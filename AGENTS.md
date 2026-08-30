@@ -112,6 +112,16 @@ When returning a revision result, report:
   A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
 - Protect `must_keep` phrases explicitly. Do not widen the logical source-aligned boundary across
   adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
+- In Lite, a spoken deletion may use a time-anchored high-confidence fuzzy ASR match when literal
+  text differs only by omissions from the review wording: at most one non-tail omitted review
+  character for a short phrase, or two for a phrase of at least 16 normalized characters, with at
+  least 80% ordered keyword coverage. A detached optional discourse tail such as `对吧` may also
+  be absent when it belongs to another ASR utterance, but it is never pulled into the cut. Rank
+  qualifying candidates by distance from the review time and text confidence and require one
+  winner. The selected ASR words must be consecutive without skipping intervening words, and an
+  inter-word silence longer than 1.5 seconds breaks continuity. If the review wording contains a
+  character absent from ASR, cut only the remaining recognized ASR span and record the omitted
+  review character. The review time remains a search hint and never becomes the cut boundary.
 - Validate the output by confirming the ASR boundary, source-preserving split ranges, and
   `must_keep` context. Lite does not require the requested phrase to be absent because no source
   media is physically removed.

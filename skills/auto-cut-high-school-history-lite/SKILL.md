@@ -87,6 +87,15 @@ reuse task intermediates produced by a mistaken full-version run.
   video when no separate source audio is present, then submit it through the bundled
   `volc.bigasr.auc` adapter. Do not ask the user to create TOS storage, a bucket, a signed URL,
   or storage credentials.
+- A spoken deletion may use a time-anchored high-confidence fuzzy match when the selected ASR
+  text is one continuous word span, retains at least 80% of the review wording in order, and has
+  no competing candidate of comparable time and confidence. A short review phrase may contain
+  one non-tail character absent from ASR; a phrase of at least 16 normalized characters may
+  contain two. A detached optional discourse tail such as `对吧` may also be absent when it belongs
+  to another ASR utterance, but it is never pulled into the cut.
+  Use only the recognized ASR words as the authoritative cut span, record the omitted review
+  characters, and never widen the cut to guess their audio boundaries. Matched ASR words must be
+  consecutive without skipped words, and a gap over 1.5 seconds breaks continuity.
 - Recognize `lite_cut_layout=copy` only while reading or validating an older Lite draft that
   intentionally kept a full V1/A1 reference layout. Reject `copy` for every new execution.
 
@@ -189,8 +198,9 @@ Before delivery, validate the saved root and active timeline variants:
   split trace; the review timestamp is recorded only as `search_hint`, and source-preservation /
   boundary checks remain enabled. The receipt binds source-audio SHA-256, provider/model or
   resource, adapter version, ordered matched word/character rows, and
-  `authoritative_cut_boundary=true`; fallback candidates cannot be promoted to boundaries merely
-  because their rough time or transcript text looks plausible;
+  `authoritative_cut_boundary=true`; a fuzzy boundary additionally records text similarity,
+  ordered keyword coverage, omitted review text, and distance from the review-time anchor.
+  Candidates cannot be promoted merely because their rough time or transcript looks plausible;
 - every visual/pointer item has a real editable overlay whose material is saved and whose
   timeline start equals the edit start. No pointer binding, lifecycle, placement, geometry,
   occlusion, clean-cover, or opened-state evidence is required in lite mode.

@@ -32,6 +32,13 @@ executing, or validating a review item. Read
   before routing. A uniquely located spoken deletion may create only a non-destructive logical
   split boundary and never changes duration. Place a non-executing item's verbatim label at its
   unique ASR point, or at the review-comment time when ASR cannot locate it.
+- A spoken deletion may use a time-anchored high-confidence fuzzy match when it selects one
+  continuous ASR word span, retains at least 80% of the review wording in order, and has one clear
+  winner by time and text confidence. Permit one non-tail omitted review character for a short
+  phrase and two for a phrase of at least 16 normalized characters; a detached optional discourse
+  tail such as `对吧` may also be absent when it belongs to another utterance. Cut only the
+  recognized ASR remainder, record omitted review text, and never skip intervening ASR words. An
+  inter-word gap over 1.5 seconds breaks continuity; a provider utterance boundary alone does not.
 - Review-only and ASR-unresolved items use the review timestamp. If the comment says
   `07:14 ... 提前到 07:12`, use the target `07:12`. Accept a point timestamp for the label and
   never fall back to `0:00` for unresolved timing.
