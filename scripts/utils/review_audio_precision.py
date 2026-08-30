@@ -1753,6 +1753,79 @@ def _semantic_join_forbidden_patterns(local_text: str) -> list[str]:
     return result
 
 
+def _overlapping_phrase_occurrence_count(text: str, phrase: str) -> int:
+    normalized_text = _normalized_text(text)
+    normalized_phrase = _normalized_text(phrase)
+    if not normalized_phrase:
+        return 0
+    count = 0
+    cursor = 0
+    while True:
+        index = normalized_text.find(normalized_phrase, cursor)
+        if index < 0:
+            return count
+        count += 1
+        cursor = index + 1
+
+
+def _kept_recurrence_adjudication(
+    local_words: Sequence[Mapping[str, Any]],
+    hit: Mapping[str, Any],
+    *,
+    delete_phrase: str,
+    local_text: str,
+    cut_start: float,
+    cut_end: float,
+) -> dict[str, Any] | None:
+    normalized_delete = _normalized_text(delete_phrase)
+    context_without_delete = _normalized_text(local_text).replace(
+        normalized_delete, "", 1
+    )
+    hit_start = float(hit["start"])
+    hit_end = float(hit["end"])
+    anchor = ""
+    candidates = sorted(
+        local_words,
+        key=lambda word: min(
+            abs(float(word["end"]) - hit_start),
+            abs(float(word["start"]) - hit_end),
+        ),
+    )
+    for word in candidates:
+        word_start = float(word["start"])
+        word_end = float(word["end"])
+        if word_start < hit_end and word_end > hit_start:
+            continue
+        candidate = str(word.get("text") or "")
+        normalized_candidate = _normalized_text(candidate)
+        if (
+            normalized_candidate
+            and normalized_candidate not in normalized_delete
+            and normalized_delete not in normalized_candidate
+            and normalized_candidate in context_without_delete
+        ):
+            anchor = candidate
+            break
+    if not anchor:
+        return None
+    if hit_end < cut_start:
+        occurrence_role = "earlier_kept_occurrence"
+    elif hit_start > cut_end:
+        occurrence_role = "later_kept_occurrence"
+    else:
+        return None
+    return {
+        "classification": "kept_recurrence",
+        "occurrence_role": occurrence_role,
+        "phrase": delete_phrase,
+        "local_context": local_text,
+        "context_anchor": anchor,
+        "reason": (
+            "The ASR hit is outside the source cut window and belongs to retained context."
+        ),
+    }
+
+
 def build_full_candidate_reverse_report(
     revision_request: Mapping[str, Any],
     cut_plan: Mapping[str, Any],
@@ -1805,15 +1878,39 @@ def build_full_candidate_reverse_report(
             for phrase in row.get("must_keep") or []
         }
         forbidden = _semantic_join_forbidden_patterns(local_text)
-        status = (
-            "pass"
-            if not delete_hits and all(keep_hits.values()) and not forbidden
-            else "review"
+        delete_occurrence_count = _overlapping_phrase_occurrence_count(
+            local_text, str(row["delete"])
         )
-        if status != "pass":
+        adjudication: dict[str, Any] | None = None
+        reported_delete_hits = delete_hits
+        if (
+            not delete_hits
+            and delete_occurrence_count == 1
+            and len(kept_recurrence_hits) == 1
+        ):
+            adjudication = _kept_recurrence_adjudication(
+                local_words,
+                kept_recurrence_hits[0],
+                delete_phrase=str(row["delete"]),
+                local_text=local_text,
+                cut_start=start,
+                cut_end=end,
+            )
+            if adjudication is not None:
+                reported_delete_hits = list(kept_recurrence_hits)
+        if delete_occurrence_count > 1:
+            status = "review"
+        elif delete_hits:
+            status = "review"
+        elif not all(keep_hits.values()) or forbidden:
+            status = "review"
+        elif delete_occurrence_count == 1:
+            status = "pass_adjudicated" if adjudication is not None else "review"
+        else:
+            status = "pass"
+        if status not in {"pass", "pass_adjudicated"}:
             unresolved.append(str(row["item_id"]))
-        report_rows.append(
-            {
+        report_row = {
                 "id": row["item_id"],
                 "doc_item_id": row["item_id"],
                 "kind": row["kind"],
@@ -1824,7 +1921,7 @@ def build_full_candidate_reverse_report(
                 "source_cut_windows": [[row["start"], row["end"]]],
                 "mapped_join_times": [mapped_join_time],
                 "local_joined_text": local_text,
-                "delete_hits": delete_hits,
+                "delete_hits": reported_delete_hits,
                 "kept_recurrence_hits": kept_recurrence_hits,
                 "keep_hits": keep_hits,
                 "semantic_join_validation": {
@@ -1839,7 +1936,9 @@ def build_full_candidate_reverse_report(
                     "adapter_version": str(candidate_asr.get("adapter_version") or ""),
                 },
             }
-        )
+        if adjudication is not None:
+            report_row["delete_hit_adjudication"] = adjudication
+        report_rows.append(report_row)
     return {
         "schema_version": _SCHEMA_VERSION,
         "report_builder_version": REVERSE_REPORT_VERSION,
@@ -1866,8 +1965,13 @@ def build_full_candidate_reverse_report(
         "service_job_id": str(candidate_asr.get("service_job_id") or ""),
         "service_result_sha256": str(candidate_asr.get("service_result_sha256") or ""),
         "status_counts": {
-            "pass": sum(row["status"] == "pass" for row in report_rows),
-            "review": sum(row["status"] != "pass" for row in report_rows),
+            "pass": sum(
+                row["status"] in {"pass", "pass_adjudicated"} for row in report_rows
+            ),
+            "review": sum(
+                row["status"] not in {"pass", "pass_adjudicated"}
+                for row in report_rows
+            ),
         },
         "unresolved_ids": unresolved,
         "semantic_join_anomalies": [],

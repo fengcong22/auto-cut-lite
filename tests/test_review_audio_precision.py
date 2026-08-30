@@ -1193,10 +1193,73 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             )
 
         row = report["rows"][0]
-        self.assertEqual(row["status"], "pass")
-        self.assertEqual(row["delete_hits"], [])
+        self.assertEqual(row["status"], "pass_adjudicated")
+        self.assertEqual(len(row["delete_hits"]), 1)
         self.assertEqual(len(row["kept_recurrence_hits"]), 1)
         self.assertEqual(row["kept_recurrence_hits"][0]["text"], "把它")
+        self.assertEqual(
+            row["delete_hit_adjudication"]["classification"],
+            "kept_recurrence",
+        )
+        self.assertEqual(
+            row["delete_hit_adjudication"]["occurrence_role"],
+            "later_kept_occurrence",
+        )
+
+    def test_reverse_report_rejects_multiple_kept_recurrences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 4.0)
+            _write_pcm16_wav(candidate, 4.0)
+            cut_plan = {
+                "source_duration_seconds": 4.0,
+                "rows": [
+                    {
+                        "item_id": "repeated-twice",
+                        "kind": "phrase_delete",
+                        "source_text": "00:01 删除这个",
+                        "execution_required": True,
+                        "strategy": "precision_first",
+                        "delete": "这个",
+                        "must_keep": [],
+                        "start": 1.0,
+                        "end": 1.3,
+                    }
+                ],
+                "executable_cuts": [
+                    {"item_id": "repeated-twice", "start": 1.0, "end": 1.3}
+                ],
+            }
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+            report = build_full_candidate_reverse_report(
+                {"audio_delivery_plan": delivery_plan},
+                cut_plan,
+                {
+                    "provider": "volc_asr",
+                    "resource_id": "volc.bigasr.auc",
+                    "adapter_version": "test-adapter-v1",
+                    "service_job_id": "reverse-job",
+                    "service_result_sha256": "c" * 64,
+                    "words": [
+                        {"text": "这个", "start": 2.0, "end": 2.2},
+                        {"text": "保留", "start": 2.2, "end": 2.5},
+                        {"text": "这个", "start": 2.6, "end": 2.8},
+                    ],
+                },
+                candidate_audio_path=candidate,
+                audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+            )
+
+        row = report["rows"][0]
+        self.assertEqual(row["status"], "review")
+        self.assertEqual(len(row["kept_recurrence_hits"]), 2)
+        self.assertEqual(report["unresolved_ids"], ["repeated-twice"])
 
     def test_reverse_report_still_rejects_delete_hit_at_cut_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
