@@ -469,6 +469,119 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
         self.assertEqual(rows[0]["asset_paths"], ["hand.png"])
         self.assertEqual(rows[1]["asset_paths"], ["hand.png"])
 
+    def test_recommended_pointer_candidate_is_selected_without_user_action(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "revision_id": 1,
+            "content_sha256": "b" * 64,
+            "asset_identity_sha256": "c" * 64,
+            "review_items": [
+                {"block_id": "pointer", "source_text": "00:01 添加小手指向丹麦"}
+            ],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            },
+            {
+                "asset_id": "screenshot",
+                "path": "screenshot.png",
+                "relative_path": "screenshot.png",
+                "sha256": "2" * 64,
+                "byte_size": 20,
+                "mime": "image/png",
+                "extension": ".png",
+                "name": "attachment.png",
+                "context_text": "候选 1：完整画面截图",
+                "associated_item_index": 0,
+            },
+            {
+                "asset_id": "hand",
+                "path": "hand.png",
+                "relative_path": "hand.png",
+                "sha256": "3" * 64,
+                "byte_size": 20,
+                "mime": "image/png",
+                "extension": ".png",
+                "name": "attachment-2.png",
+                "context_text": "候选 2：小手素材，建议选择此项",
+                "associated_item_index": 0,
+            },
+        ]
+
+        compiled = intake.compile_url_inputs(parsed, assets)
+        row = compiled["snapshot"]["review_items"][0]
+        self.assertEqual(row["asset_paths"], ["hand.png"])
+        self.assertEqual(row["kind"], "pointer_overlay")
+
+    def test_byte_identical_pointer_candidates_are_not_ambiguous(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "revision_id": 1,
+            "content_sha256": "b" * 64,
+            "asset_identity_sha256": "c" * 64,
+            "review_items": [
+                {"block_id": "pointer", "source_text": "00:01 添加小手指向丹麦"}
+            ],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            },
+            *[
+                {
+                    "asset_id": f"hand-{index}",
+                    "path": f"hand-{index}.png",
+                    "relative_path": f"hand-{index}.png",
+                    "sha256": "2" * 64,
+                    "byte_size": 20,
+                    "mime": "image/png",
+                    "extension": ".png",
+                    "name": f"attachment-{index}.png",
+                    "associated_item_index": 0,
+                }
+                for index in (1, 2)
+            ],
+        ]
+
+        compiled = intake.compile_url_inputs(parsed, assets)
+        self.assertEqual(
+            compiled["snapshot"]["review_items"][0]["asset_paths"], ["hand-1.png"]
+        )
+
+    def test_pointer_recommendation_context_associates_caption_group(self) -> None:
+        parsed = intake.parse_lark_document(
+            {
+                "document_id": "doc-pointer-caption",
+                "revision_id": 1,
+                "content": (
+                    '<checkbox id="pointer">00:01 添加小手指向丹麦</checkbox>'
+                    "<p>候选 1：完整画面截图</p>"
+                    '<p><img src="screenshot-token" name="attachment.png" mime="image/png"/></p>'
+                    "<p>候选 2：小手素材，建议选择此项</p>"
+                    '<p><img src="hand-token" name="attachment-2.png" mime="image/png"/></p>'
+                ),
+            }
+        )
+        self.assertEqual(len(parsed["assets"]), 2)
+        self.assertIsNone(parsed["assets"][0]["associated_item_index"])
+        self.assertEqual(parsed["assets"][1]["associated_item_index"], 0)
+        self.assertTrue(parsed["assets"][1]["recommended"])
+
     def test_structural_visual_ambiguity_requires_user_action(self) -> None:
         parsed = {
             "document_identity_sha256": "a" * 64,

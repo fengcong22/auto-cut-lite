@@ -63,6 +63,18 @@ _IMAGE_REPLACEMENT_CUES = (
     "标签",
     "替换",
 )
+_VISUAL_RECOMMENDATION_RE = re.compile(
+    r"(?:建议|推荐|优先|请选|首选|preferred|recommend(?:ed)?)"
+    r".{0,12}?"
+    r"(?:选择|选用|采用|使用|选|use|select|choose)",
+    re.IGNORECASE,
+)
+_VISUAL_RECOMMENDATION_VALUE_RE = re.compile(
+    r"(?:建议|推荐|优先|首选|preferred|recommend(?:ed)?)"
+    r".{0,12}?"
+    r"(?:此项|这一项|该项|这个|此素材|该素材|this|it)",
+    re.IGNORECASE,
+)
 _SENSITIVE_IDENTITY_KEYS = (
     "token",
     "secret",
@@ -510,6 +522,80 @@ def _asset_token(element: ET.Element) -> str:
     return source if source and "://" not in source else ""
 
 
+def _asset_context_text(element: ET.Element, top_nodes: Sequence[ET.Element], top_index: int) -> str:
+    """Return bounded text adjacent to an asset for deterministic role hints.
+
+    Lark exports candidate captions either in the same block as an image or in the
+    immediately preceding block.  Keeping this context in the transient parsed
+    asset row lets Lite recognize an explicit recommendation (for example,
+    ``候选 2：小手素材，建议选择此项``) without asking the operator to repeat a
+    choice.  The context is never written to the user-visible marker text.
+    """
+
+    indexes = [top_index]
+    if top_index > 0:
+        indexes.append(top_index - 1)
+    chunks: list[str] = []
+    for index in reversed(indexes):
+        if not (0 <= index < len(top_nodes)):
+            continue
+        text = "".join(top_nodes[index].itertext()).strip()
+        if text:
+            chunks.append(text)
+    return " ".join(chunks)[:4096]
+
+
+def _asset_has_visual_cue(row: Mapping[str, Any]) -> bool:
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in ("name", "relative_path", "context_text", "alt", "description")
+    ).casefold()
+    return any(cue.casefold() in text for cue in _VISUAL_NAME_CUES)
+
+
+def _asset_is_recommended(row: Mapping[str, Any]) -> bool:
+    for field in ("recommended", "is_recommended", "preferred"):
+        value = row.get(field)
+        if isinstance(value, bool) and value:
+            return True
+        if isinstance(value, str) and value.strip().casefold() in {
+            "true",
+            "yes",
+            "1",
+            "recommended",
+            "preferred",
+        }:
+            return True
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in ("name", "relative_path", "context_text", "alt", "description", "recommendation")
+    )
+    return bool(_VISUAL_RECOMMENDATION_RE.search(text) or _VISUAL_RECOMMENDATION_VALUE_RE.search(text))
+
+
+def _pointer_preferred_candidates(
+    candidates: Sequence[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """Return an explicit, deterministic pointer candidate when one is present."""
+
+    recommended = [row for row in candidates if _asset_is_recommended(row)]
+    if len(recommended) == 1:
+        return recommended
+    named = [row for row in candidates if _asset_has_visual_cue(row)]
+    if len(named) == 1:
+        return named
+    # Distinct Lark attachment IDs can point to the exact same bytes.  They are
+    # equivalent for Lite and should not create a needless operator prompt.
+    hashes = {
+        str(row.get("sha256") or "").casefold()
+        for row in candidates
+        if str(row.get("sha256") or "").strip()
+    }
+    if len(hashes) == 1 and hashes:
+        return [candidates[0]]
+    return []
+
+
 def _wrap_document_xml(content: str) -> ET.Element:
     encoded_size = len(content.encode("utf-8"))
     if encoded_size > _MAX_DOCUMENT_XML_BYTES:
@@ -592,6 +678,7 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
     document_identity_sha256 = _sha256_text(raw_document_id)
     root = _wrap_document_xml(content)
     top_indexes = _top_level_index(root)
+    top_nodes = list(root)
     review_rows: list[dict[str, Any]] = []
     checkbox_positions: list[tuple[int, int]] = []
     for checkbox in root.iter("checkbox"):
@@ -645,12 +732,33 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
             )
         )
         top_index = top_indexes.get(id(element), -1)
+        context_text = _asset_context_text(element, top_nodes, top_index)
+        pointer_hint = _asset_has_visual_cue(
+            {
+                "name": name,
+                "context_text": context_text,
+                "alt": str(element.get("alt") or ""),
+            }
+        )
+        recommended_hint = _asset_is_recommended(
+            {
+                "name": name,
+                "context_text": context_text,
+                "alt": str(element.get("alt") or ""),
+            }
+        )
         associated_item_index: int | None = None
         preceding = [row for row in checkbox_positions if row[0] < top_index]
         if preceding:
             nearest_top, nearest_item = preceding[-1]
             intervening = [row for row in checkbox_positions if nearest_top < row[0] < top_index]
-            if not intervening and top_index - nearest_top <= 1:
+            gap = top_index - nearest_top
+            # Keep the original adjacent-block association, but also allow a
+            # clearly identified pointer/recommended asset to follow a caption
+            # block or a small candidate group before the next review checkbox.
+            if not intervening and (
+                gap <= 1 or (gap <= 8 and (pointer_hint or recommended_hint))
+            ):
                 associated_item_index = nearest_item
         expected_size: int | None = None
         raw_size = str(element.get("size") or "").strip()
@@ -665,6 +773,9 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
                 "mime": mime,
                 "extension": extension,
                 "expected_size": expected_size,
+                "context_text": context_text,
+                "pointer_hint": pointer_hint,
+                "recommended": recommended_hint,
                 "associated_item_index": associated_item_index,
             }
         )
@@ -676,6 +787,8 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
             "mime": row["mime"],
             "extension": row["extension"],
             "expected_size": row["expected_size"],
+            "pointer_hint": row["pointer_hint"],
+            "recommended": row["recommended"],
             "associated_item_index": row["associated_item_index"],
         }
         for row in assets
@@ -943,6 +1056,9 @@ def download_lark_assets(
             "mime": str(raw.get("mime") or "application/octet-stream"),
             "extension": extension,
             "name": str(raw.get("name") or ""),
+            "context_text": str(raw.get("context_text") or ""),
+            "pointer_hint": bool(raw.get("pointer_hint")),
+            "recommended": bool(raw.get("recommended")),
             "associated_item_index": raw.get("associated_item_index"),
             "cache_hit": cache_hit,
         }
@@ -1091,8 +1207,16 @@ def compile_url_inputs(
         if not _known_image_replacement_item(item):
             continue
         if len(candidates) > 1:
-            _visual_ambiguity(item, candidates)
-        selected = candidates[0]
+            if _pointer_review_item(item):
+                preferred = _pointer_preferred_candidates(candidates)
+                if len(preferred) == 1:
+                    selected = preferred[0]
+                else:
+                    _visual_ambiguity(item, candidates)
+            else:
+                _visual_ambiguity(item, candidates)
+        else:
+            selected = candidates[0]
         item["asset_paths"] = [str(selected["path"])]
         item["kind"] = "pointer_overlay" if _pointer_review_item(item) else "visual_overlay"
         item["execution_required"] = True
