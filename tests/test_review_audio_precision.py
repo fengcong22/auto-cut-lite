@@ -28,6 +28,7 @@ from utils.review_audio_precision import (
     render_source_aligned_candidate,
     resolve_lite_audio_items,
     reverse_asr_cache_identity,
+    _semantic_join_forbidden_patterns,
     source_asr_cache_identity,
     wav_duration_seconds,
 )
@@ -64,6 +65,17 @@ def _source_asr(words):
         "service_result_sha256": "b" * 64,
         "words": words,
     }
+
+
+def _character_words(text, start=0.0, step=0.1):
+    return [
+        {
+            "text": character,
+            "start": round(start + index * step, 6),
+            "end": round(start + (index + 1) * step, 6),
+        }
+        for index, character in enumerate(text)
+    ]
 
 
 class ReviewAudioPrecisionTests(unittest.TestCase):
@@ -431,6 +443,141 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(row["timing_source"], "review_timestamp_fallback")
         self.assertIsNone(row["asr_alignment"])
         self.assertEqual(result["executable_cuts"], [])
+
+    def test_source_asr_conservative_fuzzy_matching_recovers_real_transcript_variants(self):
+        cases = [
+            {
+                "name": "asr_inserts_spoken_filler",
+                "kind": "phrase_delete",
+                "source_text": "00:10-00:14 删除第二场战争应该说第一场战争只是牛刀小试",
+                "delete": "第二场战争应该说第一场战争只是牛刀小试",
+                "transcript": "第二场战争啊应该说第一场战争只是牛刀小试",
+                "start": 10.5,
+                "method": "conservative_fuzzy_phrase",
+            },
+            {
+                "name": "asr_omits_internal_filler",
+                "kind": "phrase_delete",
+                "source_text": "00:20 删除在这张呃画上",
+                "delete": "在这张呃画上",
+                "transcript": "在这张画上",
+                "start": 19.8,
+                "method": "conservative_fuzzy_phrase",
+            },
+            {
+                "name": "long_sentence_contains_extra_filler",
+                "kind": "phrase_delete",
+                "source_text": "00:30-00:38 删除我们看到的这个近代的这个意大利统一的过程的完成就是在这个时候",
+                "delete": "我们看到的这个近代的这个意大利统一的过程的完成就是在这个时候",
+                "transcript": "我们看到的啊这个近代的这个意大利统一的过程的完成就是在这个时候",
+                "start": 30.4,
+                "method": "conservative_fuzzy_phrase",
+            },
+            {
+                "name": "pronoun_equivalence_in_ellipsis_anchor",
+                "kind": "ellipsis_range_delete",
+                "source_text": "00:40-00:48 删除而且它大概也宣告……德国会占有很显赫的位置",
+                "delete": "而且它大概也宣告……德国会占有很显赫的位置",
+                "transcript": "而且他大概也宣告中间保留原话德国会占有很显赫的位置",
+                "start": 40.2,
+                "method": "ellipsis_anchor_range",
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case["name"]):
+                words = _character_words(case["transcript"], case["start"])
+                result = resolve_lite_audio_items(
+                    [
+                        {
+                            "id": case["name"],
+                            "kind": case["kind"],
+                            "source_text": case["source_text"],
+                            "execution_required": True,
+                            "evidence": {"delete": case["delete"], "must_keep": []},
+                        }
+                    ],
+                    _source_asr(words),
+                    source_duration_seconds=60.0,
+                )
+
+                row = result["rows"][0]
+                self.assertTrue(row["execution_required"])
+                self.assertEqual(row["match_method"], case["method"])
+                self.assertEqual(row["start"], words[0]["start"])
+                self.assertEqual(row["end"], words[-1]["end"])
+                self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
+
+    def test_source_asr_never_promotes_missing_edge_or_remote_occurrence(self):
+        cases = [
+            {
+                "id": "missing-leading-character",
+                "source_text": "00:10 删除它解决不了",
+                "delete": "它解决不了",
+                "words": _character_words("解决不了", 10.0),
+                "expected_time": 10.0,
+            },
+            {
+                "id": "remote-occurrence",
+                "source_text": "00:10 删除对吧",
+                "delete": "对吧",
+                "words": _character_words("对吧", 1.0),
+                "expected_time": 10.0,
+            },
+        ]
+
+        for case in cases:
+            with self.subTest(case["id"]):
+                result = resolve_lite_audio_items(
+                    [
+                        {
+                            "id": case["id"],
+                            "kind": "phrase_delete",
+                            "source_text": case["source_text"],
+                            "execution_required": True,
+                            "evidence": {"delete": case["delete"]},
+                        }
+                    ],
+                    _source_asr(case["words"]),
+                    source_duration_seconds=20.0,
+                )
+
+                row = result["rows"][0]
+                self.assertFalse(row["execution_required"])
+                self.assertEqual(row["reason"], "phrase_not_found")
+                self.assertEqual(row["resolved_time"], case["expected_time"])
+                self.assertEqual(row["timing_source"], "review_timestamp_fallback")
+
+    def test_automatic_must_keep_context_excludes_other_delete_windows(self):
+        words = _character_words("保留目标一后删留下", 1.0)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "first",
+                    "kind": "phrase_delete",
+                    "source_text": "00:01 删除目标一",
+                    "start": 1.1,
+                    "end": 1.8,
+                    "execution_required": True,
+                    "evidence": {"delete": "目标一"},
+                },
+                {
+                    "id": "second",
+                    "kind": "phrase_delete",
+                    "source_text": "00:01 删除后删",
+                    "start": 1.3,
+                    "end": 2.0,
+                    "execution_required": True,
+                    "evidence": {"delete": "后删"},
+                },
+            ],
+            _source_asr(words),
+            source_duration_seconds=3.0,
+        )
+
+        rows = {row["item_id"]: row for row in result["rows"]}
+        self.assertEqual(rows["first"]["must_keep"], ["保留"])
+        self.assertEqual(rows["second"]["must_keep"], ["留下"])
 
     def test_apply_audio_plan_touches_only_asr_items_and_keeps_source_text_exact(self):
         audio_text = "00:05 这里的读音暂不自动修，原文标记。\n第二行保持。"
@@ -866,6 +1013,127 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             ),
             [],
         )
+
+    def test_reverse_report_attributes_only_hits_overlapping_the_cut_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 3.0)
+            _write_pcm16_wav(candidate, 3.0)
+            cut_plan = {
+                "source_duration_seconds": 3.0,
+                "rows": [
+                    {
+                        "item_id": "repeated-later",
+                        "kind": "phrase_delete",
+                        "source_text": "00:01 删除把它",
+                        "execution_required": True,
+                        "strategy": "precision_first",
+                        "delete": "把它",
+                        "must_keep": [],
+                        "start": 1.0,
+                        "end": 1.3,
+                    }
+                ],
+                "executable_cuts": [
+                    {"item_id": "repeated-later", "start": 1.0, "end": 1.3}
+                ],
+            }
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+            request = {
+                "audio_delivery_plan": delivery_plan,
+            }
+            report = build_full_candidate_reverse_report(
+                request,
+                cut_plan,
+                {
+                    "provider": "volc_asr",
+                    "resource_id": "volc.bigasr.auc",
+                    "adapter_version": "test-adapter-v1",
+                    "service_job_id": "reverse-job",
+                    "service_result_sha256": "c" * 64,
+                    "words": [
+                        {"text": "保留", "start": 0.6, "end": 0.9},
+                        {"text": "把", "start": 2.0, "end": 2.15},
+                        {"text": "它", "start": 2.15, "end": 2.3},
+                    ],
+                },
+                candidate_audio_path=candidate,
+                audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+            )
+
+        row = report["rows"][0]
+        self.assertEqual(row["status"], "pass")
+        self.assertEqual(row["delete_hits"], [])
+        self.assertEqual(len(row["kept_recurrence_hits"]), 1)
+        self.assertEqual(row["kept_recurrence_hits"][0]["text"], "把它")
+
+    def test_reverse_report_still_rejects_delete_hit_at_cut_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 3.0)
+            _write_pcm16_wav(candidate, 3.0)
+            cut_plan = {
+                "source_duration_seconds": 3.0,
+                "rows": [
+                    {
+                        "item_id": "residue",
+                        "kind": "phrase_delete",
+                        "source_text": "00:01 删除把它",
+                        "execution_required": True,
+                        "strategy": "precision_first",
+                        "delete": "把它",
+                        "must_keep": [],
+                        "start": 1.0,
+                        "end": 1.3,
+                    }
+                ],
+                "executable_cuts": [
+                    {"item_id": "residue", "start": 1.0, "end": 1.3}
+                ],
+            }
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+            report = build_full_candidate_reverse_report(
+                {"audio_delivery_plan": delivery_plan},
+                cut_plan,
+                {
+                    "provider": "volc_asr",
+                    "resource_id": "volc.bigasr.auc",
+                    "adapter_version": "test-adapter-v1",
+                    "service_job_id": "reverse-job",
+                    "service_result_sha256": "c" * 64,
+                    "words": [
+                        {"text": "把", "start": 1.05, "end": 1.15},
+                        {"text": "它", "start": 1.15, "end": 1.25},
+                    ],
+                },
+                candidate_audio_path=candidate,
+                audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+            )
+
+        row = report["rows"][0]
+        self.assertEqual(row["status"], "review")
+        self.assertEqual(len(row["delete_hits"]), 1)
+        self.assertEqual(report["unresolved_ids"], ["residue"])
+
+    def test_semantic_join_scan_does_not_reject_valid_unpunctuated_phrase(self):
+        self.assertEqual(_semantic_join_forbidden_patterns("阶段性成就"), [])
+        self.assertEqual(
+            _semantic_join_forbidden_patterns("阶段性。成就"),
+            ["阶段性。成就"],
+        )
+        self.assertEqual(_semantic_join_forbidden_patterns("这是发发明"), ["发发明"])
 
     def test_cache_identities_change_for_every_relevant_input(self):
         config_a = VolcAsrConfig(resource_id="resource-a")

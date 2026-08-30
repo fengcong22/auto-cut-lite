@@ -10,10 +10,12 @@ import re
 import shutil
 import subprocess
 import time
+import unicodedata
 import uuid
 import wave
 from contextlib import contextmanager
 from copy import deepcopy
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -30,20 +32,19 @@ from audio_sound.volc_asr import (
     VOLC_ASR_ADAPTER_VERSION,
     VolcAsrConfig,
     VolcAsrError,
-    find_phrase_matches,
     normalize_result,
     query_result,
     submit_audio,
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v2"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v3"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
 CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v2"
 REVERSE_ASR_DIAGNOSTIC_PURPOSE = "reverse_asr_diagnostic_only"
-REVERSE_REPORT_VERSION = "lite-reverse-report-v1"
+REVERSE_REPORT_VERSION = "lite-reverse-report-v2"
 ASR_REQUEST_OPTIONS = {
     "enable_ddc": True,
     "enable_itn": True,
@@ -71,6 +72,15 @@ _TIMECODE_PREFIX = re.compile(
     r"^\s*(?:\d{1,2}\s*[:：]\s*\d{1,2}(?:\.\d+)?\s*"
     r"(?:[-–—~至]\s*\d{1,2}\s*[:：]\s*\d{1,2}(?:\.\d+)?)?\s*)+"
 )
+_TIMECODE_RANGE = re.compile(
+    r"^\s*(?P<start_minutes>\d{1,3})\s*[:：]\s*"
+    r"(?P<start_seconds>\d{1,2}(?:\.\d+)?)\s*[-–—~至]\s*"
+    r"(?P<end_minutes>\d{1,3})\s*[:：]\s*"
+    r"(?P<end_seconds>\d{1,2}(?:\.\d+)?)"
+)
+_TIMECODE_POINT = re.compile(
+    r"^\s*(?P<minutes>\d{1,3})\s*[:：]\s*(?P<seconds>\d{1,2}(?:\.\d+)?)"
+)
 _DELETE_PREFIX = re.compile(
     r"^\s*(?:请|需要|把|将|这里|此处|这一段|这段|这句|这个)?\s*"
     r"(?:删除|删掉|删去|去掉|移除|剪掉|cut|delete|remove)\s*[:：,，]?\s*",
@@ -79,12 +89,20 @@ _DELETE_PREFIX = re.compile(
 _QUOTE_PATTERN = re.compile(r"[“「『\"](?P<value>.+?)[”」』\"]")
 _PUNCTUATION_ONLY = re.compile(r"^[\W_]+$", re.UNICODE)
 _FORBIDDEN_JOIN_PATTERNS = (
-    "阶段性成就",
+    "阶段性。成就",
     "发发明",
-    "禅让制于",
-    "它说明",
-    "夏朝立的",
+    "禅让制。于",
+    "它说明。",
+    "夏朝。立的",
 )
+_ASR_SEARCH_PADDING_SECONDS = 2.0
+_ASR_EQUIVALENT_CHARACTERS = {
+    "她": "他",
+    "它": "他",
+    "祂": "他",
+    "牠": "他",
+}
+_OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
 
 
 def canonical_json_sha256(payload: Any) -> str:
@@ -373,7 +391,12 @@ def render_source_aligned_candidate(
 
 
 def _normalized_text(value: Any) -> str:
-    return "".join(character.casefold() for character in str(value or "") if character.isalnum())
+    result: list[str] = []
+    for character in unicodedata.normalize("NFKC", str(value or "")).casefold():
+        if not character.isalnum():
+            continue
+        result.append(_ASR_EQUIVALENT_CHARACTERS.get(character, character))
+    return "".join(result)
 
 
 def _phrase_supported(transcript: str, phrase: str) -> bool:
@@ -390,12 +413,51 @@ def _phrase_supported(transcript: str, phrase: str) -> bool:
     return False
 
 
+def _review_text_window(value: Any) -> tuple[float | None, float | None]:
+    match = _TIMECODE_RANGE.match(str(value or ""))
+    if match is None:
+        return None, None
+    start = float(match.group("start_minutes")) * 60.0 + float(
+        match.group("start_seconds")
+    )
+    end = float(match.group("end_minutes")) * 60.0 + float(
+        match.group("end_seconds")
+    )
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        return None, None
+    return start, end
+
+
+def _review_text_point(value: Any) -> float | None:
+    match = _TIMECODE_POINT.match(str(value or ""))
+    if match is None:
+        return None
+    result = float(match.group("minutes")) * 60.0 + float(match.group("seconds"))
+    return result if math.isfinite(result) and result >= 0.0 else None
+
+
 def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
     start = item.get("start")
     end = item.get("end")
     evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
     if start is None:
         start = evidence.get("review_search_hint_seconds")
+    text_start, text_end = _review_text_window(item.get("source_text"))
+    if start is None:
+        start = text_start if text_start is not None else _review_text_point(
+            item.get("source_text")
+        )
+    if end is None and text_end is not None:
+        try:
+            start_for_range = float(start) if start is not None else None
+        except (TypeError, ValueError):
+            start_for_range = None
+        if (
+            start_for_range is not None
+            and text_start is not None
+            and abs(start_for_range - text_start) <= 1.0
+        ):
+            end = text_end
     try:
         start_value = float(start) if start is not None else None
         end_value = float(end) if end is not None else None
@@ -408,17 +470,243 @@ def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
     return max(0.0, start_value), end_value
 
 
+def _search_bounds(
+    anchor_start: float | None, anchor_end: float | None
+) -> tuple[float, float] | None:
+    if anchor_start is None or anchor_end is None:
+        return None
+    return (
+        max(0.0, float(anchor_start) - _ASR_SEARCH_PADDING_SECONDS),
+        float(anchor_end) + _ASR_SEARCH_PADDING_SECONDS,
+    )
+
+
+def _match_in_search_bounds(
+    start: float,
+    end: float,
+    bounds: tuple[float, float] | None,
+) -> bool:
+    if bounds is None:
+        return True
+    return start >= bounds[0] - 1e-6 and end <= bounds[1] + 1e-6
+
+
+def _match_payload(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    start_index: int,
+    end_index: int,
+    *,
+    anchor_start: float | None,
+    anchor_end: float | None,
+    match_method: str = "",
+    edit_distance: int = 0,
+) -> dict[str, Any]:
+    selected_words = words[start_index : end_index + 1]
+    start = float(selected_words[0]["start"])
+    end = float(selected_words[-1]["end"])
+    score = 0.0
+    if anchor_start is not None and anchor_end is not None:
+        overlap = max(0.0, min(end, anchor_end) - max(start, anchor_start))
+        center = (start + end) / 2.0
+        anchor_center = (anchor_start + anchor_end) / 2.0
+        score = overlap - abs(center - anchor_center) * 0.01
+    payload = {
+        "phrase": phrase,
+        "start": start,
+        "end": end,
+        "text": "".join(str(word.get("text") or "") for word in selected_words),
+        "word_start_index": start_index,
+        "word_end_index": end_index,
+        "anchor_score": score,
+    }
+    if match_method:
+        payload["match_method"] = match_method
+    if edit_distance:
+        payload["edit_distance"] = edit_distance
+    return payload
+
+
+def _normalized_exact_phrase_matches(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    *,
+    anchor_start: float | None,
+    anchor_end: float | None,
+) -> list[dict[str, Any]]:
+    target = _normalized_text(phrase)
+    if not target:
+        return []
+    haystack_parts: list[str] = []
+    char_to_word: list[int] = []
+    word_bounds: dict[int, tuple[int, int]] = {}
+    for index, word in enumerate(words):
+        text = _normalized_text(word.get("text"))
+        if not text:
+            continue
+        word_start = len(haystack_parts)
+        haystack_parts.extend(text)
+        char_to_word.extend([index] * len(text))
+        word_bounds[index] = (word_start, len(haystack_parts))
+    haystack = "".join(haystack_parts)
+    bounds = _search_bounds(anchor_start, anchor_end)
+    matches: list[dict[str, Any]] = []
+    cursor = 0
+    while True:
+        found = haystack.find(target, cursor)
+        if found < 0:
+            break
+        end_character = found + len(target) - 1
+        if end_character >= len(char_to_word):
+            break
+        start_word_index = char_to_word[found]
+        end_word_index = char_to_word[end_character]
+        start_bound = word_bounds.get(start_word_index)
+        end_bound = word_bounds.get(end_word_index)
+        if (
+            start_bound is not None
+            and end_bound is not None
+            and found == start_bound[0]
+            and end_character + 1 == end_bound[1]
+        ):
+            payload = _match_payload(
+                words,
+                phrase,
+                start_word_index,
+                end_word_index,
+                anchor_start=anchor_start,
+                anchor_end=anchor_end,
+            )
+            if _match_in_search_bounds(payload["start"], payload["end"], bounds):
+                matches.append(payload)
+        cursor = found + 1
+    return matches
+
+
+def _conservative_fuzzy_distance(target: str, candidate: str) -> int | None:
+    if len(target) < 5 or not candidate or target[0] != candidate[0] or target[-1] != candidate[-1]:
+        return None
+    maximum = 1 if len(target) < 16 else 2
+    matcher = SequenceMatcher(a=target, b=candidate, autojunk=False)
+    distance = 0
+    generic_target_omissions = 0
+    for tag, target_start, target_end, candidate_start, candidate_end in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag == "replace":
+            return None
+        if tag == "delete":
+            removed = target[target_start:target_end]
+            distance += len(removed)
+            non_fillers = [char for char in removed if char not in _OPTIONAL_SPEECH_FILLERS]
+            generic_target_omissions += len(non_fillers)
+            if target_start == 0 or target_end == len(target):
+                return None
+        elif tag == "insert":
+            inserted = candidate[candidate_start:candidate_end]
+            distance += len(inserted)
+            if any(char not in _OPTIONAL_SPEECH_FILLERS for char in inserted):
+                return None
+            if candidate_start == 0 or candidate_end == len(candidate):
+                return None
+        if distance > maximum:
+            return None
+    if distance == 0 or distance > maximum:
+        return None
+    if generic_target_omissions and (
+        len(target) < 12 or generic_target_omissions > 1 or distance > 1
+    ):
+        return None
+    minimum_similarity = 0.9 if generic_target_omissions else 0.8
+    if 1.0 - distance / max(len(target), len(candidate)) < minimum_similarity:
+        return None
+    return distance
+
+
+def _conservative_fuzzy_phrase_matches(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    *,
+    anchor_start: float | None,
+    anchor_end: float | None,
+) -> list[dict[str, Any]]:
+    target = _normalized_text(phrase)
+    bounds = _search_bounds(anchor_start, anchor_end)
+    if len(target) < 5 or bounds is None:
+        return []
+    maximum = 1 if len(target) < 16 else 2
+    normalized_words = [_normalized_text(word.get("text")) for word in words]
+    matches: list[dict[str, Any]] = []
+    seen: set[tuple[int, int]] = set()
+    for start_index, start_text in enumerate(normalized_words):
+        if not start_text:
+            continue
+        try:
+            start_time = float(words[start_index]["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if start_time < bounds[0] - 1e-6 or start_time > bounds[1] + 1e-6:
+            continue
+        candidate_parts: list[str] = []
+        for end_index in range(start_index, len(words)):
+            candidate_parts.append(normalized_words[end_index])
+            candidate = "".join(candidate_parts)
+            if len(candidate) > len(target) + maximum:
+                break
+            if len(candidate) < len(target) - maximum or not normalized_words[end_index]:
+                continue
+            try:
+                end_time = float(words[end_index]["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not _match_in_search_bounds(start_time, end_time, bounds):
+                continue
+            distance = _conservative_fuzzy_distance(target, candidate)
+            identity = (start_index, end_index)
+            if distance is None or identity in seen:
+                continue
+            seen.add(identity)
+            matches.append(
+                _match_payload(
+                    words,
+                    phrase,
+                    start_index,
+                    end_index,
+                    anchor_start=anchor_start,
+                    anchor_end=anchor_end,
+                    match_method="conservative_fuzzy_phrase",
+                    edit_distance=distance,
+                )
+            )
+    return matches
+
+
+def _find_phrase_matches(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    *,
+    anchor_start: float | None = None,
+    anchor_end: float | None = None,
+) -> list[dict[str, Any]]:
+    exact = _normalized_exact_phrase_matches(
+        words,
+        phrase,
+        anchor_start=anchor_start,
+        anchor_end=anchor_end,
+    )
+    if exact:
+        return exact
+    return _conservative_fuzzy_phrase_matches(
+        words,
+        phrase,
+        anchor_start=anchor_start,
+        anchor_end=anchor_end,
+    )
+
+
 def _review_timestamp(item: Mapping[str, Any]) -> float | None:
     evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
-    text_match = re.match(
-        r"^\s*(?P<minutes>\d{1,3})\s*[:：]\s*(?P<seconds>\d{1,2}(?:\.\d+)?)",
-        str(item.get("source_text") or ""),
-    )
-    text_time = (
-        float(text_match.group("minutes")) * 60.0 + float(text_match.group("seconds"))
-        if text_match is not None
-        else None
-    )
+    text_time = _review_text_point(item.get("source_text"))
     for candidate in (
         evidence.get("review_search_hint_seconds"),
         evidence.get("resolved_review_timestamp_seconds"),
@@ -464,14 +752,16 @@ def _unique_nearest_match(
         return None, "phrase_not_found"
     ordered = sorted((dict(row) for row in matches), key=lambda row: _match_distance(row, anchor))
     if len(ordered) == 1 or anchor is None:
+        method = str(ordered[0].get("match_method") or "matched") if ordered else ""
         return ordered[0] if len(ordered) == 1 else None, (
-            "matched" if len(ordered) == 1 else "ambiguous_without_anchor"
+            method if len(ordered) == 1 else "ambiguous_without_anchor"
         )
     first_distance = _match_distance(ordered[0], anchor)
     second_distance = _match_distance(ordered[1], anchor)
     if second_distance - first_distance < 0.35:
         return None, "ambiguous_near_anchor"
-    return ordered[0], "matched_nearest_anchor"
+    method = str(ordered[0].get("match_method") or "matched")
+    return ordered[0], f"{method}_nearest_anchor"
 
 
 def _nearest_word(words: Sequence[Mapping[str, Any]], anchor: float | None) -> dict[str, Any] | None:
@@ -494,8 +784,9 @@ def _nearest_word(words: Sequence[Mapping[str, Any]], anchor: float | None) -> d
 
 def _context_phrases(
     words: Sequence[Mapping[str, Any]], start_index: int, end_index: int
-) -> list[str]:
+) -> tuple[list[str], list[dict[str, Any]]]:
     phrases: list[str] = []
+    windows: list[dict[str, Any]] = []
     for selected in (
         words[max(0, start_index - 2) : start_index],
         words[end_index + 1 : end_index + 3],
@@ -503,7 +794,39 @@ def _context_phrases(
         phrase = "".join(str(word.get("text") or "") for word in selected).strip()
         if _normalized_text(phrase):
             phrases.append(phrase)
-    return phrases
+            windows.append(
+                {
+                    "phrase": phrase,
+                    "start": round(float(selected[0]["start"]), 6),
+                    "end": round(float(selected[-1]["end"]), 6),
+                    "source": "automatic_adjacent_asr_context",
+                }
+            )
+    return phrases, windows
+
+
+def _prune_cross_cut_auto_must_keep(rows: Sequence[dict[str, Any]]) -> None:
+    executable = [row for row in rows if row.get("execution_required")]
+    for row in executable:
+        windows = row.get("must_keep_source_windows")
+        if not isinstance(windows, list) or not windows:
+            continue
+        retained: list[dict[str, Any]] = []
+        for raw_window in windows:
+            if not isinstance(raw_window, Mapping):
+                continue
+            window_start = float(raw_window["start"])
+            window_end = float(raw_window["end"])
+            overlaps_other_cut = any(
+                other is not row
+                and window_start < float(other["end"]) - 1e-6
+                and float(other["start"]) < window_end - 1e-6
+                for other in executable
+            )
+            if not overlaps_other_cut:
+                retained.append(dict(raw_window))
+        row["must_keep_source_windows"] = retained
+        row["must_keep"] = [str(window["phrase"]) for window in retained]
 
 
 def _asr_identity(source_asr: Mapping[str, Any]) -> dict[str, str]:
@@ -602,13 +925,13 @@ def resolve_lite_audio_items(
         if delete_phrase and executable_kind and not unresolved_timebase:
             anchor_parts = [part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()]
             if len(anchor_parts) >= 2:
-                first_matches = find_phrase_matches(
+                first_matches = _find_phrase_matches(
                     words,
                     anchor_parts[0],
                     anchor_start=rough_start,
                     anchor_end=rough_end,
                 )
-                last_matches = find_phrase_matches(
+                last_matches = _find_phrase_matches(
                     words,
                     anchor_parts[-1],
                     anchor_start=rough_start,
@@ -632,7 +955,7 @@ def resolve_lite_audio_items(
                 if selected is not None:
                     match_method = "ellipsis_anchor_range"
             else:
-                matches = find_phrase_matches(
+                matches = _find_phrase_matches(
                     words,
                     delete_phrase,
                     anchor_start=rough_start,
@@ -651,6 +974,7 @@ def resolve_lite_audio_items(
             if isinstance(explicit_must_keep, list)
             else []
         )
+        must_keep_source_windows: list[dict[str, Any]] = []
         if selected is not None and requested_execute and executable_kind:
             start = max(0.0, min(float(selected["start"]), source_duration_seconds))
             end = max(0.0, min(float(selected["end"]), source_duration_seconds))
@@ -662,7 +986,9 @@ def resolve_lite_audio_items(
                 end_index = int(selected.get("word_end_index", start_index))
                 matched_words = [dict(row) for row in words[start_index : end_index + 1]]
                 if not must_keep:
-                    must_keep = _context_phrases(words, start_index, end_index)
+                    must_keep, must_keep_source_windows = _context_phrases(
+                        words, start_index, end_index
+                    )
                 rows.append(
                     {
                         "item_id": item_id,
@@ -674,6 +1000,7 @@ def resolve_lite_audio_items(
                         "strategy": str(explicit_evidence.get("strategy") or "precision_first"),
                         "delete": delete_phrase,
                         "must_keep": must_keep,
+                        "must_keep_source_windows": must_keep_source_windows,
                         "start": round(start, 6),
                         "end": round(end, 6),
                         "resolved_time": round(start, 6),
@@ -765,6 +1092,7 @@ def resolve_lite_audio_items(
             if isinstance(alignment, dict):
                 alignment["authoritative_cut_boundary"] = False
 
+    _prune_cross_cut_auto_must_keep(rows)
     executable = [row for row in rows if row["execution_required"]]
     return {
         "schema_version": _SCHEMA_VERSION,
@@ -1225,16 +1553,53 @@ def _candidate_join_times_from_payload(
     return list(dict.fromkeys(round(candidate, 9) for candidate in candidates))
 
 
-def _phrase_hits(words: Sequence[Mapping[str, Any]], phrase: str) -> list[dict[str, Any]]:
+def _phrase_hits(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    *,
+    attribution_window: tuple[float, float] | None = None,
+) -> list[dict[str, Any]]:
+    if not words:
+        return []
+    search_start = min(float(word["start"]) for word in words)
+    search_end = max(float(word["end"]) for word in words)
+    matches = _find_phrase_matches(
+        words,
+        phrase,
+        anchor_start=search_start,
+        anchor_end=search_end,
+    )
+    if attribution_window is not None:
+        start, end = attribution_window
+        matches = [
+            row
+            for row in matches
+            if float(row["end"]) >= start - 0.12
+            and float(row["start"]) <= end + 0.12
+        ]
     return [
         {
             "phrase": phrase,
             "text": str(row.get("text") or phrase),
             "start": round(float(row["start"]), 6),
             "end": round(float(row["end"]), 6),
+            "match_method": str(row.get("match_method") or "exact_phrase"),
         }
-        for row in find_phrase_matches(words, phrase)
+        for row in matches
     ]
+
+
+def _semantic_join_forbidden_patterns(local_text: str) -> list[str]:
+    normalized = _normalized_text(local_text)
+    result: list[str] = []
+    for phrase in _FORBIDDEN_JOIN_PATTERNS:
+        if phrase == "发发明":
+            matched = _normalized_text(phrase) in normalized
+        else:
+            matched = phrase in local_text
+        if matched:
+            result.append(phrase)
+    return result
 
 
 def build_full_candidate_reverse_report(
@@ -1270,14 +1635,25 @@ def build_full_candidate_reverse_report(
         local_words = _local_reverse_words(words, start, end)
         local_text = "".join(str(word.get("text") or "") for word in local_words)
         normalized = _normalized_text(local_text)
-        delete_hits = _phrase_hits(local_words, str(row["delete"]))
+        all_delete_hits = _phrase_hits(local_words, str(row["delete"]))
+        delete_hits = _phrase_hits(
+            local_words,
+            str(row["delete"]),
+            attribution_window=(start, end),
+        )
+        attributed_hit_keys = {
+            (hit["start"], hit["end"], hit["text"]) for hit in delete_hits
+        }
+        kept_recurrence_hits = [
+            hit
+            for hit in all_delete_hits
+            if (hit["start"], hit["end"], hit["text"]) not in attributed_hit_keys
+        ]
         keep_hits = {
             phrase: _phrase_supported(normalized, phrase)
             for phrase in row.get("must_keep") or []
         }
-        forbidden = [
-            phrase for phrase in _FORBIDDEN_JOIN_PATTERNS if _normalized_text(phrase) in normalized
-        ]
+        forbidden = _semantic_join_forbidden_patterns(local_text)
         status = (
             "pass"
             if not delete_hits and all(keep_hits.values()) and not forbidden
@@ -1298,6 +1674,7 @@ def build_full_candidate_reverse_report(
                 "mapped_join_times": [mapped_join_time],
                 "local_joined_text": local_text,
                 "delete_hits": delete_hits,
+                "kept_recurrence_hits": kept_recurrence_hits,
                 "keep_hits": keep_hits,
                 "semantic_join_validation": {
                     "status": "pass" if not forbidden and all(keep_hits.values()) else "review",
