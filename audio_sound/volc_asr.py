@@ -21,7 +21,7 @@ from typing import Any, Sequence
 
 from .config import PROJECT_ROOT, load_env_file
 
-VOLC_ASR_ADAPTER_VERSION = "auto-cut-volc-asr-v3"
+VOLC_ASR_ADAPTER_VERSION = "auto-cut-volc-asr-v4"
 # The full Auto-Cut workflow uses the recording ASR resource, which accepts
 # the locally extracted source audio directly. Keep lite mode on the same path.
 DEFAULT_RESOURCE_ID = "volc.bigasr.auc"
@@ -416,6 +416,7 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
     )
     utterances: list[dict[str, Any]] = []
     words: list[dict[str, Any]] = []
+    discarded_utterance_rows: list[dict[str, Any]] = []
     discarded_word_rows: list[dict[str, Any]] = []
 
     for utterance_index, utterance in enumerate(utterances_payload):
@@ -424,6 +425,17 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
         utterance_words: list[dict[str, Any]] = []
         raw_words = utterance.get("words")
         if not isinstance(raw_words, list):
+            if raw_words is None and not str(utterance.get("text", "")).strip():
+                discarded_utterance_rows.append(
+                    {
+                        "utterance_index": utterance_index,
+                        "text": str(utterance.get("text", "")),
+                        "raw_start": utterance.get("start_time", utterance.get("start")),
+                        "raw_end": utterance.get("end_time", utterance.get("end")),
+                        "reason": "service_empty_utterance_without_words",
+                    }
+                )
+                continue
             raise VolcAsrError("Volc ASR word timing evidence is invalid")
         for word_index, word in enumerate(raw_words):
             if not isinstance(word, dict):
@@ -510,6 +522,7 @@ def normalize_result(payload: dict[str, Any]) -> dict[str, Any]:
         "utterances": utterances,
         "words": words,
         "word_timing_count": len(words),
+        "discarded_utterance_rows": discarded_utterance_rows,
         "discarded_word_rows": discarded_word_rows,
     }
 

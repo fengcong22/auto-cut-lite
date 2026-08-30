@@ -53,7 +53,7 @@ does not return the APP ID or access token. Without target-local authorization,
 the adapter must fail and no successful alignment may be claimed.
 
 This release supports two mutually exclusive authentication modes for the same
-v3 API: a new-console `X-Api-Key`, or legacy-console `X-Api-App-Key` plus
+v4 API: a new-console `X-Api-Key`, or legacy-console `X-Api-App-Key` plus
 `X-Api-Access-Key`. Use `volc-config` to select one; the local setup clears the
 other fields and the adapter never mixes headers. Create and authorize the
 application in the
@@ -71,11 +71,14 @@ must use HTTPS.
 Each successful normalized report is attributable to the exact input and
 service response. It contains `input_sha256`, `service_job_id`,
 `service_result_sha256`, the request-bound `resource_id`, and
-`adapter_version` (`auto-cut-volc-asr-v3`). The `words` list must be non-empty.
+`adapter_version` (`auto-cut-volc-asr-v4`). The `words` list must be non-empty.
 Every word boundary must be finite and non-negative, every interval must have
 positive duration (`end > start`), and starts and ends must be monotonic across
-the complete result. Empty, missing, non-finite, zero/negative-duration, or
-nonmonotonic timing fails normalization rather than producing weak evidence.
+the complete result. A service utterance with empty text and no `words` field is
+recorded and discarded as an empty sentinel. A spoken utterance without word
+rows, an entirely empty result, non-finite timing, zero/negative-duration word
+timing, or nonmonotonic word timing fails normalization rather than producing
+weak evidence.
 
 Configuration alone, package import, a provider acknowledgement without word
 rows, or an authorization error is never reported as successful ASR. Store any

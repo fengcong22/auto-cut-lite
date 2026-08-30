@@ -4,7 +4,7 @@
   "origin": "local_first_party_worktree",
   "license": "MIT",
   "license_destination": "LICENSE",
-  "adapter_version": "auto-cut-volc-asr-v3",
+  "adapter_version": "auto-cut-volc-asr-v4",
   "verification_test": "tests/audio_sound/test_volc_asr.py",
   "items": [
     {

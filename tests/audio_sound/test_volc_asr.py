@@ -272,6 +272,51 @@ def test_normalize_result_discards_negative_whitespace_service_sentinel() -> Non
     ]
 
 
+def test_normalize_result_discards_empty_utterance_without_word_rows() -> None:
+    payload = _payload_with_evidence()
+    payload["result"]["utterances"].insert(
+        0,
+        {
+            "start_time": 100,
+            "end_time": 200,
+            "text": "",
+        },
+    )
+
+    normalized = normalize_result(payload)
+
+    assert [word["text"] for word in normalized["words"]] == [
+        "自动",
+        "剪辑",
+        "语音",
+        "测试",
+    ]
+    assert normalized["discarded_utterance_rows"] == [
+        {
+            "utterance_index": 0,
+            "text": "",
+            "raw_start": 100,
+            "raw_end": 200,
+            "reason": "service_empty_utterance_without_words",
+        }
+    ]
+
+
+def test_normalize_result_rejects_spoken_utterance_without_word_rows() -> None:
+    payload = _payload_with_evidence()
+    payload["result"]["utterances"].insert(
+        0,
+        {
+            "start_time": 100,
+            "end_time": 200,
+            "text": "有文本",
+        },
+    )
+
+    with pytest.raises(VolcAsrError, match="timing"):
+        normalize_result(payload)
+
+
 def test_find_phrase_matches_ignores_punctuation_and_uses_anchor() -> None:
     normalized = normalize_result(_payload_with_evidence())
 

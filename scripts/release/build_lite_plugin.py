@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.6.0+codex.20260830125208"
+PLUGIN_VERSION = "1.6.0+codex.20260830140941"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",

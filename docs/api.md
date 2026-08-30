@@ -465,7 +465,7 @@ The normalized success object includes:
 {
   "provider": "volc_asr",
   "resource_id": "volc.seedasr.auc",
-  "adapter_version": "auto-cut-volc-asr-v3",
+  "adapter_version": "auto-cut-volc-asr-v4",
   "input_sha256": "<sha256-of-exact-input-bytes>",
   "service_job_id": "<provider-request-id>",
   "service_result_sha256": "<sha256-of-canonical-service-result>",
