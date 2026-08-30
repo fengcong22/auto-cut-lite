@@ -563,6 +563,51 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
             compiled["snapshot"]["review_items"][0]["asset_paths"], ["hand-1.png"]
         )
 
+    def test_recommended_candidate_number_selects_ordered_pointer_material(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "revision_id": 1,
+            "content_sha256": "b" * 64,
+            "asset_identity_sha256": "c" * 64,
+            "review_items": [
+                {"block_id": "pointer", "source_text": "00:01 添加小手指向丹麦"}
+            ],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            },
+            *[
+                {
+                    "asset_id": f"candidate-{index}",
+                    "path": f"candidate-{index}.png",
+                    "relative_path": f"candidate-{index}.png",
+                    "sha256": str(index + 1) * 64,
+                    "byte_size": 20,
+                    "mime": "image/png",
+                    "extension": ".png",
+                    "name": "attachment.png",
+                    "context_text": (
+                        "候选 1：完整画面截图；候选 2：小手素材，建议选择此项"
+                    ),
+                    "associated_item_index": 0,
+                }
+                for index in (1, 2)
+            ],
+        ]
+
+        compiled = intake.compile_url_inputs(parsed, assets)
+        self.assertEqual(
+            compiled["snapshot"]["review_items"][0]["asset_paths"], ["candidate-2.png"]
+        )
+
     def test_pointer_recommendation_context_associates_caption_group(self) -> None:
         parsed = intake.parse_lark_document(
             {

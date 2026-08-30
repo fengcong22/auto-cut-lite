@@ -75,6 +75,11 @@ _VISUAL_RECOMMENDATION_VALUE_RE = re.compile(
     r"(?:此项|这一项|该项|这个|此素材|该素材|this|it)",
     re.IGNORECASE,
 )
+_VISUAL_RECOMMENDED_CANDIDATE_RE = re.compile(
+    r"候选\s*(\d+)\s*[:：]?[^\n。！？；]{0,80}?"
+    r"(?:建议|推荐|优先|首选|preferred|recommend(?:ed)?)",
+    re.IGNORECASE,
+)
 _SENSITIVE_IDENTITY_KEYS = (
     "token",
     "secret",
@@ -573,6 +578,18 @@ def _asset_is_recommended(row: Mapping[str, Any]) -> bool:
     return bool(_VISUAL_RECOMMENDATION_RE.search(text) or _VISUAL_RECOMMENDATION_VALUE_RE.search(text))
 
 
+def _recommended_candidate_numbers(row: Mapping[str, Any]) -> set[int]:
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in ("name", "relative_path", "context_text", "alt", "description", "recommendation")
+    )
+    return {
+        int(match.group(1))
+        for match in _VISUAL_RECOMMENDED_CANDIDATE_RE.finditer(text)
+        if match.group(1).isdigit()
+    }
+
+
 def _pointer_preferred_candidates(
     candidates: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
@@ -581,6 +598,15 @@ def _pointer_preferred_candidates(
     recommended = [row for row in candidates if _asset_is_recommended(row)]
     if len(recommended) == 1:
         return recommended
+    recommended_numbers = {
+        number
+        for row in candidates
+        for number in _recommended_candidate_numbers(row)
+    }
+    if len(recommended_numbers) == 1:
+        candidate_index = next(iter(recommended_numbers)) - 1
+        if 0 <= candidate_index < len(candidates):
+            return [candidates[candidate_index]]
     named = [row for row in candidates if _asset_has_visual_cue(row)]
     if len(named) == 1:
         return named
