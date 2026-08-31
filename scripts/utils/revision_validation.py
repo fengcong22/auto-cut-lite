@@ -1608,6 +1608,18 @@ def _spoken_reverse_asr_row_evidence_problems(
         return missing
 
     contract = _spoken_item_contract(request, item_id)
+    contract_item = next(
+        (
+            candidate
+            for candidate in request.review_items
+            if _normalize_review_id(candidate.item_id) == _normalize_review_id(item_id)
+        ),
+        None,
+    )
+    is_colored_span_item = bool(
+        contract_item is not None
+        and str(contract_item.kind or "").strip().casefold() == "colored_span_delete"
+    )
     contract_problems: List[str] = []
     expected_strategy = contract["strategy"]
     if not contract["strategy_present"] or not expected_strategy:
@@ -1670,6 +1682,11 @@ def _spoken_reverse_asr_row_evidence_problems(
                 break
 
     normalized_transcript = _normalized_phrase_text(transcript)
+    delete_phrases = [
+        str(value).strip()
+        for value in row.get("delete_phrases") or []
+        if str(value).strip()
+    ]
     delete_hits = row.get("delete_hits")
     positive_delete_hit_phrases = _positive_delete_hit_phrases(delete_hits)
     positive_delete_hit_count = len(positive_delete_hit_phrases)
@@ -1683,15 +1700,32 @@ def _spoken_reverse_asr_row_evidence_problems(
         row_status=row_status,
     )
     normalized_delete = _normalized_phrase_text(expected_delete)
-    if positive_delete_hits and any(
-        phrase != normalized_delete for phrase in positive_delete_hit_phrases
+    normalized_delete_phrases = {
+        _normalized_phrase_text(value) for value in delete_phrases
+    }
+    if positive_delete_hits and (
+        (is_colored_span_item and any(
+            phrase not in normalized_delete_phrases
+            for phrase in positive_delete_hit_phrases
+        ))
+        or (
+            not is_colored_span_item
+            and any(phrase != normalized_delete for phrase in positive_delete_hit_phrases)
+        )
     ):
         contract_problems.append("positive delete_hit does not match the item delete phrase")
-    transcript_delete_occurrence_count = (
-        _overlapping_phrase_occurrence_count(normalized_transcript, normalized_delete)
-        if normalized_delete
-        else 0
-    )
+    if is_colored_span_item and normalized_delete_phrases:
+        transcript_delete_occurrence_count = sum(
+            _overlapping_phrase_occurrence_count(normalized_transcript, phrase)
+            for phrase in normalized_delete_phrases
+            if phrase
+        )
+    else:
+        transcript_delete_occurrence_count = (
+            _overlapping_phrase_occurrence_count(normalized_transcript, normalized_delete)
+            if normalized_delete
+            else 0
+        )
     has_attributable_adjudication = (
         has_structured_adjudication
         and positive_delete_hit_count == 1
@@ -1710,7 +1744,12 @@ def _spoken_reverse_asr_row_evidence_problems(
             "multiple local transcript delete occurrences require per-hit adjudication evidence"
         )
     delete_phrase_in_transcript = bool(
-        normalized_delete and normalized_delete in normalized_transcript
+        (
+            normalized_delete_phrases
+            and any(phrase in normalized_transcript for phrase in normalized_delete_phrases)
+        )
+        if is_colored_span_item
+        else (normalized_delete and normalized_delete in normalized_transcript)
     )
     if positive_delete_hits and not has_attributable_adjudication:
         contract_problems.append(

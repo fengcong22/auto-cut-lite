@@ -590,11 +590,120 @@ def _recommended_candidate_numbers(row: Mapping[str, Any]) -> set[int]:
     }
 
 
+def _image_file_features(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Read a few safe, local image features for deterministic selection.
+
+    The intake never OCRs or uploads candidate images.  PNG dimensions and
+    alpha-channel presence are enough to distinguish a clean pointer/material
+    asset from a screenshot in the common review-document layout; unsupported
+    formats simply contribute no feature score.
+    """
+
+    path = Path(str(row.get("path") or ""))
+    features: dict[str, Any] = {"width": 0, "height": 0, "has_alpha": False}
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(32)
+    except OSError:
+        return features
+    if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 26:
+        features["width"] = int.from_bytes(header[16:20], "big")
+        features["height"] = int.from_bytes(header[20:24], "big")
+        # PNG colour types 4 and 6 carry an alpha channel.
+        features["has_alpha"] = header[25] in {4, 6}
+    elif header.startswith(b"GIF8") and len(header) >= 10:
+        features["width"] = int.from_bytes(header[6:8], "little")
+        features["height"] = int.from_bytes(header[8:10], "little")
+    elif header.startswith(b"\xff\xd8"):
+        # JPEG dimensions are optional for ranking; avoid a fragile parser.
+        features["jpeg"] = True
+    return features
+
+
+def _asset_selection_score(row: Mapping[str, Any], *, pointer: bool = False) -> tuple[float, ...]:
+    """Score an attachment without asking the operator to pick a candidate."""
+
+    text = " ".join(
+        str(row.get(field) or "")
+        for field in (
+            "name",
+            "relative_path",
+            "context_text",
+            "alt",
+            "description",
+            "recommendation",
+        )
+    ).casefold()
+    score = 0.0
+    if _asset_is_recommended(row):
+        score += 1000.0
+    if _asset_has_visual_cue(row):
+        score += 80.0
+    positive_cues = (
+        "干净",
+        "透明",
+        "无字",
+        "纯色",
+        "独立素材",
+        "素材",
+        "clean",
+        "transparent",
+        "isolated",
+    )
+    negative_cues = (
+        "截图",
+        "屏幕",
+        "界面",
+        "时间轴",
+        "剪映",
+        "预览",
+        "示例",
+        "带字",
+        "screenshot",
+        "screen",
+        "timeline",
+        "preview",
+    )
+    score += sum(24.0 for cue in positive_cues if cue in text)
+    score -= sum(32.0 for cue in negative_cues if cue in text)
+    features = _image_file_features(row) if _is_image_asset(row) else {}
+    has_alpha = bool(features.get("has_alpha"))
+    if pointer and has_alpha:
+        score += 55.0
+    if pointer and not has_alpha and str(row.get("extension") or "").casefold() in {".jpg", ".jpeg"}:
+        score -= 8.0
+    width = int(features.get("width") or 0)
+    height = int(features.get("height") or 0)
+    pixel_count = width * height
+    # Screenshots are usually large rectangular canvases; pointer assets are
+    # compact.  This is a small tie-breaker, never an absolute rejection.
+    if pointer and pixel_count:
+        if pixel_count <= 2_000_000:
+            score += 12.0
+        elif pixel_count >= 4_000_000:
+            score -= 12.0
+    try:
+        byte_size = float(row.get("byte_size") or 0)
+    except (TypeError, ValueError):
+        byte_size = 0.0
+    # Prefer a non-empty, higher-quality candidate only after semantic cues.
+    quality = min(12.0, max(0.0, byte_size / 500_000.0))
+    return (
+        score,
+        1.0 if has_alpha else 0.0,
+        quality,
+        float(width * height),
+        -float(len(str(row.get("asset_id") or ""))),
+    )
+
+
 def _pointer_preferred_candidates(
     candidates: Sequence[Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
     """Return an explicit, deterministic pointer candidate when one is present."""
 
+    if not candidates:
+        return []
     recommended = [row for row in candidates if _asset_is_recommended(row)]
     if len(recommended) == 1:
         return recommended
@@ -619,7 +728,20 @@ def _pointer_preferred_candidates(
     }
     if len(hashes) == 1 and hashes:
         return [candidates[0]]
-    return []
+    # No explicit recommendation: still choose deterministically from the
+    # description and local image features.  Lite must not stop for a routine
+    # candidate group and ask the operator to click one.
+    ranked = sorted(
+        candidates,
+        key=lambda row: (
+            -_asset_selection_score(row, pointer=True)[0],
+            -_asset_selection_score(row, pointer=True)[1],
+            -_asset_selection_score(row, pointer=True)[2],
+            -_asset_selection_score(row, pointer=True)[3],
+            str(row.get("asset_id") or "").casefold(),
+        ),
+    )
+    return [ranked[0]] if ranked else []
 
 
 def _wrap_document_xml(content: str) -> ET.Element:
@@ -1187,34 +1309,32 @@ def compile_url_inputs(
     ]
     if len(videos) == 1:
         source_video = videos[0]
+    elif videos:
+        # Source videos can also be exported as a small candidate group.  Use
+        # the same deterministic, description-led policy as image materials;
+        # an explicit source cue wins, then byte size provides a stable final
+        # quality tie-breaker.  This removes a needless interactive choice
+        # while retaining a clear failure for the genuinely missing case.
+        source_video = sorted(
+            videos,
+            key=lambda row: (
+                -float(_name_has_source_cue(str(row.get("name") or ""))),
+                -float(_name_has_source_cue(str(row.get("context_text") or ""))),
+                -float(row.get("byte_size") or 0),
+                str(row.get("asset_id") or "").casefold(),
+            ),
+        )[0]
     else:
-        cued = [row for row in videos if _name_has_source_cue(str(row.get("name") or ""))]
-        if len(cued) == 1:
-            source_video = cued[0]
-        else:
-            candidates = [
-                {
-                    "asset_id": str(row.get("asset_id") or ""),
-                    "sha256": str(row.get("sha256") or ""),
-                    "byte_size": int(row.get("byte_size") or 0),
-                    "extension": str(row.get("extension") or ""),
-                }
-                for row in videos
-            ]
-            raise ReviewDocumentIntakeError(
-                "source_video_ambiguous" if videos else "source_video_missing",
-                (
-                    "The document contains multiple possible source videos; select one candidate"
-                    if videos
-                    else "The document contains no downloadable source video"
-                ),
-                user_action={
-                    "action_code": "high_risk_confirmation",
-                    "reason_code": "source_video_ambiguous" if videos else "source_video_missing",
-                    "candidate_ids": [row["asset_id"] for row in candidates],
-                },
-                details={"candidates": candidates},
-            )
+        raise ReviewDocumentIntakeError(
+            "source_video_missing",
+            "The document contains no downloadable source video",
+            user_action={
+                "action_code": "high_risk_confirmation",
+                "reason_code": "source_video_missing",
+                "candidate_ids": [],
+            },
+            details={"candidates": []},
+        )
 
     visual_asset_ids: set[str] = set()
     direct_by_item: dict[int, list[dict[str, Any]]] = {}
@@ -1233,17 +1353,29 @@ def compile_url_inputs(
         if not _known_image_replacement_item(item):
             continue
         if len(candidates) > 1:
-            if _pointer_review_item(item):
-                preferred = _pointer_preferred_candidates(candidates)
-                if len(preferred) == 1:
-                    selected = preferred[0]
-                else:
-                    _visual_ambiguity(item, candidates)
-            else:
-                _visual_ambiguity(item, candidates)
+            preferred = _pointer_preferred_candidates(candidates)
+            selected = preferred[0] if preferred else None
+            if selected is None:
+                # A candidate group with no readable metadata is still
+                # handled deterministically by asset ID; it is safer to keep
+                # the workflow moving with a traceable choice than to request
+                # manual intervention for a routine image attachment.
+                selected = sorted(
+                    candidates,
+                    key=lambda row: str(row.get("asset_id") or "").casefold(),
+                )[0]
         else:
             selected = candidates[0]
         item["asset_paths"] = [str(selected["path"])]
+        item["asset_selection"] = {
+            "policy": "automatic_recommended_description_visual_features",
+            "candidate_count": len(candidates),
+            "selected_asset_id": str(selected.get("asset_id") or ""),
+            "selected_score": list(_asset_selection_score(
+                selected,
+                pointer=_pointer_review_item(item),
+            )),
+        }
         item["kind"] = "pointer_overlay" if _pointer_review_item(item) else "visual_overlay"
         item["execution_required"] = True
         visual_asset_ids.add(str(selected.get("asset_id") or ""))
@@ -1259,11 +1391,18 @@ def compile_url_inputs(
         unique = {
             str(candidate.get("asset_id") or ""): candidate for candidate in candidates
         }
-        if len(unique) > 1:
-            _visual_ambiguity(item, list(unique.values()))
-        if len(unique) == 1:
-            selected = next(iter(unique.values()))
+        if unique:
+            if len(unique) == 1:
+                selected = next(iter(unique.values()))
+            else:
+                selected = _pointer_preferred_candidates(list(unique.values()))[0]
             item["asset_paths"] = [str(selected["path"])]
+            item["asset_selection"] = {
+                "policy": "automatic_same_name_reuse_description_visual_features",
+                "candidate_count": len(unique),
+                "selected_asset_id": str(selected.get("asset_id") or ""),
+                "selected_score": list(_asset_selection_score(selected, pointer=True)),
+            }
             item["kind"] = "pointer_overlay"
             item["execution_required"] = True
             visual_asset_ids.add(str(selected.get("asset_id") or ""))

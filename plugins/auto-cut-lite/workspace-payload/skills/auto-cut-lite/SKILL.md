@@ -39,9 +39,11 @@ executing, or validating a review item. Read
   tail such as `对吧` may also be absent when it belongs to another utterance. Cut only the
   recognized ASR remainder, record omitted review text, and never skip intervening ASR words. An
   inter-word gap over 1.5 seconds breaks continuity; a provider utterance boundary alone does not.
-- Review-only and ASR-unresolved items use the review timestamp. If the comment says
-  `07:14 ... 提前到 07:12`, use the target `07:12`. Accept a point timestamp for the label and
-  never fall back to `0:00` for unresolved timing.
+- Review-only and ASR-unresolved items use the review timestamp. For a two-clock timing comment,
+  keep the label at the object's original clock: both `09:02 提前到 08:52` and
+  `08:52 延后到 09:02` are labelled at the first (original) time. The destination is retained
+  only as internal `target_time` evidence; Lite never moves the animation or changes duration.
+  A single point timestamp remains valid for the label and never falls back to `0:00`.
 - Every newly encountered or unrecognized issue is label-only by default. If it has a reliable
   start but no safe maintained implementation, leave one original-text label, record
   `execution_status=label_only_unresolved` internally, skip that execution, and continue
@@ -49,9 +51,11 @@ executing, or validating a review item. Read
   writing only when neither source supplies a valid time; never fall back to `0:00`.
 - Insert supplied pointer or picture files on `Lite Visual Assets` at the requested start using
   JianYing default geometry and no keyframes.
-- When one hand/pointer row omitted its attachment, reuse an attachment only from another row with
-  the same normalized modification name and only when the candidate is unique. Multiple candidates
-  return structured `user_action_required`; never guess.
+- When one hand/pointer row omitted its attachment, reuse the best matching attachment from
+  another row with the same normalized modification name. Candidate groups are selected
+  automatically from explicit recommendations, description/name cues, and safe local image
+  features; routine multiple candidates do not pause for manual selection. If no usable candidate
+  exists, keep a label-only item and continue.
 - Keep animation/picture-timing, text-position/animation, and existing-hand cleanup requests
   label-only.
 - Keep `Lite Timing Adjusted` empty. Ignore clean-cover/cleanup asset specs.

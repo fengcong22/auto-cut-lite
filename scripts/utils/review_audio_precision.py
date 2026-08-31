@@ -97,11 +97,18 @@ _FORBIDDEN_JOIN_PATTERNS = (
 )
 _ASR_SEARCH_PADDING_SECONDS = 4.0
 _ASR_CONTIGUOUS_WORD_GAP_SECONDS = 1.5
+# Only keep equivalences that are known to be low-risk in the course corpus.
+# These are used for locating a spoken span, never for rewriting the visible
+# review text.  Broad homophone dictionaries (的/地/得, 在/再, etc.) create
+# competing candidates and can make a cut cross a protected word, so they are
+# intentionally not enabled here.
 _ASR_EQUIVALENT_CHARACTERS = {
     "她": "他",
     "它": "他",
     "祂": "他",
     "牠": "他",
+    # The proper noun 撒丁 is routinely returned as 萨丁 by review authors.
+    "萨": "撒",
 }
 _OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
 _OPTIONAL_REVIEW_TAILS = frozenset({"对吧"})
@@ -295,13 +302,21 @@ def _normalize_windows(
             continue
         result.append({**dict(row), "start": start, "end": end})
     result.sort(key=lambda item: (item["start"], item["end"], str(item.get("item_id") or "")))
-    for previous, current in zip(result, result[1:]):
-        if current["start"] < previous["end"] - 1e-6:
+    normalized: list[dict[str, Any]] = []
+    for current in result:
+        if normalized and current["start"] < normalized[-1]["end"] - 1e-6:
+            previous = normalized[-1]
+            if str(previous.get("item_id") or "").casefold() == str(
+                current.get("item_id") or ""
+            ).casefold():
+                previous["end"] = max(previous["end"], current["end"])
+                continue
             raise ValueError(
                 "Executable Lite delete windows overlap and require manual resolution: "
                 f"{previous.get('item_id')} and {current.get('item_id')}"
             )
-    return result
+        normalized.append(current)
+    return normalized
 
 
 def render_source_aligned_candidate(
@@ -603,6 +618,30 @@ def _normalized_exact_phrase_matches(
             and end_character + 1 == end_bound[1]
             and _is_contiguous_word_span(words, start_word_index, end_word_index)
         ):
+            selected_text = "".join(
+                str(word.get("text") or "")
+                for word in words[start_word_index : end_word_index + 1]
+            )
+            match_method = "exact_phrase"
+            match_evidence: dict[str, Any] = {}
+            if _normalized_text(selected_text) == target and selected_text != phrase:
+                # Keep the source text verbatim while making the controlled
+                # ASR spelling equivalence auditable in the alignment receipt.
+                match_method = "normalized_equivalent_phrase"
+                match_evidence = {
+                    "text_similarity": round(
+                        SequenceMatcher(
+                            a=_normalized_text(phrase),
+                            b=_normalized_text(selected_text),
+                            autojunk=False,
+                        ).ratio(),
+                        6,
+                    ),
+                    "keyword_coverage": 1.0,
+                    "normalized_equivalence": True,
+                    "review_text": phrase,
+                    "asr_text": selected_text,
+                }
             payload = _match_payload(
                 words,
                 phrase,
@@ -610,6 +649,8 @@ def _normalized_exact_phrase_matches(
                 end_word_index,
                 anchor_start=anchor_start,
                 anchor_end=anchor_end,
+                match_method=match_method,
+                match_evidence=match_evidence,
             )
             if _match_in_search_bounds(payload["start"], payload["end"], bounds):
                 matches.append(payload)
@@ -856,6 +897,89 @@ def _extract_delete_phrase(item: Mapping[str, Any]) -> str:
     return "" if not text or _PUNCTUATION_ONLY.fullmatch(text) else text
 
 
+def _extract_delete_phrases(item: Mapping[str, Any], delete_phrase: str) -> list[str]:
+    """Return physical spoken spans for one review item.
+
+    Feishu keeps independently colored runs in ``colored_spans``.  They must
+    be matched and cut independently; treating the whole checkbox sentence as
+    one phrase would consume the uncolored words between runs.  The returned
+    list is deliberately conservative and falls back to the ordinary delete
+    phrase for every other item.
+    """
+
+    kind = str(item.get("kind") or "").strip().casefold()
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    candidates: Any = item.get("colored_spans")
+    if candidates is None:
+        candidates = evidence.get("colored_spans")
+    if kind != "colored_span_delete" or not isinstance(candidates, list):
+        return [delete_phrase] if delete_phrase else []
+    phrases: list[str] = []
+    for raw in candidates:
+        if isinstance(raw, Mapping):
+            value = str(raw.get("text") or raw.get("value") or "").strip()
+        else:
+            value = str(raw or "").strip()
+        if value and _normalized_text(value):
+            phrases.append(value)
+    return phrases or ([delete_phrase] if delete_phrase else [])
+
+
+def _dedupe_word_rows(rows: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Keep ASR rows in source order while removing duplicate span hits."""
+
+    seen: set[tuple[int, int, str]] = set()
+    result: list[dict[str, Any]] = []
+    for row in sorted(
+        (dict(value) for value in rows),
+        key=lambda value: (
+            float(value.get("start", 0.0)),
+            float(value.get("end", 0.0)),
+            str(value.get("text") or ""),
+        ),
+    ):
+        if "word_start_index" in row or "word_end_index" in row:
+            key = (
+                int(row.get("word_start_index", -1)),
+                int(row.get("word_end_index", -1)),
+                str(row.get("text") or ""),
+            )
+        else:
+            key = (
+                round(float(row.get("start", 0.0)), 6),
+                round(float(row.get("end", 0.0)), 6),
+                str(row.get("text") or ""),
+            )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+    return result
+
+
+def _row_source_windows(row: Mapping[str, Any]) -> list[list[float]]:
+    raw = row.get("source_cut_windows") or row.get("cut_windows")
+    windows: list[list[float]] = []
+    if isinstance(raw, list):
+        for value in raw:
+            if not isinstance(value, (list, tuple)) or len(value) < 2:
+                continue
+            try:
+                start, end = float(value[0]), float(value[1])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(start) and math.isfinite(end) and end > start:
+                windows.append([round(start, 6), round(end, 6)])
+    if not windows:
+        try:
+            start, end = float(row["start"]), float(row["end"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return []
+        if math.isfinite(start) and math.isfinite(end) and end > start:
+            windows = [[round(start, 6), round(end, 6)]]
+    return sorted(windows, key=lambda value: (value[0], value[1]))
+
+
 def _match_distance(match: Mapping[str, Any], anchor: float | None) -> float:
     if anchor is None:
         return 0.0
@@ -944,13 +1068,19 @@ def _prune_cross_cut_auto_must_keep(rows: Sequence[dict[str, Any]]) -> None:
                 continue
             window_start = float(raw_window["start"])
             window_end = float(raw_window["end"])
+            overlaps_own_cut = any(
+                window_start < float(own_window[1]) - 1e-6
+                and float(own_window[0]) < window_end - 1e-6
+                for own_window in _row_source_windows(row)
+            )
             overlaps_other_cut = any(
                 other is not row
-                and window_start < float(other["end"]) - 1e-6
-                and float(other["start"]) < window_end - 1e-6
+                and window_start < float(other_window[1]) - 1e-6
+                and float(other_window[0]) < window_end - 1e-6
                 for other in executable
+                for other_window in _row_source_windows(other)
             )
-            if not overlaps_other_cut:
+            if not overlaps_own_cut and not overlaps_other_cut:
                 retained.append(dict(raw_window))
         row["must_keep_source_windows"] = retained
         row["must_keep"] = [str(window["phrase"]) for window in retained]
@@ -969,6 +1099,7 @@ def _alignment_receipt(
     *,
     matches: Sequence[Mapping[str, Any]],
     resolved_window: Sequence[float] | None = None,
+    resolved_windows: Sequence[Sequence[float]] | None = None,
     resolved_time: float | None = None,
     authoritative_cut_boundary: bool,
 ) -> dict[str, Any]:
@@ -993,6 +1124,12 @@ def _alignment_receipt(
         receipt["resolved_cut_window"] = [
             round(float(resolved_window[0]), 6),
             round(float(resolved_window[1]), 6),
+        ]
+    if resolved_windows is not None:
+        receipt["resolved_cut_windows"] = [
+            [round(float(window[0]), 6), round(float(window[1]), 6)]
+            for window in resolved_windows
+            if len(window) >= 2
         ]
     if resolved_time is not None:
         receipt["resolved_time"] = round(float(resolved_time), 6)
@@ -1026,6 +1163,8 @@ def resolve_lite_audio_items(
             else rough_start
         )
         delete_phrase = _extract_delete_phrase(item)
+        delete_phrases = _extract_delete_phrases(item, delete_phrase)
+        colored_span_mode = kind == "colored_span_delete" and bool(delete_phrases)
         pause_label_only = lite_pause_change_is_label_only(kind, source_text)
         unresolved_timebase = lite_unresolved_timebase_status(item)
         routed_status = (
@@ -1048,48 +1187,113 @@ def resolve_lite_audio_items(
         )
         executable_kind = kind in _AUDIO_KINDS
         selected: dict[str, Any] | None = None
+        selected_matches: list[dict[str, Any]] = []
+        span_match_rows: list[dict[str, Any]] = []
         match_method = ""
 
         if delete_phrase and executable_kind and not unresolved_timebase:
-            anchor_parts = [part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()]
-            if len(anchor_parts) >= 2:
-                first_matches = _find_phrase_matches(
-                    words,
-                    anchor_parts[0],
-                    anchor_start=rough_start,
-                    anchor_end=rough_end,
-                )
-                last_matches = _find_phrase_matches(
-                    words,
-                    anchor_parts[-1],
-                    anchor_start=rough_start,
-                    anchor_end=rough_end,
-                )
-                ranges: list[dict[str, Any]] = []
-                for first in first_matches:
-                    for last in last_matches:
-                        if float(last["end"]) < float(first["start"]):
-                            continue
-                        ranges.append(
+            if colored_span_mode:
+                # Match each independently coloured run.  A run may be a
+                # short phrase, so each winner is anchored to the same review
+                # time and is kept non-overlapping with the earlier winners.
+                used_word_indexes: set[int] = set()
+                for span_index, span_phrase in enumerate(delete_phrases, start=1):
+                    matches = _find_phrase_matches(
+                        words,
+                        span_phrase,
+                        anchor_start=rough_start,
+                        anchor_end=rough_end,
+                    )
+                    matches = [
+                        match
+                        for match in matches
+                        if not any(
+                            index in used_word_indexes
+                            for index in range(
+                                int(match.get("word_start_index", -1)),
+                                int(match.get("word_end_index", -1)) + 1,
+                            )
+                        )
+                    ]
+                    span_selected, span_method = _unique_nearest_match(matches, anchor)
+                    if span_selected is None:
+                        span_match_rows.append(
                             {
-                                "text": f"{first['text']}...{last['text']}",
-                                "start": float(first["start"]),
-                                "end": float(last["end"]),
-                                "word_start_index": int(first["word_start_index"]),
-                                "word_end_index": int(last["word_end_index"]),
+                                "span_index": span_index,
+                                "phrase": span_phrase,
+                                "status": "unresolved",
+                                "match_method": span_method,
                             }
                         )
-                selected, match_method = _unique_nearest_match(ranges, anchor)
-                if selected is not None:
-                    match_method = "ellipsis_anchor_range"
+                        continue
+                    span_selected = dict(span_selected)
+                    span_selected["span_index"] = span_index
+                    span_selected["span_phrase"] = span_phrase
+                    span_selected["span_match_method"] = span_method
+                    selected_matches.append(span_selected)
+                    span_match_rows.append(
+                        {
+                            "span_index": span_index,
+                            "phrase": span_phrase,
+                            "status": "matched",
+                            "match_method": span_method,
+                            "text": str(span_selected.get("text") or ""),
+                            "start": round(float(span_selected["start"]), 6),
+                            "end": round(float(span_selected["end"]), 6),
+                            "omitted_review_text": str(
+                                span_selected.get("omitted_review_text") or ""
+                            ),
+                        }
+                    )
+                    used_word_indexes.update(
+                        range(
+                            int(span_selected.get("word_start_index", -1)),
+                            int(span_selected.get("word_end_index", -1)) + 1,
+                        )
+                    )
+                if selected_matches:
+                    selected = selected_matches[0]
+                    match_method = "colored_spans_anchor"
             else:
-                matches = _find_phrase_matches(
-                    words,
-                    delete_phrase,
-                    anchor_start=rough_start,
-                    anchor_end=rough_end,
-                )
-                selected, match_method = _unique_nearest_match(matches, anchor)
+                anchor_parts = [part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()]
+                if len(anchor_parts) >= 2:
+                    first_matches = _find_phrase_matches(
+                        words,
+                        anchor_parts[0],
+                        anchor_start=rough_start,
+                        anchor_end=rough_end,
+                    )
+                    last_matches = _find_phrase_matches(
+                        words,
+                        anchor_parts[-1],
+                        anchor_start=rough_start,
+                        anchor_end=rough_end,
+                    )
+                    ranges: list[dict[str, Any]] = []
+                    for first in first_matches:
+                        for last in last_matches:
+                            if float(last["end"]) < float(first["start"]):
+                                continue
+                            ranges.append(
+                                {
+                                    "text": f"{first['text']}...{last['text']}",
+                                    "start": float(first["start"]),
+                                    "end": float(last["end"]),
+                                    "word_start_index": int(first["word_start_index"]),
+                                    "word_end_index": int(last["word_end_index"]),
+                                }
+                            )
+                    selected, match_method = _unique_nearest_match(ranges, anchor)
+                    if selected is not None:
+                        match_method = "ellipsis_anchor_range"
+                else:
+                    matches = _find_phrase_matches(
+                        words,
+                        delete_phrase,
+                        anchor_start=rough_start,
+                        anchor_end=rough_end,
+                    )
+                    selected, match_method = _unique_nearest_match(matches, anchor)
 
         explicit_evidence = (
             dict(item.get("evidence") or {})
@@ -1103,19 +1307,84 @@ def resolve_lite_audio_items(
             else []
         )
         must_keep_source_windows: list[dict[str, Any]] = []
-        if selected is not None and requested_execute and executable_kind:
-            start = max(0.0, min(float(selected["start"]), source_duration_seconds))
-            end = max(0.0, min(float(selected["end"]), source_duration_seconds))
-            if end <= start:
-                selected = None
-                match_method = "matched_window_out_of_range"
-            else:
-                start_index = int(selected.get("word_start_index", 0))
-                end_index = int(selected.get("word_end_index", start_index))
-                matched_words = [dict(row) for row in words[start_index : end_index + 1]]
+        if (selected is not None or selected_matches) and requested_execute and executable_kind:
+            physical_matches = selected_matches or ([selected] if selected is not None else [])
+            physical_matches = [dict(value) for value in physical_matches if value is not None]
+            physical_windows: list[list[float]] = []
+            matched_words: list[dict[str, Any]] = []
+            generated_must_keep: list[str] = []
+            generated_must_keep_windows: list[dict[str, Any]] = []
+            for physical in physical_matches:
+                start_value = max(
+                    0.0,
+                    min(float(physical["start"]), source_duration_seconds),
+                )
+                end_value = max(
+                    0.0,
+                    min(float(physical["end"]), source_duration_seconds),
+                )
+                if end_value <= start_value:
+                    continue
+                physical_windows.append([round(start_value, 6), round(end_value, 6)])
+                start_index = int(physical.get("word_start_index", 0))
+                end_index = int(physical.get("word_end_index", start_index))
+                matched_words.extend(words[start_index : end_index + 1])
                 if not must_keep:
-                    must_keep, must_keep_source_windows = _context_phrases(
+                    local_keep, local_keep_windows = _context_phrases(
                         words, start_index, end_index
+                    )
+                    generated_must_keep.extend(local_keep)
+                    generated_must_keep_windows.extend(local_keep_windows)
+            if physical_windows:
+                physical_windows.sort(key=lambda value: (value[0], value[1]))
+                matched_words = _dedupe_word_rows(matched_words)
+                if not must_keep:
+                    must_keep = list(dict.fromkeys(generated_must_keep))
+                    must_keep_source_windows = []
+                    seen_keep: set[tuple[float, float, str]] = set()
+                    for keep_window in generated_must_keep_windows:
+                        key = (
+                            float(keep_window["start"]),
+                            float(keep_window["end"]),
+                            str(keep_window["phrase"]),
+                        )
+                        if key not in seen_keep:
+                            seen_keep.add(key)
+                            must_keep_source_windows.append(keep_window)
+                first_window = physical_windows[0]
+                last_window = physical_windows[-1]
+                match_evidence = {
+                    "match_method": match_method or "exact_phrase",
+                    "text_similarity": float(
+                        selected.get("text_similarity", 1.0) if selected else 1.0
+                    ),
+                    "keyword_coverage": float(
+                        selected.get("keyword_coverage", 1.0) if selected else 1.0
+                    ),
+                    "matched_keyword_characters": sum(
+                        int(value.get("matched_keyword_characters", len(_normalized_text(value.get("span_phrase") or value.get("phrase") or ""))))
+                        for value in physical_matches
+                    ),
+                    "omitted_review_text": "".join(
+                        str(value.get("omitted_review_text") or "")
+                        for value in physical_matches
+                    ),
+                    "extra_asr_text": "".join(
+                        str(value.get("extra_asr_text") or "")
+                        for value in physical_matches
+                    ),
+                    "anchor_distance_seconds": round(
+                        min(_match_distance(value, anchor) for value in physical_matches),
+                        6,
+                    ),
+                }
+                if colored_span_mode:
+                    match_evidence.update(
+                        {
+                            "colored_span_mode": True,
+                            "delete_phrases": list(delete_phrases),
+                            "span_matches": span_match_rows,
+                        }
                     )
                 rows.append(
                     {
@@ -1127,41 +1396,32 @@ def resolve_lite_audio_items(
                         "execution_status": "asr_resolved",
                         "strategy": str(explicit_evidence.get("strategy") or "precision_first"),
                         "delete": delete_phrase,
-                        "resolved_delete": str(selected.get("text") or delete_phrase),
-                        "asr_match": {
-                            "match_method": match_method or "exact_phrase",
-                            "text_similarity": float(selected.get("text_similarity", 1.0)),
-                            "keyword_coverage": float(selected.get("keyword_coverage", 1.0)),
-                            "matched_keyword_characters": int(
-                                selected.get(
-                                    "matched_keyword_characters",
-                                    len(_normalized_text(delete_phrase)),
-                                )
-                            ),
-                            "omitted_review_text": str(
-                                selected.get("omitted_review_text") or ""
-                            ),
-                            "extra_asr_text": str(selected.get("extra_asr_text") or ""),
-                            "anchor_distance_seconds": round(
-                                _match_distance(selected, anchor), 6
-                            ),
-                        },
+                        "delete_phrases": list(delete_phrases),
+                        "resolved_delete": "...".join(
+                            str(value.get("text") or value.get("span_phrase") or delete_phrase)
+                            for value in physical_matches
+                        ),
+                        "asr_match": match_evidence,
                         "must_keep": must_keep,
                         "must_keep_source_windows": must_keep_source_windows,
-                        "start": round(start, 6),
-                        "end": round(end, 6),
-                        "resolved_time": round(start, 6),
+                        "start": first_window[0],
+                        "end": last_window[1],
+                        "source_cut_windows": physical_windows,
+                        "resolved_cut_windows": physical_windows,
+                        "resolved_time": first_window[0],
                         "match_method": match_method or "exact_phrase",
                         "matches": matched_words,
                         "asr_alignment": _alignment_receipt(
                             source_asr,
                             matches=matched_words,
-                            resolved_window=(start, end),
-                            resolved_time=start,
+                            resolved_window=(first_window[0], last_window[1]),
+                            resolved_time=first_window[0],
                             authoritative_cut_boundary=True,
                         ),
                     }
                 )
+                if len(physical_windows) > 1:
+                    rows[-1]["asr_alignment"]["resolved_cut_windows"] = physical_windows
                 continue
 
         if selected is not None:
@@ -1220,12 +1480,20 @@ def resolve_lite_audio_items(
 
     executable = [row for row in rows if row["execution_required"]]
     collisions: set[str] = set()
-    for previous, current in zip(
-        sorted(executable, key=lambda row: (row["start"], row["end"])),
-        sorted(executable, key=lambda row: (row["start"], row["end"]))[1:],
-    ):
-        if float(current["start"]) < float(previous["end"]) - 1e-6:
-            collisions.update((str(previous["item_id"]), str(current["item_id"])))
+    flattened_windows = [
+        (str(row["item_id"]), window)
+        for row in executable
+        for window in _row_source_windows(row)
+    ]
+    for previous_index, (previous_id, previous_window) in enumerate(flattened_windows):
+        for current_id, current_window in flattened_windows[previous_index + 1 :]:
+            if previous_id.casefold() == current_id.casefold():
+                continue
+            if (
+                float(current_window[0]) < float(previous_window[1]) - 1e-6
+                and float(previous_window[0]) < float(current_window[1]) - 1e-6
+            ):
+                collisions.update((previous_id, current_id))
     if collisions:
         for row in rows:
             if str(row["item_id"]) not in collisions:
@@ -1251,10 +1519,12 @@ def resolve_lite_audio_items(
         "executable_cuts": [
             {
                 "item_id": row["item_id"],
-                "start": row["start"],
-                "end": row["end"],
+                "start": window[0],
+                "end": window[1],
+                "window_index": index,
             }
             for row in executable
+            for index, window in enumerate(_row_source_windows(row), start=1)
         ],
         "unresolved_item_ids": [
             str(row["item_id"]) for row in rows if not row["execution_required"]
@@ -1398,7 +1668,10 @@ def build_lite_split_gap_audio_plan(
                 "source_start": round(float(row["start"]), 6),
                 "timeline_start": round(float(row["start"]), 6),
                 "duration": round(float(row["end"]) - float(row["start"]), 6),
-                "volume": 0.0,
+                # A2 is an audible source-aligned review/reference lane.  The
+                # writer and validator both require normal volume so an
+                # operator can audition the isolated deleted phrase.
+                "volume": 1.0,
                 "fade_in": 0.0,
                 "fade_out": 0.0,
                 "doc_item_id": str(row.get("item_id") or ""),
@@ -1424,6 +1697,7 @@ def build_lite_split_gap_audio_plan(
     return {
         "mode": "segmented",
         "pending": False,
+        "lite_a2_audible": True,
         "forbid_full_length_segments": True,
         "max_single_segment_ratio": 1.0,
         "validation_only_audio_paths": [candidate],
@@ -1505,6 +1779,13 @@ def apply_audio_plan_to_compiled_payloads(
                     "resolved_time": row.get("resolved_time"),
                 }
             )
+            row_windows = _row_source_windows(row)
+            if row_windows:
+                evidence["source_cut_windows"] = deepcopy(row_windows)
+                evidence["cut_windows"] = deepcopy(row_windows)
+                evidence["resolved_cut_windows"] = deepcopy(row_windows)
+            if row.get("delete_phrases"):
+                evidence["delete_phrases"] = list(row.get("delete_phrases") or [])
             if row.get("timing_source") == "review_timestamp_fallback":
                 evidence["timing_source"] = "review_timestamp_fallback"
                 evidence["review_timestamp_role"] = "authoritative_fallback"
@@ -1513,8 +1794,7 @@ def apply_audio_plan_to_compiled_payloads(
                 evidence["review_timestamp_role"] = "search_hint"
                 evidence["asr_alignment"] = deepcopy(row["asr_alignment"])
             if row["execution_required"]:
-                evidence["cut_windows"] = [[row["start"], row["end"]]]
-                evidence["resolved_cut_window"] = [row["start"], row["end"]]
+                evidence["resolved_cut_window"] = [row_windows[0][0], row_windows[-1][1]]
                 item["validation"] = _clear_retryable_label_only_statuses(
                     item.get("validation") or {}
                 )
@@ -1544,6 +1824,7 @@ def apply_audio_plan_to_compiled_payloads(
     for row in cut_plan.get("rows") or []:
         if not isinstance(row, Mapping) or not row.get("execution_required"):
             continue
+        row_windows = _row_source_windows(row)
         evidence = {
             "review_timestamp_role": "search_hint",
             "strategy": row["strategy"],
@@ -1552,26 +1833,34 @@ def apply_audio_plan_to_compiled_payloads(
             "asr_match": deepcopy(row.get("asr_match") or {}),
             "must_keep": list(row.get("must_keep") or []),
             "asr_alignment": deepcopy(row["asr_alignment"]),
-            "source_cut_windows": [[row["start"], row["end"]]],
-            "resolved_cut_window": [row["start"], row["end"]],
+            "source_cut_windows": deepcopy(row_windows),
+            "resolved_cut_windows": deepcopy(row_windows),
+            "resolved_cut_window": [row_windows[0][0], row_windows[-1][1]],
             "boundary_refinement": {
                 "status": "asr_character_edge",
-                "resolved_cut_window": [row["start"], row["end"]],
+                "resolved_cut_window": [row_windows[0][0], row_windows[-1][1]],
                 "crossed_must_keep": False,
             },
         }
-        request["edits"].append(
-            {
-                "type": "delete",
-                "start": row["start"],
-                "end": row["end"],
-                "label": row["source_text"],
-                "detail": row["delete"],
-                "doc_item_id": row["item_id"],
-                "source_kind": row["kind"],
-                "evidence": evidence,
-            }
-        )
+        for window_index, window in enumerate(row_windows, start=1):
+            edit_evidence = deepcopy(evidence)
+            edit_evidence["window_index"] = window_index
+            request["edits"].append(
+                {
+                    "type": "delete",
+                    "start": window[0],
+                    "end": window[1],
+                    "label": row["source_text"],
+                    "detail": (
+                        (row.get("delete_phrases") or [row["delete"]])[window_index - 1]
+                        if window_index <= len(row.get("delete_phrases") or [])
+                        else row["delete"]
+                    ),
+                    "doc_item_id": row["item_id"],
+                    "source_kind": row["kind"],
+                    "evidence": edit_evidence,
+                }
+            )
     request["edits"].sort(
         key=lambda edit: (float(edit.get("start") or 0.0), float(edit.get("end") or 0.0))
     )
@@ -1740,6 +2029,45 @@ def _phrase_hits(
     ]
 
 
+def _must_keep_supported_outside_cut(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    source_windows: Sequence[Sequence[float]],
+) -> bool:
+    """Check a protected phrase only in retained candidate audio.
+
+    Reverse ASR providers occasionally hallucinate a protected word inside a
+    zeroed cut window.  Counting that hallucination as a successful
+    ``must_keep`` hit is a false pass.  Remove words overlapping each logical
+    cut before checking the phrase, while retaining the conservative partial
+    phrase matcher for common ASR truncation.
+    """
+
+    retained: list[dict[str, Any]] = []
+    for word in words:
+        try:
+            word_start = float(word.get("start", -1.0))
+            word_end = float(word.get("end", -1.0))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(word_start) or not math.isfinite(word_end):
+            continue
+        if any(
+            word_start < float(window[1]) - 1e-6
+            and float(window[0]) < word_end - 1e-6
+            for window in source_windows
+            if len(window) >= 2
+        ):
+            continue
+        retained.append(dict(word))
+    if not retained:
+        return False
+    if _phrase_hits(retained, phrase):
+        return True
+    retained_text = "".join(str(word.get("text") or "") for word in retained)
+    return _phrase_supported(_normalized_text(retained_text), phrase)
+
+
 def _semantic_join_forbidden_patterns(local_text: str) -> list[str]:
     normalized = _normalized_text(local_text)
     result: list[str] = []
@@ -1845,26 +2173,73 @@ def build_full_candidate_reverse_report(
     for row in cut_plan.get("rows") or []:
         if not isinstance(row, Mapping) or not row.get("execution_required"):
             continue
-        start, end = float(row["start"]), float(row["end"])
-        join_candidates = _candidate_join_times_from_payload(
-            revision_request,
-            (start, end),
-        )
-        if not join_candidates:
+        source_windows = _row_source_windows(row)
+        if not source_windows:
             raise ValueError(
-                "Segmented audio plan cannot map the reverse-ASR join for "
+                "Executable reverse-ASR row has no source cut window for "
                 f"{row.get('item_id') or '<unknown>'}"
             )
-        mapped_join_time = min(join_candidates)
-        local_words = _local_reverse_words(words, start, end)
+        mapped_join_times: list[float] = []
+        local_word_rows: list[dict[str, Any]] = []
+        for source_window in source_windows:
+            join_candidates = _candidate_join_times_from_payload(
+                revision_request,
+                source_window,
+            )
+            if not join_candidates:
+                raise ValueError(
+                    "Segmented audio plan cannot map the reverse-ASR join for "
+                    f"{row.get('item_id') or '<unknown>'}"
+                )
+            mapped_join_times.append(min(join_candidates))
+            local_word_rows.extend(
+                _local_reverse_words(words, source_window[0], source_window[1])
+            )
+        local_words = _dedupe_word_rows(local_word_rows)
+        start, end = float(source_windows[0][0]), float(source_windows[-1][1])
         local_text = "".join(str(word.get("text") or "") for word in local_words)
         normalized = _normalized_text(local_text)
-        all_delete_hits = _phrase_hits(local_words, str(row["delete"]))
-        delete_hits = _phrase_hits(
-            local_words,
-            str(row["delete"]),
-            attribution_window=(start, end),
-        )
+        delete_phrases = [
+            str(value).strip()
+            for value in row.get("delete_phrases") or []
+            if str(value).strip()
+        ] or [str(row["delete"])]
+        all_delete_hits: list[dict[str, Any]] = []
+        delete_hits: list[dict[str, Any]] = []
+        delete_span_hits: list[dict[str, Any]] = []
+        for delete_phrase in delete_phrases:
+            phrase_all_hits = _phrase_hits(local_words, delete_phrase)
+            phrase_hits = []
+            for source_window in source_windows:
+                phrase_hits.extend(
+                    _phrase_hits(
+                        local_words,
+                        delete_phrase,
+                        attribution_window=(source_window[0], source_window[1]),
+                    )
+                )
+            all_delete_hits.extend(phrase_all_hits)
+            delete_hits.extend(phrase_hits)
+            delete_span_hits.extend(
+                {**hit, "phrase": delete_phrase} for hit in phrase_hits
+            )
+        def _dedupe_hits(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+            seen_hits: set[tuple[float, float, str]] = set()
+            deduped_hits: list[dict[str, Any]] = []
+            for hit in values:
+                key = (
+                    round(float(hit.get("start", 0.0)), 6),
+                    round(float(hit.get("end", 0.0)), 6),
+                    str(hit.get("text") or ""),
+                )
+                if key in seen_hits:
+                    continue
+                seen_hits.add(key)
+                deduped_hits.append(dict(hit))
+            return deduped_hits
+
+        all_delete_hits = _dedupe_hits(all_delete_hits)
+        delete_hits = _dedupe_hits(delete_hits)
         attributed_hit_keys = {
             (hit["start"], hit["end"], hit["text"]) for hit in delete_hits
         }
@@ -1874,17 +2249,23 @@ def build_full_candidate_reverse_report(
             if (hit["start"], hit["end"], hit["text"]) not in attributed_hit_keys
         ]
         keep_hits = {
-            phrase: _phrase_supported(normalized, phrase)
+            phrase: _must_keep_supported_outside_cut(
+                local_words,
+                phrase,
+                source_windows,
+            )
             for phrase in row.get("must_keep") or []
         }
         forbidden = _semantic_join_forbidden_patterns(local_text)
-        delete_occurrence_count = _overlapping_phrase_occurrence_count(
-            local_text, str(row["delete"])
+        delete_occurrence_count = sum(
+            _overlapping_phrase_occurrence_count(local_text, phrase)
+            for phrase in delete_phrases
         )
         adjudication: dict[str, Any] | None = None
         reported_delete_hits = delete_hits
         if (
             not delete_hits
+            and len(delete_phrases) == 1
             and delete_occurrence_count == 1
             and len(kept_recurrence_hits) == 1
         ):
@@ -1918,10 +2299,12 @@ def build_full_candidate_reverse_report(
                 "strategy": row["strategy"],
                 "delete": row["delete"],
                 "must_keep": list(row.get("must_keep") or []),
-                "source_cut_windows": [[row["start"], row["end"]]],
-                "mapped_join_times": [mapped_join_time],
+                "source_cut_windows": deepcopy(source_windows),
+                "mapped_join_times": [round(value, 9) for value in mapped_join_times],
                 "local_joined_text": local_text,
                 "delete_hits": reported_delete_hits,
+                "delete_phrases": delete_phrases,
+                "delete_span_hits": delete_span_hits,
                 "kept_recurrence_hits": kept_recurrence_hits,
                 "keep_hits": keep_hits,
                 "semantic_join_validation": {

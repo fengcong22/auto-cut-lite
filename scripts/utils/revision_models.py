@@ -1030,14 +1030,21 @@ def _parse_audio_delivery_plan(payload: Any) -> AudioDeliveryPlan:
         )
         duration = _as_finite_float(item.get("duration"), f"{field_prefix}.duration")
         volume = _as_finite_float(
-            item.get("volume", 0.0 if role == "reference" else 1.0),
+            item.get("volume", 1.0),
             f"{field_prefix}.volume",
         )
         fade_in = _as_finite_float(item.get("fade_in", 0.0), f"{field_prefix}.fade_in")
         fade_out = _as_finite_float(item.get("fade_out", 0.0), f"{field_prefix}.fade_out")
         if source_start < 0 or timeline_start < 0 or volume < 0:
             raise ValueError(f"{field_prefix} times and volume must be non-negative.")
-        if role == "reference" and volume != 0.0:
+        # Legacy/full-workflow reference rows are muted by contract. Lite's
+        # split-gap A2 lane opts in to an audible reference clip explicitly so
+        # older callers remain strict and the saved draft can still be audited.
+        if (
+            role == "reference"
+            and volume != 0.0
+            and not _as_bool(payload.get("lite_a2_audible"), False)
+        ):
             raise ValueError(f"{field_prefix} reference segment volume must be 0.")
         if duration <= 0:
             raise ValueError(f"{field_prefix}.duration must be positive.")

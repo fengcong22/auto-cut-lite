@@ -17,7 +17,7 @@ user-selected subskill whenever `workflow_mode=lite`.
 | Spoken deletion | Resolve the real boundary with word/character ASR, then write a non-destructive editable split/cut trace while retaining the complete source interval | `true` | ASR boundary, must-keep, source-preservation, and editable-trace gates; the label uses the word/character ASR-resolved cut start; no duration change |
 | Any other duration-changing request, including pause, speed, hold, still-frame, or stretch changes | Attempt source word/character ASR, then keep one exact `source_text` label | `false` | Label at a unique ASR point, otherwise at the review-comment time; no duration mutation or later-track offset |
 | Pronunciation, breath, mouth noise, or other audio-identifiable timing | Attempt the actual word/character boundary with source ASR | `false` unless an explicit maintained non-duration executor exists | Label at the unique ASR boundary, otherwise at the review-comment time |
-| Review-only or ASR-unresolved item | Parse the review timestamp or explicitly requested target | Per visual rule | Point timestamps are valid; `old time ... 提前到 target` uses the target |
+| Review-only or ASR-unresolved item | Parse the review timestamp or explicitly requested target | Per visual rule | Point timestamps are valid; a two-clock move uses the first/original time for the label and keeps the destination only as internal evidence |
 | New or unrecognized issue with reliable authoritative time but no safe maintained implementation | Keep one label whose visible text is exactly `source_text`; skip ad-hoc execution | `false` | Record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports and continue independent items |
 | Item with neither a unique ASR point nor a valid review-comment time | Do not create or update the draft | N/A | Fail before draft open/write; never guess `0:00` |
 
@@ -39,9 +39,11 @@ For every supplied visual asset:
 
 If a requested pointer or image asset is unavailable, keep the verbatim label, report that the
 asset was not inserted, and do not start profile onboarding or synthesize a substitute.
-For a hand/pointer row whose attachment is missing, the only allowed reuse is a unique attachment
-from another row with the same normalized modification name. Multiple candidates require a
-structured `user_action_required` response.
+For a hand/pointer row whose attachment is missing, reuse the best matching attachment from
+another row with the same normalized modification name. Candidate groups are scored automatically
+from explicit recommendations, description/name cues, and safe local image features; routine
+multiple candidates do not request a manual choice. If no usable candidate exists, keep the
+verbatim label and continue.
 
 ## Forbidden Lite Outputs
 
@@ -76,8 +78,9 @@ correct Lite output.
   words, records omitted review text, and never skips intervening ASR words. An inter-word gap over
   1.5 seconds breaks continuity; a provider utterance boundary alone does not.
 - For spoken deletion specifically, this remains the word/character ASR-resolved logical split start.
-- Review-only and ASR-unresolved items use review timestamps. Prefer a requested target after cues
-  such as `提前到`, `推迟到`, `移到`, or `调到`; a point timestamp is sufficient.
+- Review-only and ASR-unresolved items use review timestamps. When both clocks are present after
+  cues such as `提前到`, `推迟到`, `移到`, or `调到`, the first/original clock is the label point
+  in either direction; retain the destination only as internal `target_time` evidence.
 - Reject every item whose authoritative time is unresolved before draft writing. A missing time
   source must never produce a marker at `0:00`. This timing failure is distinct from
   `label_only_unresolved`, which is allowed only after authoritative time is reliable.

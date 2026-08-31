@@ -113,12 +113,12 @@ Write an atomic `job_state.json` checkpoint only after validating a phase's inpu
 ## Pointer attachment ambiguity
 
 Ordinary Lite editing never opens a pointer-profile gate or onboarding wait. Use the current row's
-structurally associated attachment. When a hand/pointer row omitted its attachment, reuse only the
-unique attachment from another row with the same compiler-normalized modification name. One
-candidate binds its source row and asset identity to the intake receipt; multiple candidates return
-structured `user_action_required` with safe candidate IDs; zero candidates leaves the item
-label-only and reports the missing insertion. Never infer a candidate from filenames, OCR, ASR,
-subject identity, or repository search.
+structurally associated attachment. When a hand/pointer row omitted its attachment, reuse the best
+matching attachment from another row with the same compiler-normalized modification name. Candidate
+groups are selected automatically from explicit recommendations, description/name cues, and safe
+local image features; routine multiple candidates do not return `user_action_required`. Zero
+candidates leaves the item label-only and reports the missing insertion. Never infer a candidate
+from OCR, ASR, subject identity, or repository search.
 
 ## JSON Shape
 
@@ -224,8 +224,10 @@ subject identity, or repository search.
 - Lite review labels use source text verbatim, start at the authoritative item time, remain in the
   top safe band, and last `2s` unless clamped by the source-length project end. For every issue
   locatable through speech or audio, attempt the final ASR-resolved window or point first. A
-  non-executing item uses the review timestamp when ASR cannot locate a unique point;
-  a requested target after `提前到`/`推迟到`/`移到`/`调到` wins over an earlier current time.
+  non-executing item uses the review timestamp when ASR cannot locate a unique point.
+  When a timing comment contains both an original and destination clock, the first/original
+  clock is the marker point for either direction; the destination is internal `target_time`
+  evidence only.
   A non-speech point timestamp is valid without an end. Unresolved timing never maps to `0:00`.
 - Lite mode does not weaken executable cut evidence. A spoken delete must carry a passing
   word/character `asr_alignment`
@@ -330,8 +332,7 @@ Evidence examples:
   `semantic_pause_adjustment` and `pause_adjustments`
   evidence are forbidden
 - pointer/hand/underline: overlay `track_name`, `segment_id`, `asset_path`, default geometry, start
-  time, and same-name reuse receipt when applicable; multiple reuse candidates require
-  `user_action_required`
+  time, and automatic candidate-selection/reuse receipt when applicable
 - animation timing: non-executing source item and one exact `source_text` marker receipt; overlay,
   shifted-segment, stable-frame, and release evidence are forbidden in Lite
 - visual deletion: mask/overlay/patch segment ids or the exact local baked window

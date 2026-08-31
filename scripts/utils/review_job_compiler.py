@@ -415,6 +415,16 @@ def _review_text_target_range(text: str) -> tuple[float | None, float | None, st
     for cue in _TARGET_TIME_CUE_PATTERN.finditer(str(text or "")):
         following = next((row for row in values if row[1] >= cue.end()), None)
         if following is not None:
+            # A move/animation comment contains two clocks: the first is the
+            # object's current (original) location and the second is the
+            # requested destination.  Lite does not execute timing changes,
+            # so its trace label belongs to the object at the original clock,
+            # regardless of whether the move is earlier or later.  Keep the
+            # target in evidence for audit instead of using it as the marker
+            # start.
+            preceding = [row for row in values if row[2] <= cue.start()]
+            if preceding:
+                return preceding[-1][0], None, "original_before_target"
             return following[0], None, "target_after_cue"
 
     if len(values) >= 2:
@@ -685,7 +695,15 @@ def _canonical_review_items(
             else:
                 evidence["review_timestamp_role"] = "authoritative_non_speech"
                 if parsed_start is not None:
-                    if parsed_method == "target_after_cue" or start is None:
+                    parsed_times = _review_text_times(source_text)
+                    if parsed_method == "original_before_target":
+                        evidence["original_time"] = parsed_start
+                        if len(parsed_times) >= 2:
+                            evidence["target_time"] = parsed_times[1][0]
+                    if parsed_method == "original_before_target":
+                        start = parsed_start
+                        end = None
+                    elif parsed_method == "target_after_cue" or start is None:
                         start = parsed_start
                         end = parsed_end
                     evidence["review_timestamp_parse"] = parsed_method
