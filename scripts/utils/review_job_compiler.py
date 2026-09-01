@@ -33,7 +33,7 @@ from utils.revision_validation import derive_acceptance_profile
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
-_TOOL_VERSION = 2
+_TOOL_VERSION = 3
 _OUTPUT_NAMES = {
     "doc_items": "doc_items.json",
     "revision_request": "revision_request.json",
@@ -401,9 +401,7 @@ def _review_text_times(text: str) -> list[tuple[float, int, int]]:
         if third is None:
             value = _clock_seconds(f"{match.group('first')}:{match.group('second')}")
         else:
-            value = _clock_seconds(
-                f"{match.group('first')}:{match.group('second')}:{third}"
-            )
+            value = _clock_seconds(f"{match.group('first')}:{match.group('second')}:{third}")
         if value is not None:
             values.append((value, match.start(), match.end()))
     return values
@@ -417,16 +415,9 @@ def _review_text_target_range(text: str) -> tuple[float | None, float | None, st
     for cue in _TARGET_TIME_CUE_PATTERN.finditer(str(text or "")):
         following = next((row for row in values if row[1] >= cue.end()), None)
         if following is not None:
-            # A move/animation comment contains two clocks: the first is the
-            # object's current (original) location and the second is the
-            # requested destination.  Lite does not execute timing changes,
-            # so its trace label belongs to the object at the original clock,
-            # regardless of whether the move is earlier or later.  Keep the
-            # target in evidence for audit instead of using it as the marker
-            # start.
-            preceding = [row for row in values if row[2] <= cue.start()]
-            if preceding:
-                return preceding[-1][0], None, "original_before_target"
+            # The trace label belongs at the requested destination even when
+            # Lite keeps the actual picture/animation unchanged.  The current
+            # location is retained separately in evidence below.
             return following[0], None, "target_after_cue"
 
     if len(values) >= 2:
@@ -435,6 +426,17 @@ def _review_text_target_range(text: str) -> tuple[float | None, float | None, st
         if _RANGE_SEPARATOR.fullmatch(between) and second[0] > first[0]:
             return first[0], second[0], "range"
     return values[0][0], None, "point"
+
+
+def _review_text_move_times(text: str) -> tuple[float | None, float] | None:
+    values = _review_text_times(text)
+    for cue in _TARGET_TIME_CUE_PATTERN.finditer(str(text or "")):
+        following = next((row for row in values if row[1] >= cue.end()), None)
+        if following is None:
+            continue
+        preceding = [row for row in values if row[2] <= cue.start()]
+        return (preceding[-1][0] if preceding else None, following[0])
+    return None
 
 
 def _normalized_times(
@@ -598,7 +600,6 @@ def _canonical_review_items(
         if inferred_kind in {
             "phrase_delete",
             "ellipsis_range_delete",
-            "colored_span_delete",
             "gap_delete",
         } and kind_text.casefold() in {
             "",
@@ -610,26 +611,39 @@ def _canonical_review_items(
         }:
             kind = inferred_kind
 
-        # Colored text in a Feishu review note means delete the marked spoken
-        # fragments. Keep the rich-text spans in the source ledger so ASR can
-        # resolve one physical window per fragment; never guess that the whole
-        # quoted sentence is colored when markup was not captured.
-        if any(hint.casefold() in inference_text.casefold() for hint in _COLORED_NOTE_HINTS):
+        # Only actual Feishu rich-text color proves a spoken colored-span
+        # deletion. Plain wording such as "delete the blue text" is ambiguous
+        # between speech and the picture, so it remains a non-executing label.
+        colored_spans = _extract_colored_spans(source_row)
+        has_color_reference = any(
+            hint.casefold() in inference_text.casefold() for hint in _COLORED_NOTE_HINTS
+        )
+        if colored_spans:
             kind = "colored_span_delete"
-            colored_spans = _extract_colored_spans(source_row)
             row["colored_spans"] = copy.deepcopy(colored_spans)
             row_evidence = (
                 source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
             )
             row_evidence = copy.deepcopy(row_evidence)
             row_evidence["colored_spans"] = copy.deepcopy(colored_spans)
-            row_evidence["colored_span_status"] = "resolved" if colored_spans else "missing_markup"
+            row_evidence["colored_span_status"] = "resolved"
             row["evidence"] = row_evidence
-            if not colored_spans:
-                warnings.append(
-                    f"Review item {explicit_id or f'index_{index + 1:03d}'} requests colored-span deletion "
-                    "but rich-text markup was not captured."
-                )
+        elif has_color_reference:
+            kind = "review_only"
+            row["colored_spans"] = []
+            row["execution_status"] = "label_only_unresolved"
+            row_evidence = (
+                source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
+            )
+            row_evidence = copy.deepcopy(row_evidence)
+            row_evidence["colored_spans"] = []
+            row_evidence["colored_span_status"] = "missing_markup"
+            row_evidence["execution_status"] = "label_only_unresolved"
+            row["evidence"] = row_evidence
+            warnings.append(
+                f"Review item {explicit_id or f'index_{index + 1:03d}'} references colored text "
+                "but no supported Feishu rich-text color was captured; it remains label-only."
+            )
 
         if explicit_id:
             item_id = explicit_id
@@ -646,9 +660,9 @@ def _canonical_review_items(
             )
         execution_required = _execution_required_for_kind(kind, execution_required)
         execution_status = resolve_execution_status(
-            source_row.get("execution_status"),
-            source_row.get("evidence"),
-            source_row.get("validation"),
+            row.get("execution_status"),
+            row.get("evidence"),
+            row.get("validation"),
         )
         if workflow_mode == "lite":
             if lite_pause_change_is_label_only(kind, source_text):
@@ -679,11 +693,17 @@ def _canonical_review_items(
         )
         start, end = _normalized_times(source_row, item_id, warnings)
         parsed_start, parsed_end, parsed_method = _review_text_target_range(source_text)
+        move_times = _review_text_move_times(source_text)
         timing_source = lite_timing_source(kind, source_text) if workflow_mode == "lite" else ""
         evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
         evidence = copy.deepcopy(evidence)
         if workflow_mode == "lite":
             evidence["timing_source"] = timing_source
+            if move_times is not None:
+                original_time, target_time = move_times
+                if original_time is not None:
+                    evidence["original_time"] = original_time
+                evidence["target_time"] = target_time
             if timing_source == "asr":
                 evidence["review_timestamp_role"] = "search_hint"
                 if parsed_start is not None:
@@ -697,15 +717,7 @@ def _canonical_review_items(
             else:
                 evidence["review_timestamp_role"] = "authoritative_non_speech"
                 if parsed_start is not None:
-                    parsed_times = _review_text_times(source_text)
-                    if parsed_method == "original_before_target":
-                        evidence["original_time"] = parsed_start
-                        if len(parsed_times) >= 2:
-                            evidence["target_time"] = parsed_times[1][0]
-                    if parsed_method == "original_before_target":
-                        start = parsed_start
-                        end = None
-                    elif parsed_method == "target_after_cue" or start is None:
+                    if parsed_method == "target_after_cue" or start is None:
                         start = parsed_start
                         end = parsed_end
                     evidence["review_timestamp_parse"] = parsed_method

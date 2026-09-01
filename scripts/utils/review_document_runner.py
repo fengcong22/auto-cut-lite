@@ -88,7 +88,7 @@ from utils.revision_runner import (
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v7"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v8"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
@@ -108,6 +108,18 @@ _EDITABLE_AUDIO_EXTRACT_PARAMS = {
     "primary_codec": "copy",
     "fallback_codec": "alac",
     "movflags": "+faststart",
+}
+_AUDIO_DELETE_KINDS = {
+    "audio_delete",
+    "colored_span_delete",
+    "ellipsis_range_delete",
+    "phrase_delete",
+    "range_delete",
+    "speech_delete",
+    "speech_tail_cleanup",
+    "spoken_delete",
+    "tail_cleanup",
+    "tail_particle_delete",
 }
 
 
@@ -200,9 +212,7 @@ def _draft_tree_digest(path: str | os.PathLike[str]) -> str:
     root = Path(path).expanduser().resolve(strict=True)
     if root.is_file():
         root = root.parent
-    if not (root / "draft_content.json").is_file() or not (
-        root / "draft_meta_info.json"
-    ).is_file():
+    if not (root / "draft_content.json").is_file() or not (root / "draft_meta_info.json").is_file():
         raise FileNotFoundError(f"Draft has no saved content JSON: {root}")
     return str(capture_draft_tree_receipt(root)["tree_sha256"])
 
@@ -1039,6 +1049,7 @@ def _review_comment_time(item: Mapping[str, Any]) -> float | None:
         else None
     )
     for candidate in (
+        evidence.get("target_time"),
         evidence.get("review_search_hint_seconds"),
         evidence.get("resolved_review_timestamp_seconds"),
         text_time,
@@ -1247,16 +1258,16 @@ def _validate_existing_package(
         return None
 
 
-def _validate_marker_receipts(
-    execution: Mapping[str, Any], ledger: Mapping[str, Any]
-) -> None:
-    if not isinstance(execution.get("validation"), Mapping) or execution["validation"].get(
-        "ok"
-    ) is not True:
+def _validate_marker_receipts(execution: Mapping[str, Any], ledger: Mapping[str, Any]) -> None:
+    if (
+        not isinstance(execution.get("validation"), Mapping)
+        or execution["validation"].get("ok") is not True
+    ):
         raise ValueError("Lite draft structural validation did not pass")
-    if not isinstance(execution.get("acceptance_validation"), Mapping) or execution[
-        "acceptance_validation"
-    ].get("ok") is not True:
+    if (
+        not isinstance(execution.get("acceptance_validation"), Mapping)
+        or execution["acceptance_validation"].get("ok") is not True
+    ):
         raise ValueError("Lite draft strict acceptance did not pass")
     if execution["acceptance_validation"].get("skipped") is True:
         raise ValueError("Lite draft strict acceptance was skipped")
@@ -1284,6 +1295,65 @@ def _result_artifact(path: Path) -> dict[str, Any] | None:
         "path": str(path.resolve()),
         "sha256": sha256_file(path),
         "byte_size": path.stat().st_size,
+    }
+
+
+def _audio_execution_summary(
+    cut_plan: Mapping[str, Any],
+    *,
+    additional_label_only_unresolved_ids: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Separate delivery acceptance from the edits that physically executed."""
+
+    rows = [dict(row) for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)]
+    actual_cuts = [
+        dict(row)
+        for row in cut_plan.get("executable_cuts") or []
+        if isinstance(row, Mapping) and str(row.get("item_id") or "").strip()
+    ]
+    actual_cut_item_ids = list(dict.fromkeys(str(row["item_id"]).strip() for row in actual_cuts))
+    label_only_unresolved_ids = [
+        str(row.get("item_id") or "").strip()
+        for row in rows
+        if str(row.get("item_id") or "").strip()
+        and str(row.get("execution_status") or "")
+        .strip()
+        .casefold()
+        .startswith("label_only_unresolved")
+    ]
+    label_only_unresolved_ids = list(
+        dict.fromkeys(
+            [
+                *label_only_unresolved_ids,
+                *[
+                    str(value).strip()
+                    for value in additional_label_only_unresolved_ids
+                    if str(value).strip()
+                ],
+            ]
+        )
+    )
+    label_only_id_set = {value.casefold() for value in label_only_unresolved_ids}
+    unexecuted_audio_deletion_ids = list(
+        dict.fromkeys(
+            str(row.get("item_id") or "").strip()
+            for row in rows
+            if str(row.get("item_id") or "").strip().casefold() in label_only_id_set
+            and str(row.get("kind") or "").strip().casefold() in _AUDIO_DELETE_KINDS
+        )
+    )
+    return {
+        "status": (
+            "complete_with_label_only_unresolved" if label_only_unresolved_ids else "complete"
+        ),
+        "acceptance_scope": "draft_structure_and_package_delivery",
+        "actual_audio_cut_count": len(actual_cuts),
+        "actual_audio_cut_item_count": len(actual_cut_item_ids),
+        "actual_audio_cut_item_ids": actual_cut_item_ids,
+        "label_only_unresolved_count": len(label_only_unresolved_ids),
+        "label_only_unresolved_item_ids": label_only_unresolved_ids,
+        "unexecuted_audio_deletion_item_ids": unexecuted_audio_deletion_ids,
+        "all_requested_audio_deletions_executed": not unexecuted_audio_deletion_ids,
     }
 
 
@@ -1360,7 +1430,9 @@ def run_review_document(
         persisted = state.get("phases") if isinstance(state.get("phases"), Mapping) else {}
         phases: dict[str, Any] = {}
         for name in _RUN_PHASES:
-            run_record = dict(phase_records.get(name) or {"status": "pending", "result": None, "error": None})
+            run_record = dict(
+                phase_records.get(name) or {"status": "pending", "result": None, "error": None}
+            )
             persisted_record = dict(persisted.get(name) or {})
             persisted_status = persisted_record.pop("status", None)
             phases[name] = {
@@ -1390,19 +1462,13 @@ def run_review_document(
                 final = _read_json_object(paths["final_result"], "final acceptance")
         except (OSError, TypeError, ValueError):
             pass
-        compile_status = str(
-            (phase_records.get("input_compile") or {}).get("status") or ""
-        )
+        compile_status = str((phase_records.get("input_compile") or {}).get("status") or "")
         compile_is_current = compile_status in {"complete", "resumed"}
-        draft_status = str(
-            (phase_records.get("draft_write_validate") or {}).get("status") or ""
-        )
+        draft_status = str((phase_records.get("draft_write_validate") or {}).get("status") or "")
         if draft_status not in {"complete", "resumed"}:
             execution = {}
         effective_package_path = package_path
-        package_status = str(
-            (phase_records.get("package_publish") or {}).get("status") or ""
-        )
+        package_status = str((phase_records.get("package_publish") or {}).get("status") or "")
         package_is_current = package_status in {"complete", "resumed"}
         if not package_is_current:
             final = {}
@@ -1441,27 +1507,40 @@ def run_review_document(
         }
         draft_path = str(execution.get("draft_path") or draft_path_text)
         unresolved: set[str] = set()
+        cut_plan_payload: dict[str, Any] = {}
         for value in execution.get("label_only_unresolved_item_ids") or []:
             if str(value).strip():
                 unresolved.add(str(value).strip())
         try:
             if effective_cut_plan_path.is_file():
-                cut_plan = _read_json_object(effective_cut_plan_path, "audio cut plan")
+                cut_plan_payload = _read_json_object(
+                    effective_cut_plan_path,
+                    "audio cut plan",
+                )
                 unresolved.update(
                     str(value).strip()
-                    for value in cut_plan.get("unresolved_item_ids") or []
+                    for value in cut_plan_payload.get("unresolved_item_ids") or []
                     if str(value).strip()
                 )
         except (OSError, TypeError, ValueError):
             pass
         phase_timing = timing.get("phases") if isinstance(timing.get("phases"), Mapping) else {}
-        active_seconds = sum(float(row.get("active_seconds") or 0.0) for row in phase_timing.values())
+        active_seconds = sum(
+            float(row.get("active_seconds") or 0.0) for row in phase_timing.values()
+        )
         wait_seconds = sum(float(row.get("wait_seconds") or 0.0) for row in phase_timing.values())
+        execution_summary = _audio_execution_summary(
+            cut_plan_payload,
+            additional_label_only_unresolved_ids=[
+                str(value) for value in execution.get("label_only_unresolved_item_ids") or []
+            ],
+        )
         result = {
             "ok": ok,
             "runner_version": RUNNER_VERSION,
             "workflow_mode": "lite",
             "completion_boundary": "lite_zip_delivery",
+            "acceptance_scope": "draft_structure_and_package_delivery",
             "job_root": str(root),
             "job_state_json": str(state_path),
             "job_timing_json": str(timing_path),
@@ -1499,6 +1578,7 @@ def run_review_document(
             "phases": phases,
             "phase_execution": dict(phase_records),
             "unresolved_item_ids": sorted(unresolved),
+            "execution_summary": execution_summary,
             "timing": {
                 "active_seconds": round(active_seconds, 6),
                 "external_wait_seconds": round(wait_seconds, 6),
@@ -1591,12 +1671,8 @@ def run_review_document(
                 "input_mode": "json",
                 "document_identity_sha256": identity_digest
                 or canonical_json_sha256(identity_snapshot),
-                "snapshot_path_sha256": canonical_json_sha256(
-                    os.path.normcase(str(snapshot_path))
-                ),
-                "project_path_sha256": canonical_json_sha256(
-                    os.path.normcase(str(project_path))
-                ),
+                "snapshot_path_sha256": canonical_json_sha256(os.path.normcase(str(snapshot_path))),
+                "project_path_sha256": canonical_json_sha256(os.path.normcase(str(project_path))),
                 "execution_input_digest": execution_input_digest,
                 "workflow_mode": "lite",
             }
@@ -1631,6 +1707,7 @@ def run_review_document(
         cache = ArtifactCache(cache_path)
         inflight_root = cache_path / "inflight"
         item_ids: tuple[str, ...] = ()
+
         def run_preflight() -> PhaseOutcome:
             nonlocal runtime_integrity_receipt
             if not mock_media:
@@ -1656,17 +1733,13 @@ def run_review_document(
                     failure_details["preflight"] = _json_safe(exc.public_data())
                     raise
                 except Exception as exc:
-                    invalidate_lark_readiness(
-                        "lark_user_identity_unavailable", path=readiness_path
-                    )
+                    invalidate_lark_readiness("lark_user_identity_unavailable", path=readiness_path)
                     failure_details["preflight"] = {
                         "code": "lark_user_identity_unavailable",
                         "message": "Feishu/Lark user identity validation failed",
                         "details": {"error": safe_error_text(exc)},
                     }
-                    raise RuntimeError(
-                        "Feishu/Lark user identity validation failed"
-                    ) from exc
+                    raise RuntimeError("Feishu/Lark user identity validation failed") from exc
             return _phase_outcome(
                 root,
                 "preflight",
@@ -1825,9 +1898,7 @@ def run_review_document(
             if not has_doc_url:
                 fallback_identity = ""
                 if isinstance(document, Mapping):
-                    fallback_identity = str(
-                        document.get("document_identity_sha256") or ""
-                    )[:12]
+                    fallback_identity = str(document.get("document_identity_sha256") or "")[:12]
                 if not fallback_identity:
                     fallback_identity = canonical_json_sha256(snapshot)[:12]
                 name_resolution = resolve_artifact_name(
@@ -1848,7 +1919,9 @@ def run_review_document(
                 atomic_write_json(paths["project_original"], raw_project)
                 project_sha256 = sha256_file(paths["project_original"])
             resolution = dict(intake.get("name_resolution") or {})
-            final_name = str(resolution.get("final_name") or raw_project.get("draft_name") or "").strip()
+            final_name = str(
+                resolution.get("final_name") or raw_project.get("draft_name") or ""
+            ).strip()
             if final_name:
                 desired_package_path = requested_package_path.with_name(f"{final_name}.zip")
                 package_path = desired_package_path
@@ -1883,7 +1956,10 @@ def run_review_document(
             revision_path, ledger_path, manifest_path = _compiled_paths(paths["compiled_base"])
             request = _read_json_object(revision_path, "base revision request")
             ledger = _read_json_object(ledger_path, "base source ledger")
-            if request.get("workflow_mode") != "lite" or request.get("lite_cut_layout") != "split_gap":
+            if (
+                request.get("workflow_mode") != "lite"
+                or request.get("lite_cut_layout") != "split_gap"
+            ):
                 raise ValueError("Compiler did not preserve the required Lite split-gap identity")
             _assert_source_text_fidelity(ledger, request, ledger)
             compiled_ids = list(_source_text_index(ledger, "base source ledger"))
@@ -1915,14 +1991,15 @@ def run_review_document(
 
         def run_source_materials() -> PhaseOutcome:
             project = _read_json_object(paths["project_lite"], "Lite project")
-            source_video = Path(str(project.get("source_video") or "")).expanduser().resolve(strict=True)
+            source_video = (
+                Path(str(project.get("source_video") or "")).expanduser().resolve(strict=True)
+            )
             if not source_video.is_file():
                 raise FileNotFoundError(f"Source video is missing: {source_video}")
             expected_source = expected_project_materials.get("source_video") or {}
-            if (
-                os.path.normcase(str(source_video)) != expected_source.get("path")
-                or sha256_file(source_video) != expected_source.get("sha256")
-            ):
+            if os.path.normcase(str(source_video)) != expected_source.get("path") or sha256_file(
+                source_video
+            ) != expected_source.get("sha256"):
                 raise RuntimeError("Source video changed after the job input identity was captured")
             optional_materials: dict[str, Path] = {}
             for field in ("source_audio", "replacement_audio"):
@@ -1933,13 +2010,10 @@ def run_review_document(
                 if not candidate.is_file():
                     raise FileNotFoundError(f"{field} is missing: {candidate}")
                 expected = expected_project_materials.get(field) or {}
-                if (
-                    os.path.normcase(str(candidate)) != expected.get("path")
-                    or sha256_file(candidate) != expected.get("sha256")
-                ):
-                    raise RuntimeError(
-                        f"{field} changed after the job input identity was captured"
-                    )
+                if os.path.normcase(str(candidate)) != expected.get("path") or sha256_file(
+                    candidate
+                ) != expected.get("sha256"):
+                    raise RuntimeError(f"{field} changed after the job input identity was captured")
                 optional_materials[field] = candidate
 
             ffmpeg_info = _media_tool_identity(ffmpeg_bin, mock_media=mock_media)
@@ -2112,10 +2186,7 @@ def run_review_document(
                         for value in (normalization_hit, editable_audio_hit)
                         if value is not None
                     )
-                    if any(
-                        value is not None
-                        for value in (normalization_hit, editable_audio_hit)
-                    )
+                    if any(value is not None for value in (normalization_hit, editable_audio_hit))
                     else None
                 ),
             )
@@ -2191,9 +2262,9 @@ def run_review_document(
                     alignment_row = material_rows.get("alignment_source")
                     if not isinstance(alignment_row, Mapping):
                         raise ValueError("Source material ledger is missing alignment_source")
-                    alignment_source = Path(
-                        str(alignment_row.get("path") or "")
-                    ).resolve(strict=True)
+                    alignment_source = Path(str(alignment_row.get("path") or "")).resolve(
+                        strict=True
+                    )
                     ffmpeg_info = materials.get("ffmpeg_identity")
                     if not isinstance(ffmpeg_info, Mapping):
                         raise ValueError("Source material ledger is missing FFmpeg identity")
@@ -2257,9 +2328,7 @@ def run_review_document(
                         mark_asr_verified(
                             provider=str(source_asr.get("provider") or ""),
                             model_or_resource=str(
-                                source_asr.get("model")
-                                or source_asr.get("resource_id")
-                                or ""
+                                source_asr.get("model") or source_asr.get("resource_id") or ""
                             ),
                             adapter_version=str(source_asr.get("adapter_version") or ""),
                             path=readiness_path,
@@ -2459,9 +2528,7 @@ def run_review_document(
             request = deepcopy(before_request)
             ledger = deepcopy(before_ledger)
             cut_plan = _read_json_object(paths["cut_plan"], "audio cut plan")
-            audio_rows = [
-                row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)
-            ]
+            audio_rows = [row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)]
             source_audio: Path | None = None
             if audio_rows:
                 materials = _read_json_object(paths["materials_ledger"], "source materials")
@@ -2472,9 +2539,7 @@ def run_review_document(
                 if not isinstance(source_audio_row, Mapping):
                     raise ValueError("Source material ledger is missing editable source audio")
                 source_audio = Path(str(source_audio_row.get("path") or "")).resolve(strict=True)
-            audio_item_ids = {
-                str(row.get("item_id") or "").casefold() for row in audio_rows
-            }
+            audio_item_ids = {str(row.get("item_id") or "").casefold() for row in audio_rows}
             cache_hits: list[bool] = []
             artifacts: list[Path] = []
             candidate: Path | None = None
@@ -2616,9 +2681,7 @@ def run_review_document(
                 if unresolved_ids and reverse_attempt_count == 1:
                     atomic_copy_file(candidate, paths["initial_candidate_wav"])
                     initial_report = deepcopy(reverse_report)
-                    initial_report["candidate_audio_path"] = str(
-                        paths["initial_candidate_wav"]
-                    )
+                    initial_report["candidate_audio_path"] = str(paths["initial_candidate_wav"])
                     initial_report["fallback_action"] = (
                         "downgrade_attributable_failures_and_revalidate"
                     )
@@ -2628,9 +2691,7 @@ def run_review_document(
                     )
                     cut_plan = downgrade_reverse_asr_failures(cut_plan, unresolved_ids)
                     downgraded_item_ids = list(
-                        (cut_plan.get("reverse_asr_fallback") or {}).get(
-                            "downgraded_item_ids"
-                        )
+                        (cut_plan.get("reverse_asr_fallback") or {}).get("downgraded_item_ids")
                         or []
                     )
                     continue
@@ -2705,6 +2766,7 @@ def run_review_document(
                 "reverse_asr_attempt_count": reverse_attempt_count,
                 "reverse_asr_downgraded_item_ids": list(downgraded_item_ids),
                 "unresolved_item_ids": list(cut_plan.get("unresolved_item_ids") or []),
+                "execution_summary": _audio_execution_summary(cut_plan),
             }
             atomic_write_json(paths["processed_summary"], summary)
             artifacts.extend(
@@ -2766,7 +2828,9 @@ def run_review_document(
             draft_path_text = str(execution_payload.get("draft_path") or "")
             draft_path = Path(draft_path_text).expanduser().resolve(strict=True)
             if not draft_path.is_dir():
-                raise FileNotFoundError(f"Low-level revision did not save a draft directory: {draft_path}")
+                raise FileNotFoundError(
+                    f"Low-level revision did not save a draft directory: {draft_path}"
+                )
             execution_draft_name = str(execution_payload.get("draft_name") or "").strip()
             if execution_draft_name != draft_path.name:
                 raise ValueError(
@@ -2784,9 +2848,7 @@ def run_review_document(
                     "draft_path": str(draft_path),
                     "draft_tree_sha256": draft_digest,
                     "review_marker_count": execution_payload.get("review_marker_count"),
-                    "unresolved_item_ids": execution_payload.get(
-                        "label_only_unresolved_item_ids"
-                    )
+                    "unresolved_item_ids": execution_payload.get("label_only_unresolved_item_ids")
                     or [],
                 },
                 result={"draft_path": str(draft_path), "draft_tree_sha256": draft_digest},
@@ -2798,8 +2860,8 @@ def run_review_document(
             execution = _read_json_object(paths["execution_result"], "revision result")
             ledger = _read_json_object(paths["processed_items"], "processed source ledger")
             _validate_marker_receipts(execution, ledger)
-            draft_path = Path(str(execution.get("draft_path") or "")).expanduser().resolve(
-                strict=True
+            draft_path = (
+                Path(str(execution.get("draft_path") or "")).expanduser().resolve(strict=True)
             )
             execution_draft_name = str(execution.get("draft_name") or "").strip()
             if execution_draft_name != draft_path.name:
@@ -2850,6 +2912,7 @@ def run_review_document(
                 "status": "pass",
                 "workflow_mode": "lite",
                 "completion_boundary": "lite_zip_delivery",
+                "acceptance_scope": "draft_structure_and_package_delivery",
                 "draft_path": str(draft_path),
                 "draft_tree_sha256": draft_digest,
                 "strict_draft_validation": True,
@@ -2857,6 +2920,16 @@ def run_review_document(
                 "name_resolution": name_resolution,
                 "delivery": package_result,
                 "unresolved_item_ids": execution.get("label_only_unresolved_item_ids") or [],
+                "execution_summary": _audio_execution_summary(
+                    _read_json_object(
+                        paths["processed_cut_plan"],
+                        "processed audio cut plan",
+                    ),
+                    additional_label_only_unresolved_ids=[
+                        str(value)
+                        for value in execution.get("label_only_unresolved_item_ids") or []
+                    ],
+                ),
             }
             atomic_write_json(paths["final_result"], final)
             receipt_path = Path(str(package_result["receipt_path"])).resolve(strict=True)

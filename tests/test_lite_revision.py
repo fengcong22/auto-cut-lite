@@ -116,9 +116,12 @@ class LiteRevisionTests(unittest.TestCase):
                 path,
             )
 
-        with tempfile.TemporaryDirectory() as drafts_root, patch(
-            "utils.lite_revision._make_video_material",
-            side_effect=shorter_video,
+        with (
+            tempfile.TemporaryDirectory() as drafts_root,
+            patch(
+                "utils.lite_revision._make_video_material",
+                side_effect=shorter_video,
+            ),
         ):
             result = execute_revision_request(
                 request,
@@ -550,12 +553,62 @@ class LiteRevisionTests(unittest.TestCase):
         self.assertEqual(pause["timebase"]["status"], "pending_asr")
         self.assertEqual(animation["start"], 432.0)
         self.assertNotIn("end", animation)
+        self.assertEqual(animation["evidence"]["original_time"], 434.0)
+        self.assertEqual(animation["evidence"]["target_time"], 432.0)
+        self.assertEqual(
+            animation["evidence"]["review_timestamp_parse"],
+            "target_after_cue",
+        )
         self.assertEqual(animation["timebase"]["status"], "resolved_point")
         self.assertEqual(
             animation["evidence"]["review_timestamp_role"],
             "authoritative_non_speech",
         )
         self.assertNotIn("animation-1", payload["unresolved_timebase_item_ids"])
+
+    def test_lite_visual_object_wording_never_routes_picture_labels_to_asr(self):
+        rows = [
+            {
+                "id": "move-red-circle",
+                "source_text": "02:23，‘蜀’上的红圈，提前到02:22",
+            },
+            {
+                "id": "delete-red-circle",
+                "source_text": "02:17，删除‘蜀’上的红圈",
+            },
+            {
+                "id": "delete-circle-text",
+                "source_text": "03:10，删除圈中文字",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {"review_items": rows},
+                {
+                    "draft_name": "VisualObjectLabels",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                items = {item["id"]: item for item in json.load(source_file)["review_items"]}
+
+        move = items["move-red-circle"]
+        self.assertEqual(move["kind"], "animation_timing")
+        self.assertFalse(move["execution_required"])
+        self.assertEqual(move["start"], 142.0)
+        self.assertEqual(move["evidence"]["original_time"], 143.0)
+        self.assertEqual(move["evidence"]["target_time"], 142.0)
+        for item_id, expected_start in (
+            ("delete-red-circle", 137.0),
+            ("delete-circle-text", 190.0),
+        ):
+            item = items[item_id]
+            self.assertEqual(item["kind"], "visual_delete")
+            self.assertFalse(item["execution_required"])
+            self.assertEqual(item["start"], expected_start)
+            self.assertEqual(item["evidence"]["timing_source"], "review_timestamp")
 
     def test_lite_audio_marker_requires_asr_instead_of_zero_or_review_time(self):
         request = _load_request(
@@ -606,9 +659,7 @@ class LiteRevisionTests(unittest.TestCase):
                                 "adapter_version": "1",
                                 "granularity": "word",
                                 "input_sha256": "a" * 64,
-                                "matches": [
-                                    {"text": "停顿", "start": 109.375, "end": 109.625}
-                                ],
+                                "matches": [{"text": "停顿", "start": 109.375, "end": 109.625}],
                                 "resolved_time": 109.375,
                             },
                         },
@@ -814,10 +865,7 @@ class LiteRevisionTests(unittest.TestCase):
                 output_dir,
             )
             with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
-                items = {
-                    item["id"]: item
-                    for item in json.load(source_file)["review_items"]
-                }
+                items = {item["id"]: item for item in json.load(source_file)["review_items"]}
 
         self.assertEqual(
             items["compiled-nested"]["execution_status"],
@@ -1794,9 +1842,7 @@ class LiteRevisionTests(unittest.TestCase):
         clean_content = json.loads(json.dumps(content))
         source_segment = _track(content, LITE_TRACKS["original_video"])["segments"][0]
         source_material_id = source_segment["material_id"]
-        hold = json.loads(
-            json.dumps(source_segment)
-        )
+        hold = json.loads(json.dumps(source_segment))
         hold["id"] = "forged-semantic-pause-hold"
         hold["target_timerange"] = {"start": 5_000_000, "duration": 1_000_000}
         hold["source_timerange"] = {"start": 0, "duration": 1_000_000}
@@ -1843,9 +1889,9 @@ class LiteRevisionTests(unittest.TestCase):
         forged_material["material_id"] = "forged-unreceipted-hold-material"
         forged_material["path"] = "C:/media/pause-frame.png"
         forged_content["materials"]["videos"].append(forged_material)
-        _track(forged_content, LITE_TRACKS["original_video"])["segments"][0][
-            "material_id"
-        ] = forged_material["id"]
+        _track(forged_content, LITE_TRACKS["original_video"])["segments"][0]["material_id"] = (
+            forged_material["id"]
+        )
         forged_validation = _validate_lite_content(
             forged_content,
             total_duration=10.0,
@@ -1876,9 +1922,7 @@ class LiteRevisionTests(unittest.TestCase):
             "start": 2_000_000,
             "duration": 1_000_000,
         }
-        _track(forged_v2_content, LITE_TRACKS["cut_segments"])["segments"].append(
-            forged_v2_segment
-        )
+        _track(forged_v2_content, LITE_TRACKS["cut_segments"])["segments"].append(forged_v2_segment)
         forged_v2_validation = _validate_lite_content(
             forged_v2_content,
             total_duration=10.0,
@@ -1980,9 +2024,7 @@ class LiteRevisionTests(unittest.TestCase):
                                 "adapter_version": "1",
                                 "granularity": "word",
                                 "input_sha256": "d" * 64,
-                                "matches": [
-                                    {"text": "发音", "start": 6.25, "end": 6.45}
-                                ],
+                                "matches": [{"text": "发音", "start": 6.25, "end": 6.45}],
                                 "resolved_time": 6.25,
                             },
                         },
@@ -2154,9 +2196,7 @@ class LiteRevisionTests(unittest.TestCase):
             if material["id"] == marker_segment["material_id"]
         )
         assert json.loads(text_material["content"])["text"] == source_text
-        assert result["review_marker_receipts"][0]["execution_status"] == (
-            "label_only_unresolved"
-        )
+        assert result["review_marker_receipts"][0]["execution_status"] == ("label_only_unresolved")
 
     def test_lite_acceptance_downgrades_stale_doc_item_execution_status(self):
         """A stale external doc item cannot promote a marker-only issue to execution."""
@@ -2197,9 +2237,7 @@ class LiteRevisionTests(unittest.TestCase):
 
     def test_lite_rejects_asr_window_that_is_wider_than_authoritative_matches(self):
         edit = _spoken_delete_edit("wide-window", 0.0, 4.0)
-        edit["evidence"]["asr_alignment"]["words"] = [
-            {"text": "actual", "start": 2.0, "end": 3.0}
-        ]
+        edit["evidence"]["asr_alignment"]["words"] = [{"text": "actual", "start": 2.0, "end": 3.0}]
         request = _load_request(
             {
                 "workflow_mode": "lite",
@@ -2488,6 +2526,7 @@ class LiteRevisionTests(unittest.TestCase):
                 },
                 "audio_delivery_plan": {
                     "mode": "segmented",
+                    "lite_a2_audible": True,
                     "forbid_full_length_segments": True,
                     "segments": [
                         {
@@ -2543,9 +2582,7 @@ class LiteRevisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "independent clip per merged ASR delete"):
                 execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
             self.assertFalse(
-                os.path.exists(
-                    os.path.join(drafts_root, "LiteInvalidFullA2", "draft_content.json")
-                )
+                os.path.exists(os.path.join(drafts_root, "LiteInvalidFullA2", "draft_content.json"))
             )
 
     def test_lite_unresolved_timebase_rejects_stale_segmented_cut_plan(self):
@@ -2562,6 +2599,7 @@ class LiteRevisionTests(unittest.TestCase):
                 },
                 "audio_delivery_plan": {
                     "mode": "segmented",
+                    "lite_a2_audible": True,
                     "segments": [
                         {
                             "id": "a1-001",
@@ -2653,6 +2691,7 @@ class LiteRevisionTests(unittest.TestCase):
                 },
                 "audio_delivery_plan": {
                     "mode": "segmented",
+                    "lite_a2_audible": True,
                     "forbid_full_length_segments": True,
                     "segments": [
                         {
@@ -2710,9 +2749,7 @@ class LiteRevisionTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "unexpected track.*Lite Source Audio"):
                 execute_revision_request(request, drafts_root=drafts_root, mock_media=True)
             self.assertFalse(
-                os.path.exists(
-                    os.path.join(drafts_root, "LiteLegacyA1", "draft_content.json")
-                )
+                os.path.exists(os.path.join(drafts_root, "LiteLegacyA1", "draft_content.json"))
             )
 
     def test_lite_reuses_one_material_for_repeated_pointer_png(self):
@@ -2962,7 +2999,10 @@ class LiteRevisionTests(unittest.TestCase):
             with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
                 item = json.load(source_file)["review_items"][0]
 
-        self.assertEqual(item["kind"], "colored_span_delete")
+        self.assertEqual(_classify_review_text(source_text), "review_only")
+        self.assertEqual(item["kind"], "review_only")
+        self.assertFalse(item["execution_required"])
+        self.assertEqual(item["execution_status"], "label_only_unresolved")
         self.assertEqual(item["evidence"]["colored_spans"], [])
         self.assertEqual(item["evidence"]["colored_span_status"], "missing_markup")
 
@@ -3069,9 +3109,7 @@ class LiteRevisionTests(unittest.TestCase):
         ):
             with self.subTest(kind=kind):
                 self.assertFalse(lite_execution_required(kind, source_text, True))
-        self.assertTrue(
-            lite_execution_required("spoken_delete", "00:05 删除“重复词”", True)
-        )
+        self.assertTrue(lite_execution_required("spoken_delete", "00:05 删除“重复词”", True))
 
     def test_lite_pointer_removal_is_label_only_unless_readded(self):
         for source_text in (
@@ -3085,9 +3123,7 @@ class LiteRevisionTests(unittest.TestCase):
             "00:12 删除小手，再添加动画",
         ):
             with self.subTest(source_text=source_text):
-                self.assertFalse(
-                    lite_execution_required("pointer_overlay", source_text, True)
-                )
+                self.assertFalse(lite_execution_required("pointer_overlay", source_text, True))
 
         for source_text in (
             "00:13 删除原小手并重新添加",
@@ -3096,9 +3132,7 @@ class LiteRevisionTests(unittest.TestCase):
             "00:16 移除后再加一个",
         ):
             with self.subTest(source_text=source_text):
-                self.assertTrue(
-                    lite_execution_required("pointer_overlay", source_text, True)
-                )
+                self.assertTrue(lite_execution_required("pointer_overlay", source_text, True))
 
 
 if __name__ == "__main__":

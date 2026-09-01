@@ -185,6 +185,18 @@ _POINTER_KEYWORDS = (
     "arrow",
     "underline",
 )
+_VISUAL_OBJECT_KEYWORDS = (
+    "红圈",
+    "绿圈",
+    "红框",
+    "绿框",
+    "圈中文字",
+    "圈中的文字",
+    "圈内文字",
+    "框中文字",
+    "框中的文字",
+    "框内文字",
+)
 _ANIMATION_KEYWORDS = (
     "动画",
     "翻页",
@@ -198,7 +210,7 @@ _ANIMATION_KEYWORDS = (
 )
 _ANIMATION_ACTION_KEYWORDS = ("提前", "推迟", "延后", "加快", "变速", "挪", "移到", "改到", "调到")
 _DELETE_KEYWORDS = ("删除", "删掉", "剪掉", "去掉", "移除")
-_COLORED_DELETE_KEYWORDS = (
+_COLORED_TEXT_REFERENCE_KEYWORDS = (
     "蓝色字",
     "蓝字",
     "红色字",
@@ -738,10 +750,18 @@ def _classify_review_text(text: str) -> str:
     normalized = str(text or "")
     if _contains_any(normalized, _POINTER_KEYWORDS):
         return "pointer_overlay"
+    if _contains_any(normalized, _VISUAL_OBJECT_KEYWORDS) and _contains_any(
+        normalized, _ANIMATION_ACTION_KEYWORDS
+    ):
+        return "animation_timing"
     if _contains_any(normalized, _ANIMATION_KEYWORDS) and _contains_any(
         normalized, _ANIMATION_ACTION_KEYWORDS
     ):
         return "animation_timing"
+    if _contains_any(normalized, _VISUAL_OBJECT_KEYWORDS) and _contains_any(
+        normalized, _DELETE_KEYWORDS
+    ):
+        return "visual_delete"
     if (
         "中间" in normalized
         and _contains_any(normalized, ("停顿", "空白", "间隔"))
@@ -756,8 +776,12 @@ def _classify_review_text(text: str) -> str:
     # “删除”.  A timestamp plus quoted speech is an executable spoken edit,
     # not a marker-only note.  Ellipses mean the full spoken range between the
     # two anchors, while a quoted phrase without ellipsis is a phrase delete.
-    if _contains_any(normalized, _COLORED_DELETE_KEYWORDS):
-        return "colored_span_delete"
+    # A plain-text reference to "blue/red text" does not prove whether the
+    # reviewer means spoken words or text visible in the picture.  The review
+    # compiler promotes this only when the Feishu rich-text runs carry the
+    # actual review color.
+    if _contains_any(normalized, _COLORED_TEXT_REFERENCE_KEYWORDS):
+        return "review_only"
     if _contains_any(normalized, _ELLIPSIS_MARKERS) and _has_quoted_review_text(normalized):
         return "ellipsis_range_delete"
     if _has_quoted_review_text(normalized) and _has_review_time_hint(normalized):
@@ -1433,9 +1457,7 @@ def build_revision_summary(
             "label_only_count": (
                 len(request.pause_adjustments) if request.workflow_mode == "lite" else 0
             ),
-            "requested_total_duration": sum(
-                item.duration for item in request.pause_adjustments
-            ),
+            "requested_total_duration": sum(item.duration for item in request.pause_adjustments),
             "item_ids": [item.item_id for item in request.pause_adjustments],
         },
         "pause_alignment": {

@@ -444,18 +444,19 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertEqual(second["name_resolution"]["final_name"], "RunnerDraft")
             self.assertEqual(second["name_resolution"]["source"], "document_title")
             self.assertEqual(second["execution_input_digest"], "")
-            self.assertFalse(
-                (job / "workspace" / "inputs" / "execution-input.json").exists()
-            )
+            self.assertFalse((job / "workspace" / "inputs" / "execution-input.json").exists())
 
             replacement_input = root / "replacement-input.json"
             _write_json(
                 replacement_input,
                 {"schema_version": 1, "artifact_name": "A New Name"},
             )
-            with self._patched_runtime(), patch(
-                "utils.runtime_integrity.validate_current_lite_runtime",
-                side_effect=RuntimeError("forced preflight failure"),
+            with (
+                self._patched_runtime(),
+                patch(
+                    "utils.runtime_integrity.validate_current_lite_runtime",
+                    side_effect=RuntimeError("forced preflight failure"),
+                ),
             ):
                 with self.assertRaises(runner.ReviewDocumentRunError) as raised:
                     self._run(
@@ -508,11 +509,14 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             def extract_editable_audio(_source, output, **_kwargs):
                 _write_wav(Path(output))
 
-            with self._patched_runtime() as mocks, patch.object(
-                runner,
-                "_extract_editable_source_audio",
-                side_effect=extract_editable_audio,
-            ) as editable_extractor:
+            with (
+                self._patched_runtime() as mocks,
+                patch.object(
+                    runner,
+                    "_extract_editable_source_audio",
+                    side_effect=extract_editable_audio,
+                ) as editable_extractor,
+            ):
                 first = self._run(
                     snapshot,
                     project,
@@ -657,9 +661,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 for row in report["rows"]:
                     row["status"] = "pass"
                     row["delete_hits"] = []
-                    row["keep_hits"] = {
-                        phrase: True for phrase in row.get("must_keep") or []
-                    }
+                    row["keep_hits"] = {phrase: True for phrase in row.get("must_keep") or []}
                     row["semantic_join_validation"] = {
                         "status": "pass",
                         "method": "test",
@@ -708,16 +710,10 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             )
             rows = {row["item_id"]: row for row in cut_plan["rows"]}
             self.assertFalse(rows["spoken-1"]["execution_required"])
-            self.assertEqual(
-                rows["spoken-1"]["execution_status"], "label_only_unresolved"
-            )
-            self.assertFalse(
-                rows["spoken-1"]["asr_alignment"]["authoritative_cut_boundary"]
-            )
+            self.assertEqual(rows["spoken-1"]["execution_status"], "label_only_unresolved")
+            self.assertFalse(rows["spoken-1"]["asr_alignment"]["authoritative_cut_boundary"])
             self.assertTrue(rows["spoken-2"]["execution_required"])
-            self.assertEqual(
-                [row["item_id"] for row in cut_plan["executable_cuts"]], ["spoken-2"]
-            )
+            self.assertEqual([row["item_id"] for row in cut_plan["executable_cuts"]], ["spoken-2"])
             processed_request = json.loads(
                 Path(result["output_artifacts"]["revision_request"]["path"]).read_text(
                     encoding="utf-8"
@@ -727,18 +723,49 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 [edit["doc_item_id"] for edit in processed_request["edits"]], ["spoken-2"]
             )
             summary = json.loads(
-                Path(
-                    result["output_artifacts"]["processed_media_evidence"]["path"]
-                ).read_text(encoding="utf-8")
+                Path(result["output_artifacts"]["processed_media_evidence"]["path"]).read_text(
+                    encoding="utf-8"
+                )
             )
             self.assertEqual(summary["reverse_asr_status"], "pass")
             self.assertEqual(summary["reverse_asr_attempt_count"], 2)
-            self.assertEqual(
-                summary["reverse_asr_downgraded_item_ids"], ["spoken-1"]
-            )
+            self.assertEqual(summary["reverse_asr_downgraded_item_ids"], ["spoken-1"])
             self.assertIn("spoken-1", result["unresolved_item_ids"])
+            self.assertEqual(
+                summary["execution_summary"]["actual_audio_cut_item_ids"],
+                ["spoken-2"],
+            )
+            self.assertEqual(
+                summary["execution_summary"]["label_only_unresolved_item_ids"],
+                ["spoken-1"],
+            )
+            self.assertFalse(summary["execution_summary"]["all_requested_audio_deletions_executed"])
+            self.assertEqual(
+                result["execution_summary"]["status"],
+                "complete_with_label_only_unresolved",
+            )
+            self.assertEqual(
+                result["acceptance_scope"],
+                "draft_structure_and_package_delivery",
+            )
+            final_acceptance = json.loads(
+                Path(result["output_artifacts"]["final_acceptance"]["path"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(final_acceptance["status"], "pass")
+            self.assertEqual(
+                final_acceptance["execution_summary"]["status"],
+                "complete_with_label_only_unresolved",
+            )
+            self.assertEqual(
+                final_acceptance["execution_summary"]["unexecuted_audio_deletion_item_ids"],
+                ["spoken-1"],
+            )
             self.assertTrue(
-                (root / "job" / "workspace" / "processed" / "reverse_asr_initial_report.json").is_file()
+                (
+                    root / "job" / "workspace" / "processed" / "reverse_asr_initial_report.json"
+                ).is_file()
             )
 
     def test_lark_block_ids_remain_unique_in_internal_marker_receipts(self):
@@ -790,9 +817,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     encoding="utf-8"
                 )
             )
-            receipt_ids = [
-                row["item_id"] for row in execution["review_marker_receipts"]
-            ]
+            receipt_ids = [row["item_id"] for row in execution["review_marker_receipts"]]
             self.assertEqual(receipt_ids, block_ids)
             self.assertEqual(len(set(receipt_ids)), len(block_ids))
             runner._validate_marker_receipts(
@@ -1143,9 +1168,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertEqual(mocks["render"].call_count, 1)
             self.assertEqual(mocks["execute"].call_count, 2)
             self.assertEqual(reverse_apply.call_count, 2)
-            receipt = json.loads(
-                (job / "reverse_asr.receipt.json").read_text(encoding="utf-8")
-            )
+            receipt = json.loads((job / "reverse_asr.receipt.json").read_text(encoding="utf-8"))
             self.assertEqual(receipt["schema_version"], 2)
 
     def test_lite_pause_language_and_nested_status_compile_strictly_label_only(self):
@@ -1243,9 +1266,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertEqual(item["execution_status"], "label_only_lite_policy")
             self.assertEqual(item["start"], 1.0)
             self.assertEqual(item["evidence"]["resolved_time"], 1.0)
-            self.assertEqual(
-                item["evidence"]["timing_source"], "review_timestamp_fallback"
-            )
+            self.assertEqual(item["evidence"]["timing_source"], "review_timestamp_fallback")
             self.assertNotIn("asr_alignment", item["evidence"])
             self.assertEqual(processed.get("pause_adjustments") or [], [])
             self.assertEqual(processed.get("edits") or [], [])
@@ -1280,11 +1301,11 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
 
             self.assertTrue(second["ok"])
             self.assertEqual(second["phases"]["source_asr"]["status"], "complete")
-            self.assertEqual(
-                second["phases"]["classification"]["status"], "resumed"
-            )
+            self.assertEqual(second["phases"]["classification"]["status"], "resumed")
             self.assertEqual(mocks["asr"].call_count, 2)
-            self.assertEqual(json.loads(source_asr.read_text(encoding="utf-8"))["provider"], "volc_asr")
+            self.assertEqual(
+                json.loads(source_asr.read_text(encoding="utf-8"))["provider"], "volc_asr"
+            )
 
     def test_corrupt_final_zip_is_not_treated_as_resumable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1356,9 +1377,10 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             def normalize(source, output, **_kwargs):
                 runner.atomic_copy_file(source, output)
 
-            with self._patched_runtime() as mocks, patch.object(
-                runner, "_normalize_webm", side_effect=normalize
-            ) as normalizer:
+            with (
+                self._patched_runtime() as mocks,
+                patch.object(runner, "_normalize_webm", side_effect=normalize) as normalizer,
+            ):
                 first = self._run(
                     snapshot,
                     project,
@@ -1409,9 +1431,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 row = [str(value) for value in command]
                 self.commands.append(row)
                 if row[-1:] == ["--version"]:
-                    return subprocess.CompletedProcess(
-                        row, 0, "lark-cli version 1.2.3\n", ""
-                    )
+                    return subprocess.CompletedProcess(row, 0, "lark-cli version 1.2.3\n", "")
                 if row[1:] == ["whoami"]:
                     payload = {
                         "available": True,
@@ -1523,9 +1543,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 9, "", "private failure")
 
             job = root / "job"
-            with self._patched_runtime(), self.assertRaises(
-                runner.ReviewDocumentRunError
-            ):
+            with self._patched_runtime(), self.assertRaises(runner.ReviewDocumentRunError):
                 runner.run_review_document(
                     doc_url="https://example.feishu.cn/wiki/failure_private_token",
                     job_root=job,
@@ -1718,8 +1736,12 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                             return_value={"available": True, "identity": "user"},
                         )
                     )
-                    stack.enter_context(patch.object(runner, "fetch_lark_document", return_value={}))
-                    stack.enter_context(patch.object(runner, "parse_lark_document", return_value=parsed))
+                    stack.enter_context(
+                        patch.object(runner, "fetch_lark_document", return_value={})
+                    )
+                    stack.enter_context(
+                        patch.object(runner, "parse_lark_document", return_value=parsed)
+                    )
                     if failed_phase == "asset_download":
                         stack.enter_context(
                             patch.object(

@@ -38,13 +38,13 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v4"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v5"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
 CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v2"
 REVERSE_ASR_DIAGNOSTIC_PURPOSE = "reverse_asr_diagnostic_only"
-REVERSE_REPORT_VERSION = "lite-reverse-report-v2"
+REVERSE_REPORT_VERSION = "lite-reverse-report-v3"
 ASR_REQUEST_OPTIONS = {
     "enable_ddc": True,
     "enable_itn": True,
@@ -78,9 +78,7 @@ _TIMECODE_RANGE = re.compile(
     r"(?P<end_minutes>\d{1,3})\s*[:：]\s*"
     r"(?P<end_seconds>\d{1,2}(?:\.\d+)?)"
 )
-_TIMECODE_POINT = re.compile(
-    r"^\s*(?P<minutes>\d{1,3})\s*[:：]\s*(?P<seconds>\d{1,2}(?:\.\d+)?)"
-)
+_TIMECODE_POINT = re.compile(r"^\s*(?P<minutes>\d{1,3})\s*[:：]\s*(?P<seconds>\d{1,2}(?:\.\d+)?)")
 _DELETE_PREFIX = re.compile(
     r"^\s*(?:请|需要|把|将|这里|此处|这一段|这段|这句|这个)?\s*"
     r"(?:删除|删掉|删去|去掉|移除|剪掉|cut|delete|remove)\s*[:：,，]?\s*",
@@ -109,9 +107,24 @@ _ASR_EQUIVALENT_CHARACTERS = {
     "牠": "他",
     # The proper noun 撒丁 is routinely returned as 萨丁 by review authors.
     "萨": "撒",
+    # Review notes commonly use Chinese single-digit numerals while ASR ITN
+    # emits Arabic digits. Candidate selection is still constrained to the
+    # nearby review-time window and must remain unique.
+    "零": "0",
+    "〇": "0",
+    "一": "1",
+    "二": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
 }
 _OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
 _OPTIONAL_REVIEW_TAILS = frozenset({"对吧"})
+_REVERSE_ASR_WORD_DRIFT_SECONDS = 0.35
 
 
 def canonical_json_sha256(payload: Any) -> str:
@@ -306,9 +319,10 @@ def _normalize_windows(
     for current in result:
         if normalized and current["start"] < normalized[-1]["end"] - 1e-6:
             previous = normalized[-1]
-            if str(previous.get("item_id") or "").casefold() == str(
-                current.get("item_id") or ""
-            ).casefold():
+            if (
+                str(previous.get("item_id") or "").casefold()
+                == str(current.get("item_id") or "").casefold()
+            ):
                 previous["end"] = max(previous["end"], current["end"])
                 continue
             raise ValueError(
@@ -389,9 +403,7 @@ def render_source_aligned_candidate(
         "source_duration_seconds": source_duration,
         "candidate_duration_seconds": candidate_duration,
         "source_aligned": True,
-        "duration_matches_source": _wav_duration_matches_media_duration(
-            output_path, duration
-        ),
+        "duration_matches_source": _wav_duration_matches_media_duration(output_path, duration),
         "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "delivery_eligible": False,
@@ -440,12 +452,8 @@ def _review_text_window(value: Any) -> tuple[float | None, float | None]:
     match = _TIMECODE_RANGE.match(str(value or ""))
     if match is None:
         return None, None
-    start = float(match.group("start_minutes")) * 60.0 + float(
-        match.group("start_seconds")
-    )
-    end = float(match.group("end_minutes")) * 60.0 + float(
-        match.group("end_seconds")
-    )
+    start = float(match.group("start_minutes")) * 60.0 + float(match.group("start_seconds"))
+    end = float(match.group("end_minutes")) * 60.0 + float(match.group("end_seconds"))
     if not math.isfinite(start) or not math.isfinite(end) or end <= start:
         return None, None
     return start, end
@@ -467,8 +475,8 @@ def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
         start = evidence.get("review_search_hint_seconds")
     text_start, text_end = _review_text_window(item.get("source_text"))
     if start is None:
-        start = text_start if text_start is not None else _review_text_point(
-            item.get("source_text")
+        start = (
+            text_start if text_start is not None else _review_text_point(item.get("source_text"))
         )
     if end is None and text_end is not None:
         try:
@@ -566,10 +574,7 @@ def _is_contiguous_word_span(
             return False
         if not math.isfinite(start) or not math.isfinite(end) or end <= start:
             return False
-        if (
-            previous_end is not None
-            and start - previous_end > _ASR_CONTIGUOUS_WORD_GAP_SECONDS
-        ):
+        if previous_end is not None and start - previous_end > _ASR_CONTIGUOUS_WORD_GAP_SECONDS:
             return False
         previous_end = end
     return True
@@ -619,8 +624,7 @@ def _normalized_exact_phrase_matches(
             and _is_contiguous_word_span(words, start_word_index, end_word_index)
         ):
             selected_text = "".join(
-                str(word.get("text") or "")
-                for word in words[start_word_index : end_word_index + 1]
+                str(word.get("text") or "") for word in words[start_word_index : end_word_index + 1]
             )
             match_method = "exact_phrase"
             match_evidence: dict[str, Any] = {}
@@ -658,6 +662,59 @@ def _normalized_exact_phrase_matches(
     return matches
 
 
+def _terminal_character_omission_matches(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    *,
+    anchor_start: float | None,
+    anchor_end: float | None,
+) -> list[dict[str, Any]]:
+    """Match an ellipsis anchor whose final review character is absent in ASR."""
+
+    target, target_sources = _normalized_text_with_sources(phrase)
+    if len(target) < 3 or len(target_sources) != len(target):
+        return []
+    shortened_phrase = "".join(target_sources[:-1])
+    matches = _normalized_exact_phrase_matches(
+        words,
+        shortened_phrase,
+        anchor_start=anchor_start,
+        anchor_end=anchor_end,
+    )
+    result: list[dict[str, Any]] = []
+    for raw_match in matches:
+        match = dict(raw_match)
+        candidate = _normalized_text(match.get("text"))
+        match.update(
+            {
+                "phrase": phrase,
+                "match_method": "ellipsis_terminal_character_omission",
+                "edit_distance": 1,
+                "text_similarity": round(
+                    SequenceMatcher(a=target, b=candidate, autojunk=False).ratio(),
+                    6,
+                ),
+                "keyword_coverage": round((len(target) - 1) / len(target), 6),
+                "matched_keyword_characters": len(target) - 1,
+                "omitted_review_text": target_sources[-1],
+                "extra_asr_text": "",
+            }
+        )
+        result.append(match)
+    return result
+
+
+def _is_safe_stutter_insertion(target: str, inserted: str, target_index: int) -> bool:
+    if not inserted or len(inserted) > 2 or len(set(inserted)) != 1:
+        return False
+    neighbors = set()
+    if target_index > 0:
+        neighbors.add(target[target_index - 1])
+    if target_index < len(target):
+        neighbors.add(target[target_index])
+    return inserted[0] in neighbors
+
+
 def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     if len(target) < 5 or len(candidate) < 4:
         return None
@@ -683,9 +740,7 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
             omitted_review_parts.append(removed)
             omitted_review_ranges.append([target_start, target_end])
             distance += len(removed)
-            optional_tail = (
-                target_end == len(target) and removed in _OPTIONAL_REVIEW_TAILS
-            )
+            optional_tail = target_end == len(target) and removed in _OPTIONAL_REVIEW_TAILS
             non_fillers = (
                 []
                 if optional_tail
@@ -699,7 +754,13 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
             inserted = candidate[candidate_start:candidate_end]
             extra_asr_parts.append(inserted)
             distance += len(inserted)
-            if any(char not in _OPTIONAL_SPEECH_FILLERS for char in inserted):
+            filler_insertion = all(char in _OPTIONAL_SPEECH_FILLERS for char in inserted)
+            stutter_insertion = _is_safe_stutter_insertion(
+                target,
+                inserted,
+                target_start,
+            )
+            if not filler_insertion and not stutter_insertion:
                 return None
             optional_difference_characters += len(inserted)
             if candidate_start == 0 or candidate_end == len(candidate):
@@ -723,9 +784,7 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     method = "conservative_fuzzy_phrase"
     if edge_target_omissions:
         method = "time_anchored_partial_phrase"
-    elif generic_target_omissions > 1 or (
-        generic_target_omissions and len(target) < 12
-    ):
+    elif generic_target_omissions > 1 or (generic_target_omissions and len(target) < 12):
         method = "time_anchored_fuzzy_phrase"
     return {
         "edit_distance": distance,
@@ -765,9 +824,8 @@ def _conservative_fuzzy_phrase_matches(
             continue
         candidate_parts: list[str] = []
         for end_index in range(start_index, len(words)):
-            if (
-                end_index > start_index
-                and not _is_contiguous_word_span(words, end_index - 1, end_index)
+            if end_index > start_index and not _is_contiguous_word_span(
+                words, end_index - 1, end_index
             ):
                 break
             candidate_parts.append(normalized_words[end_index])
@@ -788,8 +846,7 @@ def _conservative_fuzzy_phrase_matches(
                 continue
             omitted_ranges = fuzzy_evidence.pop("omitted_review_ranges", [])
             fuzzy_evidence["omitted_review_text"] = "".join(
-                "".join(target_sources[start:end])
-                for start, end in omitted_ranges
+                "".join(target_sources[start:end]) for start, end in omitted_ranges
             )
             seen.add(identity)
             matches.append(
@@ -824,9 +881,7 @@ def _conservative_fuzzy_phrase_matches(
             selected_end = int(selected["word_end_index"])
             overlap = max(
                 0,
-                min(candidate_end, selected_end)
-                - max(candidate_start, selected_start)
-                + 1,
+                min(candidate_end, selected_end) - max(candidate_start, selected_start) + 1,
             )
             selected_length = selected_end - selected_start + 1
             if overlap / min(candidate_length, selected_length) >= 0.8:
@@ -846,6 +901,7 @@ def _find_phrase_matches(
     *,
     anchor_start: float | None = None,
     anchor_end: float | None = None,
+    allow_terminal_character_omission: bool = False,
 ) -> list[dict[str, Any]]:
     exact = _normalized_exact_phrase_matches(
         words,
@@ -855,6 +911,15 @@ def _find_phrase_matches(
     )
     if exact:
         return exact
+    if allow_terminal_character_omission:
+        terminal_omission = _terminal_character_omission_matches(
+            words,
+            phrase,
+            anchor_start=anchor_start,
+            anchor_end=anchor_end,
+        )
+        if terminal_omission:
+            return terminal_omission
     return _conservative_fuzzy_phrase_matches(
         words,
         phrase,
@@ -867,6 +932,7 @@ def _review_timestamp(item: Mapping[str, Any]) -> float | None:
     evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
     text_time = _review_text_point(item.get("source_text"))
     for candidate in (
+        evidence.get("target_time"),
         evidence.get("review_search_hint_seconds"),
         evidence.get("resolved_review_timestamp_seconds"),
         text_time,
@@ -1015,7 +1081,9 @@ def _unique_nearest_match(
     return ordered[0], f"{method}_nearest_anchor"
 
 
-def _nearest_word(words: Sequence[Mapping[str, Any]], anchor: float | None) -> dict[str, Any] | None:
+def _nearest_word(
+    words: Sequence[Mapping[str, Any]], anchor: float | None
+) -> dict[str, Any] | None:
     candidates = [
         dict(word)
         for word in words
@@ -1190,6 +1258,7 @@ def resolve_lite_audio_items(
         selected_matches: list[dict[str, Any]] = []
         span_match_rows: list[dict[str, Any]] = []
         match_method = ""
+        review_label_time = _review_timestamp(item)
 
         if delete_phrase and executable_kind and not unresolved_timebase:
             if colored_span_mode:
@@ -1255,19 +1324,23 @@ def resolve_lite_audio_items(
                     selected = selected_matches[0]
                     match_method = "colored_spans_anchor"
             else:
-                anchor_parts = [part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()]
+                anchor_parts = [
+                    part.strip() for part in _ELLIPSIS.split(delete_phrase) if part.strip()
+                ]
                 if len(anchor_parts) >= 2:
                     first_matches = _find_phrase_matches(
                         words,
                         anchor_parts[0],
                         anchor_start=rough_start,
                         anchor_end=rough_end,
+                        allow_terminal_character_omission=True,
                     )
                     last_matches = _find_phrase_matches(
                         words,
                         anchor_parts[-1],
                         anchor_start=rough_start,
                         anchor_end=rough_end,
+                        allow_terminal_character_omission=True,
                     )
                     ranges: list[dict[str, Any]] = []
                     for first in first_matches:
@@ -1281,6 +1354,37 @@ def resolve_lite_audio_items(
                                     "end": float(last["end"]),
                                     "word_start_index": int(first["word_start_index"]),
                                     "word_end_index": int(last["word_end_index"]),
+                                    "text_similarity": min(
+                                        float(first.get("text_similarity", 1.0)),
+                                        float(last.get("text_similarity", 1.0)),
+                                    ),
+                                    "keyword_coverage": min(
+                                        float(first.get("keyword_coverage", 1.0)),
+                                        float(last.get("keyword_coverage", 1.0)),
+                                    ),
+                                    "matched_keyword_characters": (
+                                        int(
+                                            first.get(
+                                                "matched_keyword_characters",
+                                                len(_normalized_text(anchor_parts[0])),
+                                            )
+                                        )
+                                        + int(
+                                            last.get(
+                                                "matched_keyword_characters",
+                                                len(_normalized_text(anchor_parts[-1])),
+                                            )
+                                        )
+                                    ),
+                                    "omitted_review_text": (
+                                        str(first.get("omitted_review_text") or "")
+                                        + str(last.get("omitted_review_text") or "")
+                                    ),
+                                    "extra_asr_text": (
+                                        str(first.get("extra_asr_text") or "")
+                                        + str(last.get("extra_asr_text") or "")
+                                    ),
+                                    "anchor_matches": [dict(first), dict(last)],
                                 }
                             )
                     selected, match_method = _unique_nearest_match(ranges, anchor)
@@ -1296,9 +1400,7 @@ def resolve_lite_audio_items(
                     selected, match_method = _unique_nearest_match(matches, anchor)
 
         explicit_evidence = (
-            dict(item.get("evidence") or {})
-            if isinstance(item.get("evidence"), Mapping)
-            else {}
+            dict(item.get("evidence") or {}) if isinstance(item.get("evidence"), Mapping) else {}
         )
         explicit_must_keep = explicit_evidence.get("must_keep")
         must_keep = (
@@ -1330,9 +1432,7 @@ def resolve_lite_audio_items(
                 end_index = int(physical.get("word_end_index", start_index))
                 matched_words.extend(words[start_index : end_index + 1])
                 if not must_keep:
-                    local_keep, local_keep_windows = _context_phrases(
-                        words, start_index, end_index
-                    )
+                    local_keep, local_keep_windows = _context_phrases(words, start_index, end_index)
                     generated_must_keep.extend(local_keep)
                     generated_must_keep_windows.extend(local_keep_windows)
             if physical_windows:
@@ -1362,16 +1462,23 @@ def resolve_lite_audio_items(
                         selected.get("keyword_coverage", 1.0) if selected else 1.0
                     ),
                     "matched_keyword_characters": sum(
-                        int(value.get("matched_keyword_characters", len(_normalized_text(value.get("span_phrase") or value.get("phrase") or ""))))
+                        int(
+                            value.get(
+                                "matched_keyword_characters",
+                                len(
+                                    _normalized_text(
+                                        value.get("span_phrase") or value.get("phrase") or ""
+                                    )
+                                ),
+                            )
+                        )
                         for value in physical_matches
                     ),
                     "omitted_review_text": "".join(
-                        str(value.get("omitted_review_text") or "")
-                        for value in physical_matches
+                        str(value.get("omitted_review_text") or "") for value in physical_matches
                     ),
                     "extra_asr_text": "".join(
-                        str(value.get("extra_asr_text") or "")
-                        for value in physical_matches
+                        str(value.get("extra_asr_text") or "") for value in physical_matches
                     ),
                     "anchor_distance_seconds": round(
                         min(_match_distance(value, anchor) for value in physical_matches),
@@ -1409,6 +1516,9 @@ def resolve_lite_audio_items(
                         "source_cut_windows": physical_windows,
                         "resolved_cut_windows": physical_windows,
                         "resolved_time": first_window[0],
+                        "review_label_time": (
+                            round(review_label_time, 6) if review_label_time is not None else None
+                        ),
                         "match_method": match_method or "exact_phrase",
                         "matches": matched_words,
                         "asr_alignment": _alignment_receipt(
@@ -1437,7 +1547,7 @@ def resolve_lite_audio_items(
                 authoritative_cut_boundary=False,
             )
         else:
-            review_time = _review_timestamp(item)
+            review_time = review_label_time
             if review_time is None:
                 raise ValueError(
                     f"Lite audio item {item_id} could not be ASR-located and has no review timestamp"
@@ -1481,9 +1591,7 @@ def resolve_lite_audio_items(
     executable = [row for row in rows if row["execution_required"]]
     collisions: set[str] = set()
     flattened_windows = [
-        (str(row["item_id"]), window)
-        for row in executable
-        for window in _row_source_windows(row)
+        (str(row["item_id"]), window) for row in executable for window in _row_source_windows(row)
     ]
     for previous_index, (previous_id, previous_window) in enumerate(flattened_windows):
         for current_id, current_window in flattened_windows[previous_index + 1 :]:
@@ -1556,8 +1664,7 @@ def downgrade_reverse_asr_failures(
     unknown_ids = sorted(normalized_ids - executable_ids)
     if unknown_ids:
         raise ValueError(
-            "Reverse-ASR fallback referenced non-executable audio items: "
-            + ", ".join(unknown_ids)
+            "Reverse-ASR fallback referenced non-executable audio items: " + ", ".join(unknown_ids)
         )
 
     downgraded_ids: list[str] = []
@@ -1567,28 +1674,40 @@ def downgrade_reverse_asr_failures(
         item_id = str(raw_row.get("item_id") or "").strip()
         if item_id.casefold() not in normalized_ids:
             continue
+        fallback_time: float | None = None
+        for candidate in (
+            raw_row.get("review_label_time"),
+            _review_text_point(raw_row.get("source_text")),
+        ):
+            try:
+                value = float(candidate)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if math.isfinite(value) and value >= 0.0:
+                fallback_time = value
+                break
+        if fallback_time is None:
+            raise ValueError(
+                f"Reverse-ASR fallback item {item_id} has no reliable review timestamp"
+            )
         start = float(raw_row.pop("start"))
         end = float(raw_row.pop("end"))
         raw_row["status"] = "label_only"
         raw_row["execution_required"] = False
         raw_row["execution_status"] = "label_only_unresolved"
         raw_row["reason"] = "reverse_asr_validation_unresolved"
-        raw_row["resolved_time"] = round(start, 6)
-        raw_row["timing_source"] = "asr"
+        raw_row["resolved_time"] = round(fallback_time, 6)
+        raw_row["timing_source"] = "review_timestamp_fallback"
         raw_row["rejected_cut_window"] = [round(start, 6), round(end, 6)]
         alignment = raw_row.get("asr_alignment")
         if isinstance(alignment, dict):
-            alignment["authoritative_timing"] = True
+            alignment["authoritative_timing"] = False
             alignment["authoritative_cut_boundary"] = False
-            alignment["resolved_time"] = round(start, 6)
+            alignment["resolved_time"] = round(fallback_time, 6)
             alignment.pop("resolved_cut_window", None)
         downgraded_ids.append(item_id)
 
-    remaining = [
-        row
-        for row in rows
-        if isinstance(row, Mapping) and row.get("execution_required")
-    ]
+    remaining = [row for row in rows if isinstance(row, Mapping) and row.get("execution_required")]
     updated["executable_cuts"] = [
         {
             "item_id": str(row.get("item_id") or ""),
@@ -1686,9 +1805,7 @@ def build_lite_split_gap_audio_plan(
         "source_duration_seconds": source_duration,
         "candidate_duration_seconds": candidate_duration,
         "source_aligned": True,
-        "duration_matches_source": _wav_duration_matches_media_duration(
-            candidate, duration
-        ),
+        "duration_matches_source": _wav_duration_matches_media_duration(candidate, duration),
         "purpose": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "role": REVERSE_ASR_DIAGNOSTIC_PURPOSE,
         "delivery_eligible": False,
@@ -1748,9 +1865,7 @@ def apply_audio_plan_to_compiled_payloads(
     rows = _row_by_id(cut_plan)
     source_audio = str(Path(source_audio_path).expanduser().resolve(strict=True))
     request.setdefault("project", {})["source_audio"] = source_audio
-    request["project"]["media_duration_seconds"] = float(
-        cut_plan["source_duration_seconds"]
-    )
+    request["project"]["media_duration_seconds"] = float(cut_plan["source_duration_seconds"])
     request["project"]["replacement_audio"] = ""
     request["audio_delivery_plan"] = deepcopy(dict(audio_delivery_plan))
     request.setdefault("preserve", {})["replacement_audio_material"] = False
@@ -2014,8 +2129,7 @@ def _phrase_hits(
         matches = [
             row
             for row in matches
-            if float(row["end"]) >= start - 0.12
-            and float(row["start"]) <= end + 0.12
+            if float(row["end"]) >= start - 0.12 and float(row["start"]) <= end + 0.12
         ]
     return [
         {
@@ -2033,6 +2147,8 @@ def _must_keep_supported_outside_cut(
     words: Sequence[Mapping[str, Any]],
     phrase: str,
     source_windows: Sequence[Sequence[float]],
+    *,
+    protected_source_windows: Sequence[Mapping[str, Any]] = (),
 ) -> bool:
     """Check a protected phrase only in retained candidate audio.
 
@@ -2042,6 +2158,47 @@ def _must_keep_supported_outside_cut(
     cut before checking the phrase, while retaining the conservative partial
     phrase matcher for common ASR truncation.
     """
+
+    # Auto-generated must-keep rows carry the source-ASR identity and word
+    # window. Use that receipt to tolerate a small reverse-ASR timestamp drift
+    # across the cut edge, while rejecting a candidate hit fully contained in
+    # the deleted interval. This validates retention only; it never changes a
+    # source cut boundary.
+    candidate_hits = _phrase_hits(words, phrase)
+    for raw_window in protected_source_windows:
+        if _normalized_text(raw_window.get("phrase")) != _normalized_text(phrase):
+            continue
+        try:
+            protected_start = float(raw_window["start"])
+            protected_end = float(raw_window["end"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if (
+            not math.isfinite(protected_start)
+            or not math.isfinite(protected_end)
+            or protected_end <= protected_start
+        ):
+            continue
+        if any(
+            protected_start < float(window[1]) - 1e-6 and float(window[0]) < protected_end - 1e-6
+            for window in source_windows
+            if len(window) >= 2
+        ):
+            continue
+        for hit in candidate_hits:
+            hit_start = float(hit["start"])
+            hit_end = float(hit["end"])
+            near_source_identity = (
+                hit_end >= protected_start - _REVERSE_ASR_WORD_DRIFT_SECONDS
+                and hit_start <= protected_end + _REVERSE_ASR_WORD_DRIFT_SECONDS
+            )
+            fully_inside_cut = any(
+                hit_start >= float(window[0]) - 1e-6 and hit_end <= float(window[1]) + 1e-6
+                for window in source_windows
+                if len(window) >= 2
+            )
+            if near_source_identity and not fully_inside_cut:
+                return True
 
     retained: list[dict[str, Any]] = []
     for word in words:
@@ -2053,8 +2210,7 @@ def _must_keep_supported_outside_cut(
         if not math.isfinite(word_start) or not math.isfinite(word_end):
             continue
         if any(
-            word_start < float(window[1]) - 1e-6
-            and float(window[0]) < word_end - 1e-6
+            word_start < float(window[1]) - 1e-6 and float(window[0]) < word_end - 1e-6
             for window in source_windows
             if len(window) >= 2
         ):
@@ -2102,13 +2258,10 @@ def _kept_recurrence_adjudication(
     *,
     delete_phrase: str,
     local_text: str,
-    cut_start: float,
-    cut_end: float,
+    source_windows: Sequence[Sequence[float]],
 ) -> dict[str, Any] | None:
     normalized_delete = _normalized_text(delete_phrase)
-    context_without_delete = _normalized_text(local_text).replace(
-        normalized_delete, "", 1
-    )
+    context_without_delete = _normalized_text(local_text).replace(normalized_delete, "", 1)
     hit_start = float(hit["start"])
     hit_end = float(hit["end"])
     anchor = ""
@@ -2136,21 +2289,27 @@ def _kept_recurrence_adjudication(
             break
     if not anchor:
         return None
+    if any(
+        hit_start <= float(window[1]) + 0.12 and hit_end >= float(window[0]) - 0.12
+        for window in source_windows
+        if len(window) >= 2
+    ):
+        return None
+    cut_start = float(source_windows[0][0])
+    cut_end = float(source_windows[-1][1])
     if hit_end < cut_start:
         occurrence_role = "earlier_kept_occurrence"
     elif hit_start > cut_end:
         occurrence_role = "later_kept_occurrence"
     else:
-        return None
+        occurrence_role = "between_kept_occurrence"
     return {
         "classification": "kept_recurrence",
         "occurrence_role": occurrence_role,
         "phrase": delete_phrase,
         "local_context": local_text,
         "context_anchor": anchor,
-        "reason": (
-            "The ASR hit is outside the source cut window and belongs to retained context."
-        ),
+        "reason": ("The ASR hit is outside the source cut window and belongs to retained context."),
     }
 
 
@@ -2192,17 +2351,11 @@ def build_full_candidate_reverse_report(
                     f"{row.get('item_id') or '<unknown>'}"
                 )
             mapped_join_times.append(min(join_candidates))
-            local_word_rows.extend(
-                _local_reverse_words(words, source_window[0], source_window[1])
-            )
+            local_word_rows.extend(_local_reverse_words(words, source_window[0], source_window[1]))
         local_words = _dedupe_word_rows(local_word_rows)
-        start, end = float(source_windows[0][0]), float(source_windows[-1][1])
         local_text = "".join(str(word.get("text") or "") for word in local_words)
-        normalized = _normalized_text(local_text)
         delete_phrases = [
-            str(value).strip()
-            for value in row.get("delete_phrases") or []
-            if str(value).strip()
+            str(value).strip() for value in row.get("delete_phrases") or [] if str(value).strip()
         ] or [str(row["delete"])]
         all_delete_hits: list[dict[str, Any]] = []
         delete_hits: list[dict[str, Any]] = []
@@ -2220,9 +2373,8 @@ def build_full_candidate_reverse_report(
                 )
             all_delete_hits.extend(phrase_all_hits)
             delete_hits.extend(phrase_hits)
-            delete_span_hits.extend(
-                {**hit, "phrase": delete_phrase} for hit in phrase_hits
-            )
+            delete_span_hits.extend({**hit, "phrase": delete_phrase} for hit in phrase_hits)
+
         def _dedupe_hits(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             seen_hits: set[tuple[float, float, str]] = set()
             deduped_hits: list[dict[str, Any]] = []
@@ -2240,9 +2392,7 @@ def build_full_candidate_reverse_report(
 
         all_delete_hits = _dedupe_hits(all_delete_hits)
         delete_hits = _dedupe_hits(delete_hits)
-        attributed_hit_keys = {
-            (hit["start"], hit["end"], hit["text"]) for hit in delete_hits
-        }
+        attributed_hit_keys = {(hit["start"], hit["end"], hit["text"]) for hit in delete_hits}
         kept_recurrence_hits = [
             hit
             for hit in all_delete_hits
@@ -2253,74 +2403,86 @@ def build_full_candidate_reverse_report(
                 local_words,
                 phrase,
                 source_windows,
+                protected_source_windows=[
+                    dict(value)
+                    for value in row.get("must_keep_source_windows") or []
+                    if isinstance(value, Mapping)
+                ],
             )
             for phrase in row.get("must_keep") or []
         }
         forbidden = _semantic_join_forbidden_patterns(local_text)
         delete_occurrence_count = sum(
-            _overlapping_phrase_occurrence_count(local_text, phrase)
-            for phrase in delete_phrases
+            _overlapping_phrase_occurrence_count(local_text, phrase) for phrase in delete_phrases
         )
-        adjudication: dict[str, Any] | None = None
-        reported_delete_hits = delete_hits
-        if (
-            not delete_hits
-            and len(delete_phrases) == 1
-            and delete_occurrence_count == 1
-            and len(kept_recurrence_hits) == 1
-        ):
-            adjudication = _kept_recurrence_adjudication(
+        adjudications = [
+            _kept_recurrence_adjudication(
                 local_words,
-                kept_recurrence_hits[0],
-                delete_phrase=str(row["delete"]),
+                hit,
+                delete_phrase=str(hit.get("phrase") or row["delete"]),
                 local_text=local_text,
-                cut_start=start,
-                cut_end=end,
+                source_windows=source_windows,
             )
-            if adjudication is not None:
-                reported_delete_hits = list(kept_recurrence_hits)
-        if delete_occurrence_count > 1:
-            status = "review"
-        elif delete_hits:
+            for hit in kept_recurrence_hits
+        ]
+        valid_adjudications = [value for value in adjudications if isinstance(value, Mapping)]
+        all_kept_recurrences_adjudicated = bool(kept_recurrence_hits) and (
+            len(valid_adjudications) == len(kept_recurrence_hits)
+        )
+        unmapped_delete_occurrence_count = max(
+            0,
+            delete_occurrence_count - len(all_delete_hits),
+        )
+        reported_delete_hits = delete_hits
+        if not delete_hits and all_kept_recurrences_adjudicated:
+            reported_delete_hits = list(kept_recurrence_hits)
+        if delete_hits:
             status = "review"
         elif not all(keep_hits.values()) or forbidden:
             status = "review"
-        elif delete_occurrence_count == 1:
-            status = "pass_adjudicated" if adjudication is not None else "review"
+        elif unmapped_delete_occurrence_count:
+            status = "review"
+        elif kept_recurrence_hits:
+            status = "pass_adjudicated" if all_kept_recurrences_adjudicated else "review"
         else:
             status = "pass"
         if status not in {"pass", "pass_adjudicated"}:
             unresolved.append(str(row["item_id"]))
         report_row = {
-                "id": row["item_id"],
-                "doc_item_id": row["item_id"],
-                "kind": row["kind"],
-                "status": status,
-                "strategy": row["strategy"],
-                "delete": row["delete"],
-                "must_keep": list(row.get("must_keep") or []),
-                "source_cut_windows": deepcopy(source_windows),
-                "mapped_join_times": [round(value, 9) for value in mapped_join_times],
-                "local_joined_text": local_text,
-                "delete_hits": reported_delete_hits,
-                "delete_phrases": delete_phrases,
-                "delete_span_hits": delete_span_hits,
-                "kept_recurrence_hits": kept_recurrence_hits,
-                "keep_hits": keep_hits,
-                "semantic_join_validation": {
-                    "status": "pass" if not forbidden and all(keep_hits.values()) else "review",
-                    "method": REVERSE_REPORT_VERSION,
-                    "forbidden_patterns": forbidden,
-                },
-                "candidate_audio_sha256": sha256_file(candidate),
-                "asr_identity": {
-                    "provider": str(candidate_asr.get("provider") or ""),
-                    "model": str(candidate_asr.get("resource_id") or ""),
-                    "adapter_version": str(candidate_asr.get("adapter_version") or ""),
-                },
-            }
-        if adjudication is not None:
-            report_row["delete_hit_adjudication"] = adjudication
+            "id": row["item_id"],
+            "doc_item_id": row["item_id"],
+            "kind": row["kind"],
+            "status": status,
+            "strategy": row["strategy"],
+            "delete": row["delete"],
+            "must_keep": list(row.get("must_keep") or []),
+            "source_cut_windows": deepcopy(source_windows),
+            "mapped_join_times": [round(value, 9) for value in mapped_join_times],
+            "local_joined_text": local_text,
+            "delete_hits": reported_delete_hits,
+            "delete_phrases": delete_phrases,
+            "delete_span_hits": delete_span_hits,
+            "kept_recurrence_hits": kept_recurrence_hits,
+            "keep_hits": keep_hits,
+            "must_keep_source_windows": deepcopy(row.get("must_keep_source_windows") or []),
+            "delete_occurrence_count": delete_occurrence_count,
+            "unmapped_delete_occurrence_count": unmapped_delete_occurrence_count,
+            "semantic_join_validation": {
+                "status": "pass" if not forbidden and all(keep_hits.values()) else "review",
+                "method": REVERSE_REPORT_VERSION,
+                "forbidden_patterns": forbidden,
+            },
+            "candidate_audio_sha256": sha256_file(candidate),
+            "asr_identity": {
+                "provider": str(candidate_asr.get("provider") or ""),
+                "model": str(candidate_asr.get("resource_id") or ""),
+                "adapter_version": str(candidate_asr.get("adapter_version") or ""),
+            },
+        }
+        if valid_adjudications:
+            report_row["delete_hit_adjudications"] = deepcopy(valid_adjudications)
+            if len(valid_adjudications) == 1:
+                report_row["delete_hit_adjudication"] = deepcopy(valid_adjudications[0])
         report_rows.append(report_row)
     return {
         "schema_version": _SCHEMA_VERSION,
@@ -2348,13 +2510,8 @@ def build_full_candidate_reverse_report(
         "service_job_id": str(candidate_asr.get("service_job_id") or ""),
         "service_result_sha256": str(candidate_asr.get("service_result_sha256") or ""),
         "status_counts": {
-            "pass": sum(
-                row["status"] in {"pass", "pass_adjudicated"} for row in report_rows
-            ),
-            "review": sum(
-                row["status"] not in {"pass", "pass_adjudicated"}
-                for row in report_rows
-            ),
+            "pass": sum(row["status"] in {"pass", "pass_adjudicated"} for row in report_rows),
+            "review": sum(row["status"] not in {"pass", "pass_adjudicated"} for row in report_rows),
         },
         "unresolved_ids": unresolved,
         "semantic_join_anomalies": [],
@@ -2371,9 +2528,7 @@ def apply_reverse_report_to_payloads(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     unresolved = [str(value) for value in report.get("unresolved_ids") or []]
     if unresolved:
-        raise ValueError(
-            "Full-candidate reverse ASR did not pass for: " + ", ".join(unresolved)
-        )
+        raise ValueError("Full-candidate reverse ASR did not pass for: " + ", ".join(unresolved))
     # A reverse-ASR candidate is accepted only as a source-time-preserving
     # diagnostic artifact.  Older or hand-authored reports may omit these
     # proofs, so migration fails closed instead of silently treating the WAV as
@@ -2400,13 +2555,9 @@ def apply_reverse_report_to_payloads(
     if not (
         math.isfinite(source_duration_value)
         and math.isfinite(candidate_duration_value)
-        and _reported_pcm_durations_match(
-            candidate_duration_value, source_duration_value
-        )
+        and _reported_pcm_durations_match(candidate_duration_value, source_duration_value)
     ):
-        raise ValueError(
-            "Reverse-ASR candidate duration does not match the source duration"
-        )
+        raise ValueError("Reverse-ASR candidate duration does not match the source duration")
     request = deepcopy(dict(revision_request))
     ledger = deepcopy(dict(doc_items))
     rows = {
@@ -2466,9 +2617,7 @@ def asr_service_identity(config: VolcAsrConfig) -> dict[str, Any]:
     }
 
 
-def alignment_cache_identity(
-    *, source_sha256: str, ffmpeg: Mapping[str, Any]
-) -> dict[str, Any]:
+def alignment_cache_identity(*, source_sha256: str, ffmpeg: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "inputs": {
             "source_media_sha256": source_sha256,

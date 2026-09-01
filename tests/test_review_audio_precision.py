@@ -139,9 +139,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                     "delete": "测试",
                     "execution_status": "label_only_unresolved",
                 },
-                "validation": {
-                    "layers": [{"status": "LABEL-ONLY-UNRESOLVED"}]
-                },
+                "validation": {"layers": [{"status": "LABEL-ONLY-UNRESOLVED"}]},
             },
             {
                 **common,
@@ -205,9 +203,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             request_path.write_text(
                 json.dumps(updated_request, ensure_ascii=False), encoding="utf-8"
             )
-            ledger_path.write_text(
-                json.dumps(updated_ledger, ensure_ascii=False), encoding="utf-8"
-            )
+            ledger_path.write_text(json.dumps(updated_ledger, ensure_ascii=False), encoding="utf-8")
             loaded_request = load_revision_request(str(request_path))
             loaded_ledger = load_review_items_json(str(ledger_path))
 
@@ -372,6 +368,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                     "item_id": "failed-cut",
                     "execution_required": True,
                     "execution_status": "asr_resolved",
+                    "source_text": "00:05 删除失败词",
+                    "review_label_time": 5.0,
                     "start": 2.0,
                     "end": 2.4,
                     "asr_alignment": dict(alignment),
@@ -393,22 +391,20 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         updated = downgrade_reverse_asr_failures(cut_plan, ["failed-cut"])
         rows = {row["item_id"]: row for row in updated["rows"]}
         self.assertTrue(rows["keep-cut"]["execution_required"])
-        self.assertTrue(
-            rows["keep-cut"]["asr_alignment"]["authoritative_cut_boundary"]
-        )
+        self.assertTrue(rows["keep-cut"]["asr_alignment"]["authoritative_cut_boundary"])
         self.assertFalse(rows["failed-cut"]["execution_required"])
         self.assertEqual(rows["failed-cut"]["execution_status"], "label_only_unresolved")
         self.assertEqual(rows["failed-cut"]["rejected_cut_window"], [2.0, 2.4])
-        self.assertFalse(
-            rows["failed-cut"]["asr_alignment"]["authoritative_cut_boundary"]
+        self.assertEqual(rows["failed-cut"]["resolved_time"], 5.0)
+        self.assertEqual(
+            rows["failed-cut"]["timing_source"],
+            "review_timestamp_fallback",
         )
+        self.assertFalse(rows["failed-cut"]["asr_alignment"]["authoritative_timing"])
+        self.assertFalse(rows["failed-cut"]["asr_alignment"]["authoritative_cut_boundary"])
         self.assertNotIn("start", rows["failed-cut"])
-        self.assertEqual(
-            [row["item_id"] for row in updated["executable_cuts"]], ["keep-cut"]
-        )
-        self.assertEqual(
-            updated["unresolved_item_ids"], ["already-label", "failed-cut"]
-        )
+        self.assertEqual([row["item_id"] for row in updated["executable_cuts"]], ["keep-cut"])
+        self.assertEqual(updated["unresolved_item_ids"], ["already-label", "failed-cut"])
         with self.assertRaisesRegex(ValueError, "non-executable"):
             downgrade_reverse_asr_failures(cut_plan, ["already-label"])
 
@@ -482,6 +478,35 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 "start": 40.2,
                 "method": "ellipsis_anchor_range",
             },
+            {
+                "name": "ellipsis_anchor_missing_terminal_character",
+                "kind": "ellipsis_range_delete",
+                "source_text": "00:50-00:56 删除魏蜀吴……三国鼎立",
+                "delete": "魏蜀吴……三国鼎立",
+                "transcript": "魏蜀中间原话三国鼎立",
+                "start": 50.2,
+                "method": "ellipsis_anchor_range",
+                "omitted_review_text": "吴",
+            },
+            {
+                "name": "continuous_spoken_stutter",
+                "kind": "phrase_delete",
+                "source_text": "01:00 删除黄河对不起啊",
+                "delete": "黄河对不起啊",
+                "transcript": "黄河对对不起啊",
+                "start": 60.1,
+                "method": "conservative_fuzzy_phrase",
+                "extra_asr_text": "对",
+            },
+            {
+                "name": "single_chinese_digit_matches_itn_digit",
+                "kind": "phrase_delete",
+                "source_text": "01:10 删除那五个",
+                "delete": "那五个",
+                "transcript": "那5个",
+                "start": 70.1,
+                "method": "normalized_equivalent_phrase",
+            },
         ]
 
         for case in cases:
@@ -498,7 +523,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                         }
                     ],
                     _source_asr(words),
-                    source_duration_seconds=60.0,
+                    source_duration_seconds=90.0,
                 )
 
                 row = result["rows"][0]
@@ -507,6 +532,16 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 self.assertEqual(row["start"], words[0]["start"])
                 self.assertEqual(row["end"], words[-1]["end"])
                 self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
+                if case.get("omitted_review_text"):
+                    self.assertEqual(
+                        row["asr_match"]["omitted_review_text"],
+                        case["omitted_review_text"],
+                    )
+                if case.get("extra_asr_text"):
+                    self.assertEqual(
+                        row["asr_match"]["extra_asr_text"],
+                        case["extra_asr_text"],
+                    )
 
     def test_source_asr_time_anchored_partial_match_cuts_recognized_remainder(self):
         words = _character_words("解决不了", 10.0)
@@ -544,9 +579,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 {
                     "id": "nearby-repeat",
                     "kind": "phrase_delete",
-                    "source_text": (
-                        "00:53-00:57 删除哎就是有这么一个地方叫德意志，对吧"
-                    ),
+                    "source_text": ("00:53-00:57 删除哎就是有这么一个地方叫德意志，对吧"),
                     "execution_required": True,
                     "evidence": {
                         "delete": "哎就是有这么一个地方叫德意志，对吧",
@@ -568,9 +601,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         rows = {row["item_id"]: row for row in result["rows"]}
         row = rows["nearby-repeat"]
         self.assertTrue(row["execution_required"])
-        self.assertEqual(
-            row["match_method"], "time_anchored_fuzzy_phrase_nearest_anchor"
-        )
+        self.assertEqual(row["match_method"], "time_anchored_fuzzy_phrase_nearest_anchor")
         self.assertEqual(row["resolved_delete"], "哎就有这么个地方叫德意志")
         self.assertEqual(row["asr_match"]["omitted_review_text"], "是一对吧")
         self.assertEqual(row["start"], first[0]["start"])
@@ -748,9 +779,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                     "asset_paths": ["C:/media/overlay.png"],
                 }
             ],
-            "pause_adjustments": [
-                {"item_id": "audio-label", "source_time": 5.0, "duration": 1.0}
-            ],
+            "pause_adjustments": [{"item_id": "audio-label", "source_time": 5.0, "duration": 1.0}],
         }
         ledger = {"review_items": json.loads(json.dumps(review_items))}
 
@@ -888,9 +917,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             request_path = Path(temp_dir) / "request.json"
-            request_path.write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-            )
+            request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             request = load_revision_request(str(request_path))
             _validate_lite_audio_timing_sources(request, None)
 
@@ -902,13 +929,9 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                     "frame_path": "C:/media/frame.png",
                 }
             ]
-            request_path.write_text(
-                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-            )
+            request_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "must not create pause_adjustments"):
-                _validate_lite_audio_timing_sources(
-                    load_revision_request(str(request_path)), None
-                )
+                _validate_lite_audio_timing_sources(load_revision_request(str(request_path)), None)
 
     def test_a1_complement_and_independent_a2_windows_keep_parser_writer_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -947,7 +970,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             [(row["doc_item_id"], row["source_start"], row["duration"]) for row in a2],
             [("cut-a", 0.5, 0.5), ("cut-b", 1.0, 0.25)],
         )
-        self.assertEqual([row["volume"] for row in a2], [0.0, 0.0])
+        self.assertTrue(plan["lite_a2_audible"])
+        self.assertEqual([row["volume"] for row in a2], [1.0, 1.0])
         lite_request = SimpleNamespace(workflow_mode="lite", lite_cut_layout="split_gap")
         saved_volumes = [
             _saved_audio_delivery_volume(lite_request, SimpleNamespace(**row)) for row in a2
@@ -966,9 +990,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 cut_plan = {
                     "source_duration_seconds": source_duration_seconds,
                     "rows": [],
-                    "executable_cuts": [
-                        {"item_id": "cut", "start": 0.25, "end": 0.5}
-                    ],
+                    "executable_cuts": [{"item_id": "cut", "start": 0.25, "end": 0.5}],
                 }
                 delivery_plan = build_lite_split_gap_audio_plan(
                     cut_plan,
@@ -1000,19 +1022,11 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 return delivery_plan, request, ledger, report
 
             one_frame_duration = 1.0 + (1.0 / 16_000)
-            delivery_plan, request, ledger, report = build_evidence(
-                one_frame_duration
-            )
+            delivery_plan, request, ledger, report = build_evidence(one_frame_duration)
             self.assertTrue(
-                delivery_plan["validation_only_audio_metadata"][
-                    "duration_matches_source"
-                ]
+                delivery_plan["validation_only_audio_metadata"]["duration_matches_source"]
             )
-            self.assertTrue(
-                request["processed_audio"][
-                    "candidate_audio_duration_matches_source"
-                ]
-            )
+            self.assertTrue(request["processed_audio"]["candidate_audio_duration_matches_source"])
             self.assertTrue(report["candidate_audio_duration_matches_source"])
             apply_reverse_report_to_payloads(
                 request,
@@ -1022,19 +1036,11 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             )
 
             two_frame_duration = 1.0 + (2.0 / 16_000)
-            delivery_plan, request, ledger, report = build_evidence(
-                two_frame_duration
-            )
+            delivery_plan, request, ledger, report = build_evidence(two_frame_duration)
             self.assertFalse(
-                delivery_plan["validation_only_audio_metadata"][
-                    "duration_matches_source"
-                ]
+                delivery_plan["validation_only_audio_metadata"]["duration_matches_source"]
             )
-            self.assertFalse(
-                request["processed_audio"][
-                    "candidate_audio_duration_matches_source"
-                ]
-            )
+            self.assertFalse(request["processed_audio"]["candidate_audio_duration_matches_source"])
             self.assertFalse(report["candidate_audio_duration_matches_source"])
             report["candidate_audio_duration_matches_source"] = True
             with self.assertRaisesRegex(ValueError, "duration does not match"):
@@ -1068,9 +1074,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                         "end": 1.0,
                     }
                 ],
-                "executable_cuts": [
-                    {"item_id": "cut-zero", "start": 0.0, "end": 1.0}
-                ],
+                "executable_cuts": [{"item_id": "cut-zero", "start": 0.0, "end": 1.0}],
             }
             delivery_plan = build_lite_split_gap_audio_plan(
                 cut_plan,
@@ -1161,9 +1165,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                         "end": 1.3,
                     }
                 ],
-                "executable_cuts": [
-                    {"item_id": "repeated-later", "start": 1.0, "end": 1.3}
-                ],
+                "executable_cuts": [{"item_id": "repeated-later", "start": 1.0, "end": 1.3}],
             }
             delivery_plan = build_lite_split_gap_audio_plan(
                 cut_plan,
@@ -1206,7 +1208,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             "later_kept_occurrence",
         )
 
-    def test_reverse_report_rejects_multiple_kept_recurrences(self):
+    def test_reverse_report_accepts_multiple_adjudicated_kept_recurrences(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source = root / "source.wav"
@@ -1228,9 +1230,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                         "end": 1.3,
                     }
                 ],
-                "executable_cuts": [
-                    {"item_id": "repeated-twice", "start": 1.0, "end": 1.3}
-                ],
+                "executable_cuts": [{"item_id": "repeated-twice", "start": 1.0, "end": 1.3}],
             }
             delivery_plan = build_lite_split_gap_audio_plan(
                 cut_plan,
@@ -1257,9 +1257,75 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             )
 
         row = report["rows"][0]
-        self.assertEqual(row["status"], "review")
+        self.assertEqual(row["status"], "pass_adjudicated")
         self.assertEqual(len(row["kept_recurrence_hits"]), 2)
-        self.assertEqual(report["unresolved_ids"], ["repeated-twice"])
+        self.assertEqual(len(row["delete_hit_adjudications"]), 2)
+        self.assertEqual(report["unresolved_ids"], [])
+
+    def test_reverse_report_uses_source_asr_window_for_boundary_drift_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 3.0)
+            _write_pcm16_wav(candidate, 3.0)
+            cut_plan = {
+                "source_duration_seconds": 3.0,
+                "rows": [
+                    {
+                        "item_id": "boundary-drift",
+                        "kind": "phrase_delete",
+                        "source_text": "00:01 删除删词",
+                        "execution_required": True,
+                        "strategy": "precision_first",
+                        "delete": "删词",
+                        "must_keep": ["就是"],
+                        "must_keep_source_windows": [
+                            {
+                                "phrase": "就是",
+                                "start": 0.78,
+                                "end": 0.98,
+                                "source": "automatic_adjacent_asr_context",
+                            }
+                        ],
+                        "start": 1.0,
+                        "end": 1.3,
+                    }
+                ],
+                "executable_cuts": [{"item_id": "boundary-drift", "start": 1.0, "end": 1.3}],
+            }
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+
+            def report_for(word_start, word_end):
+                return build_full_candidate_reverse_report(
+                    {"audio_delivery_plan": delivery_plan},
+                    cut_plan,
+                    {
+                        "provider": "volc_asr",
+                        "resource_id": "volc.bigasr.auc",
+                        "adapter_version": "test-adapter-v1",
+                        "service_job_id": "reverse-job",
+                        "service_result_sha256": "c" * 64,
+                        "words": [
+                            {"text": "就是", "start": word_start, "end": word_end},
+                            {"text": "保留", "start": 1.5, "end": 1.8},
+                        ],
+                    },
+                    candidate_audio_path=candidate,
+                    audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+                )
+
+            drifted = report_for(0.92, 1.05)
+            contained = report_for(1.05, 1.15)
+
+        self.assertEqual(drifted["rows"][0]["status"], "pass")
+        self.assertTrue(drifted["rows"][0]["keep_hits"]["就是"])
+        self.assertEqual(contained["rows"][0]["status"], "review")
+        self.assertFalse(contained["rows"][0]["keep_hits"]["就是"])
 
     def test_reverse_report_still_rejects_delete_hit_at_cut_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1283,9 +1349,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                         "end": 1.3,
                     }
                 ],
-                "executable_cuts": [
-                    {"item_id": "residue", "start": 1.0, "end": 1.3}
-                ],
+                "executable_cuts": [{"item_id": "residue", "start": 1.0, "end": 1.3}],
             }
             delivery_plan = build_lite_split_gap_audio_plan(
                 cut_plan,
@@ -1334,12 +1398,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 alignment_cache_identity(source_sha256="b" * 64, ffmpeg=ffmpeg),
             ),
             (
-                source_asr_cache_identity(
-                    alignment_audio_sha256="a" * 64, config=config_a
-                ),
-                source_asr_cache_identity(
-                    alignment_audio_sha256="a" * 64, config=config_b
-                ),
+                source_asr_cache_identity(alignment_audio_sha256="a" * 64, config=config_a),
+                source_asr_cache_identity(alignment_audio_sha256="a" * 64, config=config_b),
             ),
             (
                 candidate_cache_identity(
@@ -1366,9 +1426,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         ]
         for first, second in pairs:
             with self.subTest(first=first, second=second):
-                self.assertNotEqual(
-                    canonical_json_sha256(first), canonical_json_sha256(second)
-                )
+                self.assertNotEqual(canonical_json_sha256(first), canonical_json_sha256(second))
 
 
 if __name__ == "__main__":
