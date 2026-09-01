@@ -235,7 +235,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "For lite runs, publish the final editable draft as a validated offline ZIP "
-            "after acceptance"
+            "after acceptance; the parent directory is used and the filename follows the "
+            "actual draft name"
         ),
     )
     p_revision_run.add_argument(
@@ -246,12 +247,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_revision_run.add_argument(
         "--package-root-name",
         default=None,
-        help="Optional single-level root directory name inside the final lite ZIP",
+        help=(
+            "Optional compatibility assertion; when supplied it must equal the actual Lite "
+            "draft name"
+        ),
     )
     p_revision_run.add_argument(
         "--package-receipt",
         default=None,
         help="Optional external JSON receipt path for the final lite ZIP",
+    )
+    p_revision_run.add_argument(
+        "--execution-input",
+        dest="execution_input_json",
+        default=None,
+        help="Optional structured JSON containing artifact_name for this execution",
     )
     p_revision_run.add_argument(
         "--json", action="store_true", help="Print machine-readable JSON response"
@@ -292,12 +302,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_review_document_run.add_argument(
         "--package-zip",
         required=True,
-        help="Destination for the validated editable Lite delivery ZIP",
+        help=(
+            "Destination directory placeholder for the validated Lite delivery ZIP; "
+            "the filename follows the resolved draft name"
+        ),
     )
     p_review_document_run.add_argument(
         "--relink-tool",
         default=None,
         help="Optional path to the Lite material relink executable",
+    )
+    p_review_document_run.add_argument(
+        "--execution-input",
+        dest="execution_input_json",
+        default=None,
+        help="Optional structured JSON containing artifact_name for this execution",
     )
     p_review_document_run.add_argument(
         "--mock-media",

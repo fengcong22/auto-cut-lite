@@ -17,6 +17,39 @@ import review_job
 
 
 class ReviewDocumentCliTests(unittest.TestCase):
+    def test_revision_run_forwards_structured_execution_input(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "revision-run",
+                "--request-json",
+                "request.json",
+                "--workflow-mode",
+                "lite",
+                "--execution-input",
+                "execution-input.json",
+            ]
+        )
+        expected = {"ok": True, "code": "ok", "reason": "", "data": {}}
+
+        self.assertEqual(args.execution_input_json, "execution-input.json")
+        with patch.object(jy_wrapper, "cmd_revision_run", return_value=expected) as command:
+            result = jy_wrapper.COMMAND_HANDLERS["revision-run"](args)
+
+        self.assertEqual(result, expected)
+        command.assert_called_once_with(
+            "request.json",
+            None,
+            False,
+            doc_items_json=None,
+            strict=False,
+            workflow_mode="lite",
+            package_zip=None,
+            relink_tool=None,
+            package_root_name=None,
+            package_receipt=None,
+            execution_input_json="execution-input.json",
+        )
+
     def test_parser_exposes_lite_review_document_controls_and_output_dir_alias(self) -> None:
         args = build_parser().parse_args(
             [
@@ -33,6 +66,8 @@ class ReviewDocumentCliTests(unittest.TestCase):
                 "delivery.zip",
                 "--relink-tool",
                 "relink.exe",
+                "--execution-input",
+                "execution-input.json",
                 "--mock-media",
                 "--asr-timeout-seconds",
                 "30",
@@ -56,6 +91,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
         self.assertEqual(args.drafts_root, "drafts")
         self.assertEqual(args.package_zip, "delivery.zip")
         self.assertEqual(args.relink_tool, "relink.exe")
+        self.assertEqual(args.execution_input_json, "execution-input.json")
         self.assertTrue(args.mock_media)
         self.assertEqual(args.asr_timeout_seconds, 30.0)
         self.assertEqual(args.asr_poll_interval_seconds, 0.5)
@@ -88,6 +124,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
         self.assertEqual(args.asr_max_wait_seconds, 120.0)
         self.assertEqual(args.context_before, 5.0)
         self.assertEqual(args.context_after, 5.0)
+        self.assertIsNone(args.execution_input_json)
 
     def test_parser_exposes_mutually_exclusive_document_url_mode(self) -> None:
         args = build_parser().parse_args(
@@ -143,6 +180,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
                 drafts_root="drafts",
                 package_zip="delivery.zip",
                 relink_tool="relink.exe",
+                execution_input_json="execution-input.json",
                 mock_media=True,
                 asr_timeout_seconds=45.0,
                 asr_poll_interval_seconds=1.5,
@@ -164,6 +202,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
                     "drafts_root": "drafts",
                     "package_zip": "delivery.zip",
                     "relink_tool": "relink.exe",
+                    "execution_input_json": "execution-input.json",
                     "mock_media": True,
                     "asr_timeout_seconds": 45.0,
                     "asr_poll_interval_seconds": 1.5,
@@ -190,6 +229,8 @@ class ReviewDocumentCliTests(unittest.TestCase):
                 "drafts",
                 "--package-zip",
                 "delivery.zip",
+                "--execution-input",
+                "execution-input.json",
                 "--mock-media",
             ]
         )
@@ -209,6 +250,7 @@ class ReviewDocumentCliTests(unittest.TestCase):
             drafts_root="drafts",
             package_zip="delivery.zip",
             relink_tool=None,
+            execution_input_json="execution-input.json",
             mock_media=True,
             asr_timeout_seconds=60.0,
             asr_poll_interval_seconds=2.0,

@@ -387,6 +387,7 @@ def cmd_review_document_run(
     drafts_root: str | os.PathLike[str],
     package_zip: str | os.PathLike[str],
     relink_tool: str | os.PathLike[str] | None = None,
+    execution_input_json: str | os.PathLike[str] | None = None,
     mock_media: bool = False,
     asr_timeout_seconds: float = 60.0,
     asr_poll_interval_seconds: float = 2.0,
@@ -414,7 +415,7 @@ def cmd_review_document_run(
     from utils.review_document_runner import ReviewDocumentRunError, run_review_document
 
     try:
-        data = run_review_document(
+        runner_kwargs = dict(
             snapshot_json=snapshot_json,
             project_json=project_json,
             doc_url=doc_url,
@@ -431,6 +432,9 @@ def cmd_review_document_run(
             workflow_mode="lite",
             progress=progress,
         )
+        if execution_input_json is not None and str(execution_input_json).strip():
+            runner_kwargs["execution_input_json"] = execution_input_json
+        data = run_review_document(**runner_kwargs)
     except ReviewDocumentRunError as exc:
         return make_result(False, "review_document_failed", str(exc), exc.result)
     except (TypeError, ValueError) as exc:

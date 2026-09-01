@@ -195,7 +195,78 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
         self.assertEqual(len(media_commands), 3)
         self.assertTrue(all(row[-2:] == ["--as", "user"] for row in media_commands))
 
-    def test_multiple_unlabelled_videos_require_structured_selection(self) -> None:
+    def test_document_title_is_used_for_default_lite_name(self) -> None:
+        fetched = intake.fetch_lark_document(
+            "https://example.feishu.cn/docx/doc_private_token",
+            lark_cli=sys.executable,
+            runner=FakeLarkRunner(_fetch_payload()),
+        )
+        parsed = intake.parse_lark_document(fetched)
+        self.assertEqual(parsed["document_title"], "Lesson title")
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            }
+        ]
+        compiled = intake.compile_url_inputs(parsed, assets)
+        self.assertEqual(compiled["project"]["draft_name"], "Lesson title")
+        self.assertEqual(compiled["project"]["name_source"], "document_title")
+
+    def test_external_name_wins_and_is_safely_normalized(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "document_title": "Document title",
+            "review_items": [{"block_id": "one", "source_text": "00:01 校对"}],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            }
+        ]
+        compiled = intake.compile_url_inputs(parsed, assets, external_name="  Name:One  ")
+        self.assertEqual(compiled["project"]["draft_name"], "Name_One")
+        self.assertEqual(compiled["project"]["name_source"], "external_input")
+        self.assertTrue(compiled["project"]["name_sanitized"])
+
+    def test_missing_title_uses_document_identity_prefix(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "document_title": "",
+            "review_items": [{"block_id": "one", "source_text": "00:01 校对"}],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            }
+        ]
+
+        compiled = intake.compile_url_inputs(parsed, assets)
+
+        self.assertEqual(compiled["project"]["draft_name"], "AutoCutLite-aaaaaaaaaaaa")
+        self.assertEqual(compiled["project"]["name_source"], "identity_fallback")
+
+    def test_multiple_unlabelled_videos_use_deterministic_recommendation(self) -> None:
         parsed = {
             "document_identity_sha256": "a" * 64,
             "revision_id": 1,
@@ -226,16 +297,15 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
             },
         ]
 
-        with self.assertRaises(intake.ReviewDocumentIntakeError) as raised:
-            intake.compile_url_inputs(parsed, assets)
+        compiled = intake.compile_url_inputs(parsed, assets)
 
-        error = raised.exception
-        self.assertEqual(error.code, "source_video_ambiguous")
-        self.assertEqual(error.user_action["action_code"], "high_risk_confirmation")
-        self.assertEqual(error.user_action["candidate_ids"], ["asset_one", "asset_two"])
-        serialized = json.dumps(error.public_data(), ensure_ascii=False)
-        self.assertNotIn("first.mp4", serialized)
-        self.assertNotIn("second.mp4", serialized)
+        self.assertEqual(compiled["project"]["source_video"], "two.mp4")
+        roles = {
+            row["asset_id"]: row["role"]
+            for row in compiled["asset_manifest"]["assets"]
+        }
+        self.assertEqual(roles["asset_two"], "source_video")
+        self.assertEqual(roles["asset_one"], "document_attachment")
 
     def test_document_url_digest_isolated_and_never_returns_the_url(self) -> None:
         first = "https://example.feishu.cn/docx/doc_alpha"
@@ -627,7 +697,7 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
         self.assertEqual(parsed["assets"][1]["associated_item_index"], 0)
         self.assertTrue(parsed["assets"][1]["recommended"])
 
-    def test_structural_visual_ambiguity_requires_user_action(self) -> None:
+    def test_structural_visual_candidates_use_automatic_recommendation(self) -> None:
         parsed = {
             "document_identity_sha256": "a" * 64,
             "revision_id": 1,
@@ -663,12 +733,16 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
                 for index in (2, 3)
             ],
         ]
-        with self.assertRaises(intake.ReviewDocumentIntakeError) as raised:
-            intake.compile_url_inputs(parsed, assets)
-        self.assertEqual(raised.exception.code, "visual_asset_ambiguous")
+        compiled = intake.compile_url_inputs(parsed, assets)
+        row = compiled["snapshot"]["review_items"][0]
+        self.assertEqual(row["asset_paths"], ["image-2.png"])
+        self.assertEqual(row["kind"], "visual_overlay")
         self.assertEqual(
-            raised.exception.user_action["candidate_ids"], ["image-2", "image-3"]
+            row["asset_selection"]["policy"],
+            "automatic_recommended_description_visual_features",
         )
+        self.assertEqual(row["asset_selection"]["candidate_count"], 2)
+        self.assertEqual(row["asset_selection"]["selected_asset_id"], "image-2")
 
     def test_readiness_persists_hashes_and_invalidates_version_changes(self) -> None:
         whoami = {

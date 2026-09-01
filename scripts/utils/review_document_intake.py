@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from utils.execution_input import resolve_artifact_name
+
 INTAKE_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = 1
 LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v1"
@@ -493,6 +495,13 @@ def fetch_lark_document(
     content = document.get("content")
     document_id = document.get("document_id")
     revision_id = document.get("revision_id")
+    document_title = document.get("title")
+    if not isinstance(document_title, str):
+        document_title = document.get("document_title")
+    if not isinstance(document_title, str):
+        document_title = document.get("name")
+    if not isinstance(document_title, str):
+        document_title = ""
     if (
         not isinstance(content, str)
         or not content.strip()
@@ -508,6 +517,7 @@ def fetch_lark_document(
         "content": content,
         "document_id": document_id,
         "revision_id": revision_id,
+        "title": document_title.strip(),
         "identity": "user",
     }
 
@@ -825,6 +835,13 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
         )
     document_identity_sha256 = _sha256_text(raw_document_id)
     root = _wrap_document_xml(content)
+    document_title = str(fetch.get("title") or "").strip()
+    if not document_title:
+        for title_node in root.iter("title"):
+            candidate = "".join(title_node.itertext()).strip()
+            if candidate:
+                document_title = candidate
+                break
     top_indexes = _top_level_index(root)
     top_nodes = list(root)
     review_rows: list[dict[str, Any]] = []
@@ -943,6 +960,7 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
     ]
     return {
         "document_identity_sha256": document_identity_sha256,
+        "document_title": document_title,
         "revision_id": fetch.get("revision_id"),
         "content_sha256": _sha256_text(content),
         "asset_identity_sha256": _sha256_bytes(_canonical_json(safe_asset_identity)),
@@ -1298,6 +1316,8 @@ def _visual_ambiguity(item: Mapping[str, Any], candidates: Sequence[Mapping[str,
 def compile_url_inputs(
     parsed: Mapping[str, Any],
     downloaded_assets: Sequence[Mapping[str, Any]],
+    *,
+    external_name: str | None = None,
 ) -> dict[str, Any]:
     review_items = [dict(row) for row in parsed.get("review_items") or []]
     asset_rows = [dict(row) for row in downloaded_assets]
@@ -1411,9 +1431,16 @@ def compile_url_inputs(
     revision_id = parsed.get("revision_id")
     content_sha256 = str(parsed.get("content_sha256") or "")
     asset_identity_sha256 = str(parsed.get("asset_identity_sha256") or "")
+    document_title = str(parsed.get("document_title") or "").strip()
+    name_resolution = resolve_artifact_name(
+        external_name=external_name,
+        document_title=document_title,
+        fallback_name=f"AutoCutLite-{document_identity[:12]}",
+    )
     snapshot = {
         "document": {
             "document_identity_sha256": document_identity,
+            "title": document_title,
             "revision": revision_id,
             "content_sha256": content_sha256,
             "asset_identity_sha256": asset_identity_sha256,
@@ -1422,7 +1449,11 @@ def compile_url_inputs(
         "review_items": review_items,
     }
     project = {
-        "draft_name": f"AutoCutLite-{document_identity[:12]}",
+        "draft_name": name_resolution.final_name,
+        "requested_name": name_resolution.requested_name,
+        "final_name": name_resolution.final_name,
+        "name_source": name_resolution.source,
+        "name_sanitized": name_resolution.sanitized,
         "source_video": str(source_video["path"]),
         "source_audio": "",
         "replacement_audio": "",
@@ -1462,6 +1493,7 @@ def compile_url_inputs(
         "snapshot": snapshot,
         "project": project,
         "asset_manifest": asset_manifest,
+        "name_resolution": name_resolution.as_dict(),
     }
 
 

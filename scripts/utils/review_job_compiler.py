@@ -56,6 +56,8 @@ _DOCUMENT_FIELDS = (
     "revision_id",
     "doc_token",
     "extraction_schema_version",
+    "title",
+    "document_title",
 )
 _REVIEW_ONLY_HINTS = ("校对", "核对", "检查", "确认", "review", "check", "verify")
 _RANGE_SEPARATOR = re.compile(r"\s*(?:-|–|—|~|至|\bto\b)\s*", re.IGNORECASE)

@@ -14,8 +14,13 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from utils.execution_input import (
+    ExecutionInputError,
+    load_execution_input,
+    resolve_artifact_name,
+)
 from utils.jianying_native_delivery import capture_draft_tree_receipt
-from utils.lite_package import package_lite_delivery
+from utils.lite_package import PACKAGE_SCHEMA_VERSION, package_lite_delivery
 from utils.review_audio_precision import (
     CANDIDATE_RENDERER_VERSION,
     REVERSE_ASR_DIAGNOSTIC_PURPOSE,
@@ -83,7 +88,7 @@ from utils.revision_runner import (
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v6"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v7"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
@@ -884,6 +889,7 @@ def _phase_paths(job_root: Path) -> dict[str, Path]:
         "input_dir": workspace / "inputs",
         "asset_dir": workspace / "inputs" / "downloaded_assets",
         "asset_manifest": workspace / "inputs" / "asset_manifest.json",
+        "execution_input": workspace / "inputs" / "execution-input.json",
         "snapshot": workspace / "inputs" / "document_snapshot.json",
         "project_original": workspace / "inputs" / "project_original.json",
         "project_lite": workspace / "inputs" / "project_lite.json",
@@ -1148,11 +1154,54 @@ def _package_receipt_path(package_zip: Path) -> Path:
     return package_zip.with_name(f"{package_zip.name}.receipt.json")
 
 
+def _name_resolution_from_project(path: Path) -> dict[str, Any] | None:
+    try:
+        if not path.is_file():
+            return None
+        project = _read_json_object(path, "persisted Lite project")
+    except (OSError, TypeError, ValueError):
+        return None
+    final_name = str(project.get("final_name") or project.get("draft_name") or "").strip()
+    if not final_name:
+        return None
+    return {
+        "requested_name": str(project.get("requested_name") or final_name),
+        "final_name": final_name,
+        "source": str(project.get("name_source") or "persisted_project"),
+        "sanitized": bool(project.get("name_sanitized", False)),
+    }
+
+
+def _name_resolution_for_actual_draft(
+    resolution: Mapping[str, Any] | None,
+    actual_name: str,
+) -> dict[str, Any]:
+    """Close naming over the directory actually written by JianYing."""
+
+    actual = str(actual_name or "").strip()
+    if not actual:
+        raise ValueError("Saved Lite draft has no usable directory name")
+    base = dict(resolution or {})
+    expected = str(base.get("final_name") or actual).strip()
+    base.setdefault("requested_name", expected)
+    base.setdefault("source", "persisted_project")
+    base.setdefault("sanitized", False)
+    base["final_name"] = actual
+    if expected != actual:
+        base["pre_fallback_name"] = expected
+        base["draft_fallback_applied"] = True
+    else:
+        base["draft_fallback_applied"] = False
+    return base
+
+
 def _validate_existing_package(
     package_zip: Path,
     draft_path: Path,
     *,
     relink_tool: Path,
+    name_resolution: Mapping[str, Any],
+    execution_input_digest: str,
 ) -> dict[str, Any] | None:
     receipt_path = _package_receipt_path(package_zip)
     if not package_zip.is_file() or not receipt_path.is_file():
@@ -1161,14 +1210,21 @@ def _validate_existing_package(
         receipt = _read_json_object(receipt_path, "Lite package receipt")
         draft_tree = capture_draft_tree_receipt(draft_path)
         if (
-            receipt.get("status") != "pass"
+            receipt.get("schema_version") != PACKAGE_SCHEMA_VERSION
+            or receipt.get("status") != "pass"
             or receipt.get("workflow_mode") != "lite"
             or Path(str(receipt.get("archive_path") or "")).resolve(strict=False)
             != package_zip.resolve(strict=False)
             or str(receipt.get("archive_sha256") or "") != sha256_file(package_zip)
+            or package_zip.name != f"{draft_path.name}.zip"
             or Path(str(receipt.get("source_draft_path") or "")).resolve(strict=False)
             != draft_path.resolve(strict=False)
             or str(receipt.get("source_tree_sha256") or "") != draft_tree["tree_sha256"]
+            or str(receipt.get("package_root_name") or "") != draft_path.name
+            or str(receipt.get("draft_name") or "") != draft_path.name
+            or receipt.get("name_resolution") != dict(name_resolution)
+            or str(receipt.get("execution_input_digest") or "") != execution_input_digest
+            or str(receipt.get("package_layout") or "") != "draft_root_bundle_v2"
             or receipt.get("package_tree_sha256") != receipt.get("extracted_tree_sha256")
             or receipt.get("zip_crc_pass") is not True
             or receipt.get("zip_tree_identity_pass") is not True
@@ -1240,6 +1296,7 @@ def run_review_document(
     drafts_root: str | os.PathLike[str],
     package_zip: str | os.PathLike[str],
     relink_tool: str | os.PathLike[str] | None = None,
+    execution_input_json: str | os.PathLike[str] | None = None,
     mock_media: bool = False,
     asr_timeout_seconds: float = 60.0,
     asr_poll_interval_seconds: float = 2.0,
@@ -1271,7 +1328,19 @@ def run_review_document(
     failure_details: dict[str, Any] = {}
     store: JobStateStore | None = None
     paths = _phase_paths(root)
-    package_path = Path(package_zip).expanduser().resolve(strict=False)
+    requested_package_path = Path(package_zip).expanduser().resolve(strict=False)
+    package_path = requested_package_path
+    intake: dict[str, Any] = {}
+    external_name = ""
+    execution_input_digest = ""
+    execution_input_payload: dict[str, Any] | None = None
+    if execution_input_json is not None and str(execution_input_json).strip():
+        try:
+            execution_input, execution_input_digest = load_execution_input(execution_input_json)
+        except ExecutionInputError as exc:
+            raise ValueError(str(exc)) from exc
+        execution_input_payload = execution_input
+        external_name = str(execution_input.get("artifact_name") or "").strip()
     snapshot_path = (
         Path(snapshot_json).expanduser().resolve(strict=False)
         if snapshot_json is not None and str(snapshot_json).strip()
@@ -1312,8 +1381,38 @@ def run_review_document(
         effective_cut_plan_path = (
             paths["processed_cut_plan"] if processed_plan_is_current else paths["cut_plan"]
         )
+        execution: dict[str, Any] = {}
+        final: dict[str, Any] = {}
+        try:
+            if paths["execution_result"].is_file():
+                execution = _read_json_object(paths["execution_result"], "revision result")
+            if paths["final_result"].is_file():
+                final = _read_json_object(paths["final_result"], "final acceptance")
+        except (OSError, TypeError, ValueError):
+            pass
+        compile_status = str(
+            (phase_records.get("input_compile") or {}).get("status") or ""
+        )
+        compile_is_current = compile_status in {"complete", "resumed"}
+        draft_status = str(
+            (phase_records.get("draft_write_validate") or {}).get("status") or ""
+        )
+        if draft_status not in {"complete", "resumed"}:
+            execution = {}
+        effective_package_path = package_path
+        package_status = str(
+            (phase_records.get("package_publish") or {}).get("status") or ""
+        )
+        package_is_current = package_status in {"complete", "resumed"}
+        if not package_is_current:
+            final = {}
+        delivery = final.get("delivery") if isinstance(final.get("delivery"), Mapping) else {}
+        delivered_archive = str(delivery.get("archive_path") or "").strip()
+        if package_is_current and delivered_archive:
+            effective_package_path = Path(delivered_archive).expanduser().resolve(strict=False)
         artifact_candidates = {
             "document_snapshot": paths["snapshot"],
+            "execution_input": paths["execution_input"],
             "project_lite": paths["project_lite"],
             "source_materials": paths["materials_ledger"],
             "visual_asset_index": paths["visual_index"],
@@ -1327,23 +1426,19 @@ def run_review_document(
             "processed_media_evidence": paths["processed_summary"],
             "revision_result": paths["execution_result"],
             "final_acceptance": paths["final_result"],
-            "package_zip": package_path,
-            "package_receipt": _package_receipt_path(package_path),
+            "package_zip": effective_package_path,
+            "package_receipt": _package_receipt_path(effective_package_path),
         }
+        if execution_input_payload is None or not compile_is_current:
+            artifact_candidates.pop("execution_input", None)
+        if not package_is_current:
+            for stale_name in ("final_acceptance", "package_zip", "package_receipt"):
+                artifact_candidates.pop(stale_name, None)
         artifacts = {
             name: row
             for name, candidate in artifact_candidates.items()
             if (row := _result_artifact(candidate)) is not None
         }
-        execution: dict[str, Any] = {}
-        final: dict[str, Any] = {}
-        try:
-            if paths["execution_result"].is_file():
-                execution = _read_json_object(paths["execution_result"], "revision result")
-            if paths["final_result"].is_file():
-                final = _read_json_object(paths["final_result"], "final acceptance")
-        except (OSError, TypeError, ValueError):
-            pass
         draft_path = str(execution.get("draft_path") or draft_path_text)
         unresolved: set[str] = set()
         for value in execution.get("label_only_unresolved_item_ids") or []:
@@ -1382,8 +1477,25 @@ def run_review_document(
             },
             "output_artifacts": artifacts,
             "draft_path": draft_path,
-            "package_zip": str(package_path),
-            "delivery": dict(final.get("delivery") or {}),
+            "package_zip": str(effective_package_path),
+            "delivery": dict(delivery),
+            "name_resolution": dict(
+                final.get("name_resolution")
+                or intake.get("name_resolution")
+                or (
+                    _name_resolution_from_project(paths["project_lite"])
+                    if compile_is_current
+                    else None
+                )
+                or (
+                    _name_resolution_from_project(paths["project_original"])
+                    if compile_is_current
+                    else None
+                )
+                or {}
+            ),
+            "requested_package_zip": str(requested_package_path),
+            "execution_input_digest": execution_input_digest,
             "phases": phases,
             "phase_execution": dict(phase_records),
             "unresolved_item_ids": sorted(unresolved),
@@ -1460,6 +1572,7 @@ def run_review_document(
             job_identity = {
                 "input_mode": "url",
                 "document_url_sha256": document_url_digest(validated_doc_url),
+                "execution_input_digest": execution_input_digest,
                 "workflow_mode": "lite",
             }
         else:
@@ -1484,6 +1597,7 @@ def run_review_document(
                 "project_path_sha256": canonical_json_sha256(
                     os.path.normcase(str(project_path))
                 ),
+                "execution_input_digest": execution_input_digest,
                 "workflow_mode": "lite",
             }
         input_digest = canonical_json_sha256(job_identity)
@@ -1504,7 +1618,8 @@ def run_review_document(
             "ffprobe_bin": ffprobe_bin,
             "context_before": float(context_before),
             "context_after": float(context_after),
-            "package_zip": os.path.normcase(str(package_path)),
+            "package_directory": os.path.normcase(str(requested_package_path.parent)),
+            "execution_input_digest": execution_input_digest,
             "drafts_root": os.path.normcase(str(drafts_path)),
             "relink_tool_sha256": sha256_file(relink_path),
         }
@@ -1516,8 +1631,6 @@ def run_review_document(
         cache = ArtifactCache(cache_path)
         inflight_root = cache_path / "inflight"
         item_ids: tuple[str, ...] = ()
-        intake: dict[str, Any] = {}
-
         def run_preflight() -> PhaseOutcome:
             nonlocal runtime_integrity_receipt
             if not mock_media:
@@ -1669,13 +1782,15 @@ def run_review_document(
             )
 
         def run_input_compile() -> PhaseOutcome:
-            nonlocal snapshot, raw_project, lite_project
+            nonlocal snapshot, raw_project, lite_project, package_path
             nonlocal snapshot_sha256, project_sha256, snapshot_assets
             nonlocal expected_project_materials, item_ids
             if has_doc_url:
                 try:
                     compiled_inputs = compile_url_inputs(
-                        intake["parsed"], intake["downloaded_assets"]
+                        intake["parsed"],
+                        intake["downloaded_assets"],
+                        external_name=external_name or None,
                     )
                 except ReviewDocumentIntakeError as exc:
                     failure_details["input_compile"] = _json_safe(exc.public_data())
@@ -1683,12 +1798,61 @@ def run_review_document(
                 failure_details.pop("input_compile", None)
                 snapshot = sanitize_document_snapshot(compiled_inputs["snapshot"])
                 raw_project = dict(compiled_inputs["project"])
+                intake["name_resolution"] = dict(compiled_inputs.get("name_resolution") or {})
                 atomic_write_json(paths["asset_manifest"], compiled_inputs["asset_manifest"])
+            if execution_input_payload is not None:
+                atomic_write_json(paths["execution_input"], execution_input_payload)
+            else:
+                # An execution input is invocation-scoped.  Never let a sidecar
+                # left by an older run silently rename a call that omitted the
+                # formal --execution-input entrypoint.
+                paths["execution_input"].unlink(missing_ok=True)
             atomic_write_json(paths["snapshot"], snapshot)
             atomic_write_json(paths["project_original"], raw_project)
             snapshot_sha256 = sha256_file(paths["snapshot"])
             project_sha256 = sha256_file(paths["project_original"])
             snapshot_assets = _path_rows_from_snapshot(snapshot)
+            document = snapshot.get("document")
+            document_title = ""
+            if isinstance(document, Mapping):
+                document_title = str(
+                    document.get("title") or document.get("document_title") or ""
+                ).strip()
+            if not document_title:
+                document_title = str(
+                    snapshot.get("title") or snapshot.get("document_title") or ""
+                ).strip()
+            if not has_doc_url:
+                fallback_identity = ""
+                if isinstance(document, Mapping):
+                    fallback_identity = str(
+                        document.get("document_identity_sha256") or ""
+                    )[:12]
+                if not fallback_identity:
+                    fallback_identity = canonical_json_sha256(snapshot)[:12]
+                name_resolution = resolve_artifact_name(
+                    external_name=external_name or None,
+                    document_title=document_title or None,
+                    fallback_name=f"AutoCutLite-{fallback_identity}",
+                )
+                raw_project.update(
+                    {
+                        "draft_name": name_resolution.final_name,
+                        "requested_name": name_resolution.requested_name,
+                        "final_name": name_resolution.final_name,
+                        "name_source": name_resolution.source,
+                        "name_sanitized": name_resolution.sanitized,
+                    }
+                )
+                intake["name_resolution"] = name_resolution.as_dict()
+                atomic_write_json(paths["project_original"], raw_project)
+                project_sha256 = sha256_file(paths["project_original"])
+            resolution = dict(intake.get("name_resolution") or {})
+            final_name = str(resolution.get("final_name") or raw_project.get("draft_name") or "").strip()
+            if final_name:
+                desired_package_path = requested_package_path.with_name(f"{final_name}.zip")
+                package_path = desired_package_path
+                package_path.parent.mkdir(parents=True, exist_ok=True)
             explicit_mode = str(raw_project.get("workflow_mode") or "").strip().casefold()
             if explicit_mode and explicit_mode != "lite":
                 raise ValueError("Project explicitly requests a non-Lite workflow")
@@ -1732,6 +1896,8 @@ def run_review_document(
                 ledger_path,
                 manifest_path,
             ]
+            if execution_input_payload is not None:
+                artifacts.append(paths["execution_input"])
             if has_doc_url:
                 artifacts.append(paths["asset_manifest"])
             return _phase_outcome(
@@ -2601,6 +2767,12 @@ def run_review_document(
             draft_path = Path(draft_path_text).expanduser().resolve(strict=True)
             if not draft_path.is_dir():
                 raise FileNotFoundError(f"Low-level revision did not save a draft directory: {draft_path}")
+            execution_draft_name = str(execution_payload.get("draft_name") or "").strip()
+            if execution_draft_name != draft_path.name:
+                raise ValueError(
+                    "Low-level revision draft_name does not match the saved draft directory: "
+                    f"result={execution_draft_name!r} directory={draft_path.name!r}"
+                )
             draft_digest = _draft_tree_digest(draft_path)
             atomic_write_json(paths["execution_result"], execution_payload)
             return _phase_outcome(
@@ -2622,15 +2794,32 @@ def run_review_document(
             )
 
         def run_final_acceptance() -> PhaseOutcome:
+            nonlocal package_path
             execution = _read_json_object(paths["execution_result"], "revision result")
             ledger = _read_json_object(paths["processed_items"], "processed source ledger")
             _validate_marker_receipts(execution, ledger)
             draft_path = Path(str(execution.get("draft_path") or "")).expanduser().resolve(
                 strict=True
             )
+            execution_draft_name = str(execution.get("draft_name") or "").strip()
+            if execution_draft_name != draft_path.name:
+                raise ValueError(
+                    "Saved revision draft_name does not match its directory: "
+                    f"result={execution_draft_name!r} directory={draft_path.name!r}"
+                )
+            package_path = requested_package_path.with_name(f"{draft_path.name}.zip")
+            name_resolution = _name_resolution_for_actual_draft(
+                intake.get("name_resolution")
+                or _name_resolution_from_project(paths["project_lite"]),
+                draft_path.name,
+            )
             draft_digest = _draft_tree_digest(draft_path)
             package_result = _validate_existing_package(
-                package_path, draft_path, relink_tool=relink_path
+                package_path,
+                draft_path,
+                relink_tool=relink_path,
+                name_resolution=name_resolution,
+                execution_input_digest=execution_input_digest,
             )
             package_cache_hit = package_result is not None
             if package_result is None:
@@ -2643,9 +2832,16 @@ def run_review_document(
                     draft_path,
                     package_path,
                     relink_tool=relink_path,
+                    package_root_name=draft_path.name,
+                    name_resolution=name_resolution,
+                    execution_input_digest=execution_input_digest,
                 )
                 package_result = _validate_existing_package(
-                    package_path, draft_path, relink_tool=relink_path
+                    package_path,
+                    draft_path,
+                    relink_tool=relink_path,
+                    name_resolution=name_resolution,
+                    execution_input_digest=execution_input_digest,
                 )
                 if package_result is None:
                     raise ValueError("Lite ZIP failed post-package hash, tree, or CRC validation")
@@ -2658,6 +2854,7 @@ def run_review_document(
                 "draft_tree_sha256": draft_digest,
                 "strict_draft_validation": True,
                 "marker_source_text_exact": True,
+                "name_resolution": name_resolution,
                 "delivery": package_result,
                 "unresolved_item_ids": execution.get("label_only_unresolved_item_ids") or [],
             }
@@ -2671,6 +2868,7 @@ def run_review_document(
                 data={
                     "draft_path": str(draft_path),
                     "archive_sha256": package_result["archive_sha256"],
+                    "name_resolution": name_resolution,
                     "completion_boundary": "lite_zip_delivery",
                 },
                 result={

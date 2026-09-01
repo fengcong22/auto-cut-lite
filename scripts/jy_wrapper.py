@@ -36,6 +36,7 @@ from utils.draft_patch import (
 )
 from utils.draft_retention import retain_latest_project_drafts
 from utils.errors import UserInputError
+from utils.execution_input import ExecutionInputError, load_execution_input, resolve_artifact_name
 from utils.formatters import (
     format_srt_time,
     get_configured_jianying_draft_root,
@@ -2388,6 +2389,7 @@ def cmd_revision_run(
     relink_tool: str = None,
     package_root_name: str = None,
     package_receipt: str = None,
+    execution_input_json: str = None,
 ) -> Dict[str, Any]:
     try:
         request = load_revision_request(request_json)
@@ -2396,6 +2398,34 @@ def cmd_revision_run(
             if normalized_workflow_mode not in {"full", "lite"}:
                 raise ValueError("workflow_mode must be either 'full' or 'lite'.")
             request = replace(request, workflow_mode=normalized_workflow_mode)
+        execution_input_digest = ""
+        execution_input = None
+        if execution_input_json is not None and str(execution_input_json).strip():
+            if request.workflow_mode != "lite":
+                raise ValueError("--execution-input is only available for workflow_mode=lite.")
+            try:
+                execution_input, execution_input_digest = load_execution_input(
+                    execution_input_json
+                )
+            except ExecutionInputError as exc:
+                raise ValueError(str(exc)) from exc
+        name_resolution = None
+        if request.workflow_mode == "lite":
+            project_name = request.project.draft_name
+            project_key = request.project.project_key
+            name_resolution = resolve_artifact_name(
+                external_name=(
+                    str(execution_input.get("artifact_name") or "")
+                    if execution_input is not None
+                    else None
+                ),
+                project_name=project_name,
+                fallback_name=f"AutoCutLite-{project_key[:12] or 'project'}",
+            )
+            request = replace(
+                request,
+                project=replace(request.project, draft_name=name_resolution.final_name),
+            )
         if package_zip is not None and request.workflow_mode != "lite":
             raise ValueError("--package-zip is only available for workflow_mode=lite.")
         doc_items = load_review_items_json(doc_items_json) if doc_items_json else None
@@ -2407,12 +2437,32 @@ def cmd_revision_run(
             doc_items=doc_items,
             localize_materials=package_zip is not None,
         )
-        if package_zip is not None:
-            if not str(result.get("draft_path") or "").strip():
+        if request.workflow_mode == "lite":
+            draft_path_text = str(result.get("draft_path") or "").strip()
+            if not draft_path_text:
                 raise ValueError("Lite revision result is missing the saved draft path.")
-            draft_path = Path(str(result["draft_path"])).expanduser().resolve(strict=False)
+            draft_path = Path(draft_path_text).expanduser().resolve(strict=False)
             if draft_path.name == "draft_content.json":
                 draft_path = draft_path.parent
+            result_draft_name = str(result.get("draft_name") or "").strip()
+            if result_draft_name != draft_path.name:
+                raise ValueError(
+                    "Lite revision draft_name does not match the saved draft directory: "
+                    f"result={result_draft_name!r} directory={draft_path.name!r}"
+                )
+            if name_resolution is None:
+                raise RuntimeError("Lite artifact name resolution was not initialized")
+            resolved_name = name_resolution.as_dict()
+            if name_resolution.final_name != draft_path.name:
+                resolved_name["pre_fallback_name"] = name_resolution.final_name
+                resolved_name["final_name"] = draft_path.name
+                resolved_name["draft_fallback_applied"] = True
+            else:
+                resolved_name["draft_fallback_applied"] = False
+            result = dict(result)
+            result["name_resolution"] = resolved_name
+            result["execution_input_digest"] = execution_input_digest
+        if package_zip is not None:
             tool_path = relink_tool
             if tool_path is None:
                 default_tool = (
@@ -2428,12 +2478,28 @@ def cmd_revision_run(
                     "--package-zip requires the bundled lite material relink tool, "
                     "but it was not found."
                 )
+            package_output = Path(package_zip).expanduser().resolve(strict=False)
+            package_output = package_output.with_name(f"{draft_path.name}.zip")
+            if (
+                package_root_name is not None
+                and str(package_root_name).strip() != draft_path.name
+            ):
+                raise ValueError(
+                    "--package-root-name must equal the actual Lite draft name under the "
+                    f"single-root package contract: {draft_path.name}"
+                )
             package = package_lite_delivery(
                 draft_path,
-                package_zip,
+                package_output,
                 relink_tool=tool_path,
-                package_root_name=package_root_name,
-                receipt_json=package_receipt,
+                package_root_name=draft_path.name,
+                receipt_json=(
+                    Path(package_receipt).expanduser().resolve(strict=False)
+                    if package_receipt is not None
+                    else None
+                ),
+                name_resolution=resolved_name,
+                execution_input_digest=execution_input_digest,
             )
             result = dict(result)
             result["delivery"] = package
@@ -2499,6 +2565,7 @@ def _build_command_handlers():
             relink_tool=args.relink_tool,
             package_root_name=args.package_root_name,
             package_receipt=args.package_receipt,
+            execution_input_json=args.execution_input_json,
         ),
         "review-document-run": lambda args: cmd_review_document_run(
             args.snapshot_json,
@@ -2508,6 +2575,11 @@ def _build_command_handlers():
             drafts_root=args.drafts_root,
             package_zip=args.package_zip,
             relink_tool=args.relink_tool,
+            **(
+                {"execution_input_json": args.execution_input_json}
+                if args.execution_input_json
+                else {}
+            ),
             mock_media=args.mock_media,
             asr_timeout_seconds=args.asr_timeout_seconds,
             asr_poll_interval_seconds=args.asr_poll_interval_seconds,

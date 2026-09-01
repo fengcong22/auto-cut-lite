@@ -53,7 +53,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         _write_json(
             snapshot,
             {
-                "document": {"id": "doc-1", "revision": "r1"},
+                "document": {"id": "doc-1", "revision": "r1", "title": "RunnerDraft"},
                 "items": [
                     {
                         "id": "spoken-1",
@@ -88,7 +88,11 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         _write_json(
             snapshot,
             {
-                "document": {"id": "doc-visual", "revision": "r1"},
+                "document": {
+                    "id": "doc-visual",
+                    "revision": "r1",
+                    "title": "VisualDraft",
+                },
                 "items": [
                     {
                         "id": "animation-1",
@@ -122,7 +126,11 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         _write_json(
             snapshot,
             {
-                "document": {"id": "doc-pause", "revision": "r1"},
+                "document": {
+                    "id": "doc-pause",
+                    "revision": "r1",
+                    "title": "PauseRunnerDraft",
+                },
                 "items": [
                     {
                         "id": "pause-1",
@@ -181,17 +189,25 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         }
 
     @staticmethod
-    def _fake_package(draft_dir, output_zip, *, relink_tool=None, **_kwargs):
+    def _fake_package(
+        draft_dir,
+        output_zip,
+        *,
+        relink_tool=None,
+        name_resolution=None,
+        execution_input_digest="",
+        **_kwargs,
+    ):
         draft = Path(draft_dir).resolve()
         output = Path(output_zip).resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_STORED) as archive:
-            archive.writestr("RunnerDraft_ZIP/receipt.txt", "validated")
+            archive.writestr(f"{draft.name}/receipt.txt", "validated")
         archive_sha256 = runner.sha256_file(output)
         tree = runner.capture_draft_tree_receipt(draft)
         receipt = output.with_name(f"{output.name}.receipt.json")
         payload = {
-            "schema_version": 1,
+            "schema_version": runner.PACKAGE_SCHEMA_VERSION,
             "status": "pass",
             "workflow_mode": "lite",
             "delivery_mode": "lite_zip",
@@ -199,6 +215,11 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             "archive_sha256": archive_sha256,
             "source_draft_path": str(draft),
             "source_tree_sha256": tree["tree_sha256"],
+            "package_root_name": draft.name,
+            "draft_name": draft.name,
+            "name_resolution": dict(name_resolution or {}),
+            "execution_input_digest": execution_input_digest,
+            "package_layout": "draft_root_bundle_v2",
             "package_tree_sha256": "a" * 64,
             "extracted_tree_sha256": "a" * 64,
             "zip_crc_pass": True,
@@ -321,6 +342,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         drafts_root: Path,
         package_zip: Path,
         cache_root: Path,
+        execution_input_json: Path | None = None,
     ):
         return runner.run_review_document(
             snapshot,
@@ -329,6 +351,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             drafts_root=drafts_root,
             package_zip=package_zip,
             cache_root=cache_root,
+            execution_input_json=execution_input_json,
             workflow_mode="lite",
         )
 
@@ -378,13 +401,100 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
             self.assertEqual(mocks["render"].call_count, 1)
             self.assertEqual(mocks["execute"].call_count, 1)
             self.assertEqual(mocks["package"].call_count, 1)
-            self.assertEqual(first["package_zip"], str((root / "delivery.zip").resolve()))
+            self.assertEqual(first["package_zip"], str((root / "RunnerDraft.zip").resolve()))
             self.assertIn("revision_request", first["output_artifacts"])
             self.assertEqual(list(job.rglob("*.py")), [])
             processed = json.loads(
                 Path(first["output_artifacts"]["doc_items"]["path"]).read_text(encoding="utf-8")
             )
             self.assertEqual(processed["review_items"][0]["source_text"], "00:01 删除“测试”")
+
+    def test_execution_input_is_invocation_scoped_and_does_not_leak_from_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            execution_input = root / "execution-input.json"
+            _write_json(
+                execution_input,
+                {"schema_version": 1, "artifact_name": "External:Name"},
+            )
+            job = root / "job"
+            with self._patched_runtime():
+                first = self._run(
+                    snapshot,
+                    project,
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery" / "placeholder.zip",
+                    cache_root=root / "cache",
+                    execution_input_json=execution_input,
+                )
+                second = self._run(
+                    snapshot,
+                    project,
+                    job_root=job,
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery" / "placeholder.zip",
+                    cache_root=root / "cache",
+                )
+
+            self.assertEqual(first["name_resolution"]["final_name"], "External_Name")
+            self.assertEqual(first["name_resolution"]["source"], "external_input")
+            self.assertTrue(first["execution_input_digest"])
+            self.assertEqual(second["name_resolution"]["final_name"], "RunnerDraft")
+            self.assertEqual(second["name_resolution"]["source"], "document_title")
+            self.assertEqual(second["execution_input_digest"], "")
+            self.assertFalse(
+                (job / "workspace" / "inputs" / "execution-input.json").exists()
+            )
+
+            replacement_input = root / "replacement-input.json"
+            _write_json(
+                replacement_input,
+                {"schema_version": 1, "artifact_name": "A New Name"},
+            )
+            with self._patched_runtime(), patch(
+                "utils.runtime_integrity.validate_current_lite_runtime",
+                side_effect=RuntimeError("forced preflight failure"),
+            ):
+                with self.assertRaises(runner.ReviewDocumentRunError) as raised:
+                    self._run(
+                        snapshot,
+                        project,
+                        job_root=job,
+                        drafts_root=root / "drafts",
+                        package_zip=root / "delivery" / "placeholder.zip",
+                        cache_root=root / "cache",
+                        execution_input_json=replacement_input,
+                    )
+            failure = raised.exception.result
+            self.assertEqual(failure["delivery"], {})
+            self.assertEqual(failure["name_resolution"], {})
+            self.assertNotIn("package_zip", failure["output_artifacts"])
+            self.assertNotIn("execution_input", failure["output_artifacts"])
+
+    def test_top_level_document_title_overrides_compat_project_name(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            snapshot_payload = json.loads(snapshot.read_text(encoding="utf-8"))
+            snapshot_payload["title"] = "Top Level Title"
+            snapshot_payload["document"].pop("title")
+            _write_json(snapshot, snapshot_payload)
+            with self._patched_runtime():
+                result = self._run(
+                    snapshot,
+                    project,
+                    job_root=root / "job",
+                    drafts_root=root / "drafts",
+                    package_zip=root / "delivery" / "placeholder.zip",
+                    cache_root=root / "cache",
+                )
+
+            self.assertEqual(result["name_resolution"]["final_name"], "Top Level Title")
+            self.assertEqual(result["name_resolution"]["source"], "document_title")
+            self.assertEqual(Path(result["draft_path"]).name, "Top Level Title")
+            self.assertEqual(Path(result["package_zip"]).name, "Top Level Title.zip")
 
     def test_embedded_source_audio_uses_cached_editable_audio_for_a1_a2(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -408,7 +518,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-1",
                     drafts_root=root / "drafts-1",
-                    package_zip=root / "delivery-1.zip",
+                    package_zip=root / "delivery-1" / "placeholder.zip",
                     cache_root=cache,
                 )
                 second = self._run(
@@ -416,7 +526,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-2",
                     drafts_root=root / "drafts-2",
-                    package_zip=root / "delivery-2.zip",
+                    package_zip=root / "delivery-2" / "placeholder.zip",
                     cache_root=cache,
                 )
 
@@ -1218,7 +1328,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-1",
                     drafts_root=root / "drafts-1",
-                    package_zip=root / "delivery-1.zip",
+                    package_zip=root / "delivery-1" / "placeholder.zip",
                     cache_root=cache,
                 )
                 project_payload = json.loads(project.read_text(encoding="utf-8"))
@@ -1228,7 +1338,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-2",
                     drafts_root=root / "drafts-2",
-                    package_zip=root / "delivery-2.zip",
+                    package_zip=root / "delivery-2" / "placeholder.zip",
                     cache_root=cache,
                 )
 
@@ -1254,7 +1364,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-1",
                     drafts_root=root / "drafts-1",
-                    package_zip=root / "delivery-1.zip",
+                    package_zip=root / "delivery-1" / "placeholder.zip",
                     cache_root=cache,
                 )
                 second = self._run(
@@ -1262,7 +1372,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                     project,
                     job_root=root / "job-2",
                     drafts_root=root / "drafts-2",
-                    package_zip=root / "delivery-2.zip",
+                    package_zip=root / "delivery-2" / "placeholder.zip",
                     cache_root=cache,
                 )
 
