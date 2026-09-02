@@ -661,6 +661,44 @@ def _lite_layout(request: RevisionRequest) -> str:
     return layout
 
 
+def _positive_timing_window(value: Any) -> Optional[Tuple[float, float]]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    try:
+        start, end = float(value[0]), float(value[1])
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(start) or not math.isfinite(end) or end <= start:
+        return None
+    return start, end
+
+
+def _positive_timing_windows(value: Any) -> Optional[List[Tuple[float, float]]]:
+    if not isinstance(value, list) or not value:
+        return None
+    windows: List[Tuple[float, float]] = []
+    for raw_window in value:
+        window = _positive_timing_window(raw_window)
+        if window is None or (windows and window[0] < windows[-1][1] - 1e-6):
+            return None
+        windows.append(window)
+    return windows
+
+
+def _timing_windows_match(
+    left: Iterable[Tuple[float, float]],
+    right: Iterable[Tuple[float, float]],
+    *,
+    tolerance: float = 0.01,
+) -> bool:
+    left_rows = list(left)
+    right_rows = list(right)
+    return len(left_rows) == len(right_rows) and all(
+        abs(left_start - right_start) <= tolerance and abs(left_end - right_end) <= tolerance
+        for (left_start, left_end), (right_start, right_end) in zip(left_rows, right_rows)
+    )
+
+
 def _spoken_cut_alignment_problems(
     edit: RevisionEdit,
     review_item: Optional[RevisionReviewItem],
@@ -704,6 +742,53 @@ def _spoken_cut_alignment_problems(
     if _as_bool(alignment.get("authoritative_cut_boundary")) is not True:
         problems.append("asr_alignment.authoritative_cut_boundary must be true")
 
+    source_kind = str(edit.source_kind or "").strip().casefold()
+    indexed_window: Optional[Tuple[float, float]] = None
+    indexed_union: Optional[Tuple[float, float]] = None
+    raw_resolved_windows = evidence.get("resolved_cut_windows")
+    if (
+        source_kind == "colored_span_delete"
+        and isinstance(raw_resolved_windows, list)
+        and len(raw_resolved_windows) > 1
+    ):
+        resolved_windows = _positive_timing_windows(raw_resolved_windows)
+        if resolved_windows is None:
+            problems.append("resolved_cut_windows is invalid")
+        else:
+            source_windows = _positive_timing_windows(evidence.get("source_cut_windows"))
+            if source_windows is None or not _timing_windows_match(
+                resolved_windows, source_windows
+            ):
+                problems.append("source_cut_windows do not match the resolved item windows")
+            alignment_windows = _positive_timing_windows(alignment.get("resolved_cut_windows"))
+            if alignment_windows is None or not _timing_windows_match(
+                resolved_windows, alignment_windows
+            ):
+                problems.append(
+                    "asr_alignment.resolved_cut_windows do not match the item windows"
+                )
+            raw_window_index = evidence.get("window_index")
+            try:
+                window_index = int(raw_window_index)
+                numeric_window_index = float(raw_window_index)
+            except (TypeError, ValueError, OverflowError):
+                window_index = 0
+                numeric_window_index = math.nan
+            if (
+                isinstance(raw_window_index, bool)
+                or not math.isfinite(numeric_window_index)
+                or numeric_window_index != window_index
+                or not 1 <= window_index <= len(resolved_windows)
+            ):
+                problems.append("window_index does not select a resolved colored-span window")
+            else:
+                indexed_window = resolved_windows[window_index - 1]
+                indexed_union = (resolved_windows[0][0], resolved_windows[-1][1])
+                if not _timing_windows_match(
+                    [indexed_window], [(float(edit.start), float(edit.end))]
+                ):
+                    problems.append("window_index does not match the edit start/end")
+
     matched_rows = alignment.get("matches") or alignment.get("words")
     matched_starts: List[float] = []
     matched_ends: List[float] = []
@@ -733,6 +818,24 @@ def _spoken_cut_alignment_problems(
                 matched_ends.append(match_end)
             previous_start = match_start
 
+    comparison_starts = matched_starts
+    comparison_ends = matched_ends
+    if indexed_window is not None and matched_starts:
+        scoped_intervals = [
+            (start, end)
+            for start, end in zip(matched_starts, matched_ends)
+            if indexed_window[0] - 1e-6
+            <= (start + end) / 2.0
+            <= indexed_window[1] + 1e-6
+        ]
+        if not scoped_intervals:
+            problems.append("indexed colored-span window has no authoritative ASR matches")
+            comparison_starts = []
+            comparison_ends = []
+        else:
+            comparison_starts = [start for start, _ in scoped_intervals]
+            comparison_ends = [end for _, end in scoped_intervals]
+
     resolved = (
         alignment.get("resolved_cut_window")
         or evidence.get("resolved_cut_window")
@@ -746,6 +849,22 @@ def _spoken_cut_alignment_problems(
         except (TypeError, ValueError):
             problems.append("resolved_cut_window must be numeric")
         else:
+            comparison_window = (resolved_start, resolved_end)
+            if indexed_window is not None:
+                if _timing_windows_match([comparison_window], [indexed_window]):
+                    comparison_window = indexed_window
+                elif indexed_union is not None and _timing_windows_match(
+                    [comparison_window], [indexed_union]
+                ):
+                    # Version 1.6.3 wrote the item-wide union into every edit.
+                    # The indexed window list remains authoritative for that
+                    # cached payload and lets a failed job resume safely.
+                    comparison_window = indexed_window
+                else:
+                    problems.append(
+                        "resolved_cut_window matches neither the indexed window nor item union"
+                    )
+            resolved_start, resolved_end = comparison_window
             if (
                 not math.isfinite(resolved_start)
                 or not math.isfinite(resolved_end)
@@ -754,9 +873,9 @@ def _spoken_cut_alignment_problems(
                 problems.append("resolved_cut_window is invalid")
             elif abs(resolved_start - edit.start) > 0.01 or abs(resolved_end - edit.end) > 0.01:
                 problems.append("edit start/end do not match the ASR-resolved cut window")
-            elif matched_starts and (
-                abs(resolved_start - min(matched_starts)) > 0.05
-                or abs(resolved_end - max(matched_ends)) > 0.05
+            elif comparison_starts and (
+                abs(resolved_start - min(comparison_starts)) > 0.05
+                or abs(resolved_end - max(comparison_ends)) > 0.05
             ):
                 problems.append(
                     "resolved_cut_window does not match the first/last authoritative ASR match"
@@ -775,8 +894,9 @@ def _spoken_cut_alignment_problems(
         colored_status = str(evidence.get("colored_span_status") or "").strip().casefold()
         if colored_status != "resolved" or not isinstance(colored_spans, list) or not colored_spans:
             problems.append("colored_span_delete requires resolved review-colored rich-text spans")
+        elif indexed_window is not None and len(colored_spans) != len(raw_resolved_windows):
+            problems.append("colored spans do not map one-to-one to resolved cut windows")
 
-    source_kind = str(edit.source_kind or "").strip().casefold()
     if source_kind in _PRECISE_BOUNDARY_KINDS:
         refinement = evidence.get("boundary_refinement")
         if not isinstance(refinement, dict):
@@ -797,10 +917,15 @@ def _spoken_cut_alignment_problems(
                 except (TypeError, ValueError):
                     problems.append("boundary_refinement.resolved_cut_window must be numeric")
                 else:
-                    if (
-                        abs(refinement_start - edit.start) > 0.01
-                        or abs(refinement_end - edit.end) > 0.01
-                    ):
+                    refinement_window = (refinement_start, refinement_end)
+                    matches_edit = _timing_windows_match(
+                        [refinement_window], [(float(edit.start), float(edit.end))]
+                    )
+                    matches_legacy_union = bool(
+                        indexed_union is not None
+                        and _timing_windows_match([refinement_window], [indexed_union])
+                    )
+                    if not matches_edit and not matches_legacy_union:
                         problems.append(
                             "boundary_refinement window does not match the edit start/end"
                         )

@@ -3128,6 +3128,72 @@ class LiteRevisionTests(unittest.TestCase):
         problems = _spoken_cut_alignment_problems(request.edits[0], None)
         self.assertFalse(any("boundary_refinement" in row for row in problems))
 
+    def test_legacy_colored_span_multi_window_evidence_uses_window_index(self):
+        windows = [[513.44, 513.64], [513.76, 514.0]]
+        alignment = {
+            "status": "pass",
+            "provider": "volc_asr",
+            "resource_id": "volc.bigasr.auc",
+            "adapter_version": "auto-cut-volc-asr-v4",
+            "granularity": "word",
+            "input_sha256": "a" * 64,
+            "authoritative_cut_boundary": True,
+            "matches": [
+                {"text": "我", "start": 513.44, "end": 513.56},
+                {"text": "们", "start": 513.56, "end": 513.64},
+                {"text": "看", "start": 513.76, "end": 514.0},
+            ],
+            "resolved_cut_window": [513.44, 514.0],
+            "resolved_cut_windows": windows,
+        }
+        common_evidence = {
+            "review_timestamp_role": "search_hint",
+            "delete": "我们就看",
+            "must_keep": ["北朝", "进入"],
+            "strategy": "precision_first",
+            "colored_span_status": "resolved",
+            "colored_spans": [
+                {"text": "我们", "color": "rgb(36,91,219)"},
+                {"text": "看", "color": "rgb(36,91,219)"},
+            ],
+            "asr_alignment": alignment,
+            "source_cut_windows": windows,
+            "resolved_cut_windows": windows,
+            "resolved_cut_window": [513.44, 514.0],
+            "boundary_refinement": {
+                "status": "asr_character_edge",
+                "resolved_cut_window": [513.44, 514.0],
+                "crossed_must_keep": False,
+            },
+        }
+        request = _load_request(
+            {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "LegacyColoredMultiWindow",
+                    "source_video": "C:/media/source.mp4",
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "source_kind": "colored_span_delete",
+                        "start": start,
+                        "end": end,
+                        "doc_item_id": "colored-multi",
+                        "evidence": {**common_evidence, "window_index": index},
+                    }
+                    for index, (start, end) in enumerate(windows, start=1)
+                ],
+            }
+        )
+
+        for edit in request.edits:
+            self.assertEqual(_spoken_cut_alignment_problems(edit, None), [])
+
+        request.edits[1].evidence["window_index"] = 3
+        problems = _spoken_cut_alignment_problems(request.edits[1], None)
+        self.assertTrue(any("window_index" in problem for problem in problems))
+
     def test_review_marker_semantic_backgrounds_are_distinct(self):
         colors = ReviewMarkerOpsMixin.REVIEW_MARKER_BACKGROUND_COLORS
         self.assertNotEqual(colors["ellipsis_range_delete"], colors["colored_span_delete"])

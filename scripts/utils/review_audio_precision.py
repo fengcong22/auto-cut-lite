@@ -1077,6 +1077,32 @@ def _row_source_windows(row: Mapping[str, Any]) -> list[list[float]]:
     return sorted(windows, key=lambda value: (value[0], value[1]))
 
 
+def _alignment_matches_for_window(
+    alignment: Mapping[str, Any], window: Sequence[float]
+) -> list[dict[str, Any]]:
+    """Return only authoritative ASR rows owned by one resolved cut window."""
+
+    raw_matches = alignment.get("matches") or alignment.get("words")
+    if not isinstance(raw_matches, list) or len(window) < 2:
+        return []
+    window_start, window_end = float(window[0]), float(window[1])
+    selected: list[dict[str, Any]] = []
+    for raw_match in raw_matches:
+        if not isinstance(raw_match, Mapping):
+            continue
+        try:
+            match_start = float(raw_match["start"])
+            match_end = float(raw_match["end"])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            continue
+        if not math.isfinite(match_start) or not math.isfinite(match_end) or match_end <= match_start:
+            continue
+        midpoint = (match_start + match_end) / 2.0
+        if window_start - 1e-6 <= midpoint <= window_end + 1e-6:
+            selected.append(deepcopy(dict(raw_match)))
+    return selected
+
+
 def _match_distance(match: Mapping[str, Any], anchor: float | None) -> float:
     if anchor is None:
         return 0.0
@@ -1997,12 +2023,24 @@ def apply_audio_plan_to_compiled_payloads(
         }
         for window_index, window in enumerate(row_windows, start=1):
             edit_evidence = deepcopy(evidence)
+            edit_window = [round(float(window[0]), 6), round(float(window[1]), 6)]
+            edit_alignment = deepcopy(dict(edit_evidence["asr_alignment"]))
+            edit_alignment["matches"] = _alignment_matches_for_window(
+                edit_alignment, edit_window
+            )
+            edit_alignment.pop("words", None)
+            edit_alignment["resolved_cut_window"] = edit_window
+            edit_alignment["resolved_time"] = edit_window[0]
+            edit_evidence["asr_alignment"] = edit_alignment
+            edit_evidence["resolved_cut_window"] = edit_window
+            edit_evidence["resolved_time"] = edit_window[0]
+            edit_evidence["boundary_refinement"]["resolved_cut_window"] = edit_window
             edit_evidence["window_index"] = window_index
             request["edits"].append(
                 {
                     "type": "delete",
-                    "start": window[0],
-                    "end": window[1],
+                    "start": edit_window[0],
+                    "end": edit_window[1],
                     "label": row["source_text"],
                     "detail": (
                         (row.get("delete_phrases") or [row["delete"]])[window_index - 1]

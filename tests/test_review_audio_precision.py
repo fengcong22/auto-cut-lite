@@ -783,6 +783,113 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(rows["first"]["must_keep"], ["保留"])
         self.assertEqual(rows["second"]["must_keep"], ["留下"])
 
+    def test_colored_span_multi_window_edits_carry_per_window_asr_evidence(self):
+        source_text = "00:01 删除蓝色字\u201c我们就看\u201d"
+        review_items = [
+            {
+                "id": "colored-multi",
+                "kind": "colored_span_delete",
+                "source_text": source_text,
+                "start": 1.0,
+                "execution_required": True,
+                "colored_spans": [
+                    {"text": "我们", "color": "rgb(36,91,219)"},
+                    {"text": "看", "color": "rgb(36,91,219)"},
+                ],
+                "evidence": {
+                    "delete": "我们就看",
+                    "colored_span_status": "resolved",
+                    "colored_spans": [
+                        {"text": "我们", "color": "rgb(36,91,219)"},
+                        {"text": "看", "color": "rgb(36,91,219)"},
+                    ],
+                },
+            }
+        ]
+        cut_plan = resolve_lite_audio_items(
+            review_items,
+            _source_asr(
+                [
+                    {"text": "前文", "start": 0.4, "end": 0.8},
+                    {"text": "我", "start": 1.0, "end": 1.1},
+                    {"text": "们", "start": 1.1, "end": 1.2},
+                    {"text": "就", "start": 1.2, "end": 1.3},
+                    {"text": "看", "start": 1.3, "end": 1.4},
+                    {"text": "后文", "start": 1.5, "end": 1.9},
+                ]
+            ),
+            source_duration_seconds=3.0,
+        )
+        self.assertEqual(
+            cut_plan["rows"][0]["source_cut_windows"],
+            [[1.0, 1.2], [1.3, 1.4]],
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_audio = root / "source.wav"
+            candidate_audio = root / "candidate.wav"
+            _write_pcm16_wav(source_audio, 3.0)
+            _write_pcm16_wav(candidate_audio, 3.0)
+            delivery_plan = build_lite_split_gap_audio_plan(
+                cut_plan,
+                source_audio_path=source_audio,
+                candidate_audio_path=candidate_audio,
+            )
+            updated_request, updated_ledger = apply_audio_plan_to_compiled_payloads(
+                {
+                    "workflow_mode": "lite",
+                    "project": {
+                        "draft_name": "ColoredMultiWindow",
+                        "source_video": "C:/media/source.mp4",
+                    },
+                    "review_items": review_items,
+                    "edits": [],
+                },
+                {"review_items": review_items},
+                cut_plan,
+                audio_delivery_plan=delivery_plan,
+                source_audio_path=source_audio,
+                candidate_audio_path=None,
+            )
+            request_path = root / "request.json"
+            ledger_path = root / "ledger.json"
+            request_path.write_text(
+                json.dumps(updated_request, ensure_ascii=False), encoding="utf-8"
+            )
+            ledger_path.write_text(
+                json.dumps(updated_ledger, ensure_ascii=False), encoding="utf-8"
+            )
+            loaded_request = load_revision_request(str(request_path))
+            loaded_ledger = load_review_items_json(str(ledger_path))
+            _validate_lite_audio_timing_sources(loaded_request, loaded_ledger)
+
+        edits = updated_request["edits"]
+        self.assertEqual(
+            [(edit["start"], edit["end"]) for edit in edits],
+            [(1.0, 1.2), (1.3, 1.4)],
+        )
+        self.assertEqual(
+            [edit["evidence"]["resolved_cut_window"] for edit in edits],
+            [[1.0, 1.2], [1.3, 1.4]],
+        )
+        self.assertEqual(
+            [
+                [match["text"] for match in edit["evidence"]["asr_alignment"]["matches"]]
+                for edit in edits
+            ],
+            [["我", "们"], ["看"]],
+        )
+        for edit in edits:
+            self.assertEqual(
+                edit["evidence"]["resolved_cut_windows"],
+                [[1.0, 1.2], [1.3, 1.4]],
+            )
+            self.assertEqual(
+                edit["evidence"]["boundary_refinement"]["resolved_cut_window"],
+                [edit["start"], edit["end"]],
+            )
+
     def test_apply_audio_plan_touches_only_asr_items_and_keeps_source_text_exact(self):
         audio_text = "00:05 这里的读音暂不自动修，原文标记。\n第二行保持。"
         visual_text = "00:07 添加给定图片"
