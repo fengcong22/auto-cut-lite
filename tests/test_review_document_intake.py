@@ -744,6 +744,50 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
         self.assertEqual(row["asset_selection"]["candidate_count"], 2)
         self.assertEqual(row["asset_selection"]["selected_asset_id"], "image-2")
 
+    def test_image_animation_reference_is_not_imported_as_project_material(self) -> None:
+        parsed = {
+            "document_identity_sha256": "a" * 64,
+            "revision_id": 1,
+            "content_sha256": "b" * 64,
+            "asset_identity_sha256": "c" * 64,
+            "review_items": [
+                {
+                    "block_id": "animation",
+                    "source_text": "02:06，下方图片的动画，推迟到02:07",
+                }
+            ],
+        }
+        assets = [
+            {
+                "asset_id": "source",
+                "path": "source.mp4",
+                "relative_path": "source.mp4",
+                "sha256": "1" * 64,
+                "byte_size": 10,
+                "mime": "video/mp4",
+                "extension": ".mp4",
+                "name": "源视频.mp4",
+            },
+            {
+                "asset_id": "reference",
+                "path": "reference.png",
+                "relative_path": "reference.png",
+                "sha256": "2" * 64,
+                "byte_size": 20,
+                "mime": "image/png",
+                "extension": ".png",
+                "name": "参考图.png",
+                "associated_item_index": 0,
+            },
+        ]
+
+        compiled = intake.compile_url_inputs(parsed, assets)
+        row = compiled["snapshot"]["review_items"][0]
+        manifest = {item["asset_id"]: item for item in compiled["asset_manifest"]["assets"]}
+
+        self.assertNotIn("asset_paths", row)
+        self.assertEqual(manifest["reference"]["role"], "document_attachment")
+
     def test_readiness_persists_hashes_and_invalidates_version_changes(self) -> None:
         whoami = {
             "available": True,

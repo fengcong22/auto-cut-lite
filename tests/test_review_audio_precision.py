@@ -569,6 +569,54 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(row["end"], words[-1]["end"])
         self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
 
+    def test_source_asr_allows_whitelisted_internal_insertion_near_review_time(self):
+        words = _character_words("掌握这个过程的时候", 97.2, 0.1)
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "internal-insertion",
+                    "kind": "phrase_delete",
+                    "source_text": "01:38 删除掌握过程的时候",
+                    "execution_required": True,
+                    "evidence": {"delete": "掌握过程的时候", "must_keep": []},
+                }
+            ],
+            _source_asr(words),
+            source_duration_seconds=110.0,
+        )
+
+        row = result["rows"][0]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(row["match_method"], "time_anchored_internal_insertion")
+        self.assertEqual(row["asr_match"]["extra_asr_text"], "这个")
+        self.assertEqual((row["start"], row["end"]), (words[0]["start"], words[-1]["end"]))
+
+    def test_ellipsis_terminal_omission_competes_with_earlier_exact_anchor(self):
+        words = [
+            *_character_words("开头", 117.0, 0.1),
+            *_character_words("魏蜀吴", 118.0, 0.1),
+            *_character_words("魏蜀", 125.3, 0.16),
+        ]
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "near-terminal-omission",
+                    "kind": "ellipsis_range_delete",
+                    "source_text": "01:57-02:06 删除开头……魏蜀吴",
+                    "execution_required": True,
+                    "evidence": {"delete": "开头……魏蜀吴", "must_keep": []},
+                }
+            ],
+            _source_asr(words),
+            source_duration_seconds=130.0,
+        )
+
+        row = result["rows"][0]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(row["match_method"], "ellipsis_anchor_range")
+        self.assertEqual(row["end"], words[-1]["end"])
+        self.assertEqual(row["asr_match"]["omitted_review_text"], "吴")
+
     def test_source_asr_uses_nearest_word_span_without_joining_repeat(self):
         first = _character_words("哎就有这么个地方叫德意志", 54.45, 0.14)
         second = _character_words("哎就有这么个地方叫德意志", 57.51, 0.14)
@@ -1326,6 +1374,91 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertTrue(drifted["rows"][0]["keep_hits"]["就是"])
         self.assertEqual(contained["rows"][0]["status"], "review")
         self.assertFalse(contained["rows"][0]["keep_hits"]["就是"])
+
+    def test_reverse_report_distinguishes_automatic_and_explicit_must_keep(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = root / "source.wav"
+            candidate = root / "candidate.wav"
+            _write_pcm16_wav(source, 3.0)
+            _write_pcm16_wav(candidate, 3.0)
+            base_row = {
+                "item_id": "must-keep",
+                "kind": "phrase_delete",
+                "source_text": "00:01 删除删词",
+                "execution_required": True,
+                "strategy": "precision_first",
+                "delete": "删词",
+                "must_keep": ["保护"],
+                "must_keep_source_windows": [
+                    {
+                        "phrase": "保护",
+                        "start": 0.7,
+                        "end": 0.9,
+                        "source": "automatic_adjacent_asr_context",
+                    }
+                ],
+                "start": 1.0,
+                "end": 1.3,
+            }
+            delivery_plan = build_lite_split_gap_audio_plan(
+                {
+                    "source_duration_seconds": 3.0,
+                    "rows": [base_row],
+                    "executable_cuts": [{"item_id": "must-keep", "start": 1.0, "end": 1.3}],
+                },
+                source_audio_path=source,
+                candidate_audio_path=candidate,
+            )
+
+            def report_for(origin, words):
+                row = {**base_row, "must_keep_origin": origin}
+                cut_plan = {
+                    "source_duration_seconds": 3.0,
+                    "rows": [row],
+                    "executable_cuts": [{"item_id": "must-keep", "start": 1.0, "end": 1.3}],
+                }
+                return build_full_candidate_reverse_report(
+                    {"audio_delivery_plan": delivery_plan},
+                    cut_plan,
+                    {
+                        "provider": "volc_asr",
+                        "resource_id": "volc.bigasr.auc",
+                        "adapter_version": "test-adapter-v1",
+                        "service_job_id": "reverse-job",
+                        "service_result_sha256": "c" * 64,
+                        "words": words,
+                    },
+                    candidate_audio_path=candidate,
+                    audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
+                )
+
+            automatic_missing = report_for(
+                "automatic_adjacent_asr_context",
+                [{"text": "其他内容", "start": 1.5, "end": 1.8}],
+            )
+            explicit_missing = report_for(
+                "explicit",
+                [{"text": "其他内容", "start": 1.5, "end": 1.8}],
+            )
+            automatic_inside_cut = report_for(
+                "automatic_adjacent_asr_context",
+                [
+                    {"text": "保护", "start": 1.05, "end": 1.15},
+                    {"text": "其他内容", "start": 1.5, "end": 1.8},
+                ],
+            )
+
+        automatic_row = automatic_missing["rows"][0]
+        self.assertEqual(automatic_row["status"], "pass")
+        self.assertEqual(
+            automatic_row["must_keep_warnings"][0]["reason"],
+            "automatic_context_not_recognized",
+        )
+        self.assertEqual(explicit_missing["rows"][0]["status"], "review")
+        inside_row = automatic_inside_cut["rows"][0]
+        self.assertEqual(inside_row["status"], "review")
+        self.assertTrue(inside_row["must_keep_cut_hits"]["保护"])
 
     def test_reverse_report_still_rejects_delete_hit_at_cut_window(self):
         with tempfile.TemporaryDirectory() as temp_dir:

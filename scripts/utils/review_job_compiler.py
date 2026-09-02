@@ -33,7 +33,7 @@ from utils.revision_validation import derive_acceptance_profile
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
-_TOOL_VERSION = 3
+_TOOL_VERSION = 4
 _OUTPUT_NAMES = {
     "doc_items": "doc_items.json",
     "revision_request": "revision_request.json",
@@ -497,6 +497,7 @@ def _execution_required_for_kind(kind: str, requested: bool) -> bool:
         "audio_repair",
         "replace_audio",
         "pointer_overlay",
+        "visual_content_edit",
         "visual_delete",
         "visual_insert",
         "visual_overlay",
@@ -608,6 +609,21 @@ def _canonical_review_items(
             "audio_delete",
             "review_only",
             "visual_delete",
+        }:
+            kind = inferred_kind
+        if inferred_kind in {
+            "animation_timing",
+            "visual_content_edit",
+            "visual_delete",
+        } and kind_text.casefold() in {
+            "",
+            "spoken_delete",
+            "speech_delete",
+            "audio_delete",
+            "phrase_delete",
+            "review_only",
+            "visual_delete",
+            "visual_overlay",
         }:
             kind = inferred_kind
 

@@ -38,13 +38,13 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v5"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v6"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
 CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v2"
 REVERSE_ASR_DIAGNOSTIC_PURPOSE = "reverse_asr_diagnostic_only"
-REVERSE_REPORT_VERSION = "lite-reverse-report-v3"
+REVERSE_REPORT_VERSION = "lite-reverse-report-v4"
 ASR_REQUEST_OPTIONS = {
     "enable_ddc": True,
     "enable_itn": True,
@@ -123,6 +123,9 @@ _ASR_EQUIVALENT_CHARACTERS = {
     "九": "9",
 }
 _OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
+_SAFE_TIME_ANCHORED_INTERNAL_INSERTIONS = frozenset({"这个"})
+_AUTOMATIC_MUST_KEEP_ORIGIN = "automatic_adjacent_asr_context"
+_EXPLICIT_MUST_KEEP_ORIGIN = "explicit"
 _OPTIONAL_REVIEW_TAILS = frozenset({"对吧"})
 _REVERSE_ASR_WORD_DRIFT_SECONDS = 0.35
 
@@ -729,6 +732,7 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     omitted_review_ranges: list[list[int]] = []
     optional_difference_characters = 0
     extra_asr_parts: list[str] = []
+    safe_internal_insertions: list[str] = []
     for tag, target_start, target_end, candidate_start, candidate_end in matcher.get_opcodes():
         if tag == "equal":
             equal_characters += target_end - target_start
@@ -760,8 +764,15 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
                 inserted,
                 target_start,
             )
-            if not filler_insertion and not stutter_insertion:
+            anchored_internal_insertion = (
+                inserted in _SAFE_TIME_ANCHORED_INTERNAL_INSERTIONS
+                and candidate_start > 0
+                and candidate_end < len(candidate)
+            )
+            if not filler_insertion and not stutter_insertion and not anchored_internal_insertion:
                 return None
+            if anchored_internal_insertion:
+                safe_internal_insertions.append(inserted)
             optional_difference_characters += len(inserted)
             if candidate_start == 0 or candidate_end == len(candidate):
                 return None
@@ -784,6 +795,8 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     method = "conservative_fuzzy_phrase"
     if edge_target_omissions:
         method = "time_anchored_partial_phrase"
+    elif safe_internal_insertions:
+        method = "time_anchored_internal_insertion"
     elif generic_target_omissions > 1 or (generic_target_omissions and len(target) < 12):
         method = "time_anchored_fuzzy_phrase"
     return {
@@ -809,7 +822,7 @@ def _conservative_fuzzy_phrase_matches(
     bounds = _search_bounds(anchor_start, anchor_end)
     if len(target) < 5 or bounds is None:
         return []
-    maximum = 1 if len(target) < 16 else 4
+    maximum = 2 if len(target) < 16 else 4
     normalized_words = [_normalized_text(word.get("text")) for word in words]
     matches: list[dict[str, Any]] = []
     seen: set[tuple[int, int]] = set()
@@ -909,8 +922,6 @@ def _find_phrase_matches(
         anchor_start=anchor_start,
         anchor_end=anchor_end,
     )
-    if exact:
-        return exact
     if allow_terminal_character_omission:
         terminal_omission = _terminal_character_omission_matches(
             words,
@@ -918,8 +929,28 @@ def _find_phrase_matches(
             anchor_start=anchor_start,
             anchor_end=anchor_end,
         )
-        if terminal_omission:
-            return terminal_omission
+        exact_start_indexes = {int(match.get("word_start_index", -1)) for match in exact}
+        terminal_omission = [
+            match
+            for match in terminal_omission
+            if int(match.get("word_start_index", -1)) not in exact_start_indexes
+        ]
+        combined = [*exact, *terminal_omission]
+        if combined:
+            seen: set[tuple[int, int, str]] = set()
+            result: list[dict[str, Any]] = []
+            for match in combined:
+                key = (
+                    int(match.get("word_start_index", -1)),
+                    int(match.get("word_end_index", -1)),
+                    str(match.get("match_method") or "exact_phrase"),
+                )
+                if key not in seen:
+                    seen.add(key)
+                    result.append(dict(match))
+            return result
+    if exact:
+        return exact
     return _conservative_fuzzy_phrase_matches(
         words,
         phrase,
@@ -1408,6 +1439,7 @@ def resolve_lite_audio_items(
             if isinstance(explicit_must_keep, list)
             else []
         )
+        must_keep_origin = _EXPLICIT_MUST_KEEP_ORIGIN if must_keep else _AUTOMATIC_MUST_KEEP_ORIGIN
         must_keep_source_windows: list[dict[str, Any]] = []
         if (selected is not None or selected_matches) and requested_execute and executable_kind:
             physical_matches = selected_matches or ([selected] if selected is not None else [])
@@ -1510,6 +1542,7 @@ def resolve_lite_audio_items(
                         ),
                         "asr_match": match_evidence,
                         "must_keep": must_keep,
+                        "must_keep_origin": must_keep_origin,
                         "must_keep_source_windows": must_keep_source_windows,
                         "start": first_window[0],
                         "end": last_window[1],
@@ -1579,6 +1612,7 @@ def resolve_lite_audio_items(
                 "strategy": str(explicit_evidence.get("strategy") or "precision_first"),
                 "delete": delete_phrase,
                 "must_keep": must_keep,
+                "must_keep_origin": must_keep_origin,
                 "resolved_time": round(resolved_time, 6),
                 "reason": reason,
                 "match_method": match_method,
@@ -1890,6 +1924,9 @@ def apply_audio_plan_to_compiled_payloads(
                     "resolved_delete": row.get("resolved_delete", row["delete"]),
                     "asr_match": deepcopy(row.get("asr_match") or {}),
                     "must_keep": list(row.get("must_keep") or []),
+                    "must_keep_origin": str(
+                        row.get("must_keep_origin") or _EXPLICIT_MUST_KEEP_ORIGIN
+                    ),
                     "match_method": row.get("match_method"),
                     "resolved_time": row.get("resolved_time"),
                 }
@@ -1947,6 +1984,7 @@ def apply_audio_plan_to_compiled_payloads(
             "resolved_delete": row.get("resolved_delete", row["delete"]),
             "asr_match": deepcopy(row.get("asr_match") or {}),
             "must_keep": list(row.get("must_keep") or []),
+            "must_keep_origin": str(row.get("must_keep_origin") or _EXPLICIT_MUST_KEEP_ORIGIN),
             "asr_alignment": deepcopy(row["asr_alignment"]),
             "source_cut_windows": deepcopy(row_windows),
             "resolved_cut_windows": deepcopy(row_windows),
@@ -2224,6 +2262,48 @@ def _must_keep_supported_outside_cut(
     return _phrase_supported(_normalized_text(retained_text), phrase)
 
 
+def _must_keep_origin(row: Mapping[str, Any]) -> str:
+    origin = str(row.get("must_keep_origin") or "").strip().casefold()
+    if origin == _AUTOMATIC_MUST_KEEP_ORIGIN:
+        return _AUTOMATIC_MUST_KEEP_ORIGIN
+    if origin:
+        return _EXPLICIT_MUST_KEEP_ORIGIN
+    for window in row.get("must_keep_source_windows") or []:
+        if not isinstance(window, Mapping):
+            continue
+        if str(window.get("source") or "").strip().casefold() == _AUTOMATIC_MUST_KEEP_ORIGIN:
+            return _AUTOMATIC_MUST_KEEP_ORIGIN
+    return _EXPLICIT_MUST_KEEP_ORIGIN
+
+
+def _must_keep_hits_inside_cut(
+    words: Sequence[Mapping[str, Any]],
+    phrase: str,
+    source_windows: Sequence[Sequence[float]],
+) -> list[dict[str, Any]]:
+    hits = [
+        hit
+        for hit in _phrase_hits(words, phrase)
+        if any(
+            float(hit["start"]) >= float(source_window[0]) - 1e-6
+            and float(hit["end"]) <= float(source_window[1]) + 1e-6
+            for source_window in source_windows
+        )
+    ]
+    seen: set[tuple[float, float, str]] = set()
+    result: list[dict[str, Any]] = []
+    for hit in hits:
+        key = (
+            round(float(hit.get("start", 0.0)), 6),
+            round(float(hit.get("end", 0.0)), 6),
+            str(hit.get("text") or ""),
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(dict(hit))
+    return result
+
+
 def _semantic_join_forbidden_patterns(local_text: str) -> list[str]:
     normalized = _normalized_text(local_text)
     result: list[str] = []
@@ -2411,6 +2491,28 @@ def build_full_candidate_reverse_report(
             )
             for phrase in row.get("must_keep") or []
         }
+        must_keep_origin = _must_keep_origin(row)
+        must_keep_cut_hits = {
+            phrase: _must_keep_hits_inside_cut(local_words, phrase, source_windows)
+            for phrase in row.get("must_keep") or []
+        }
+        missing_keep_phrases = [phrase for phrase, supported in keep_hits.items() if not supported]
+        automatic_keep_warnings = [
+            {
+                "phrase": phrase,
+                "origin": _AUTOMATIC_MUST_KEEP_ORIGIN,
+                "reason": "automatic_context_not_recognized",
+            }
+            for phrase in missing_keep_phrases
+            if must_keep_origin == _AUTOMATIC_MUST_KEEP_ORIGIN
+            and not must_keep_cut_hits.get(phrase)
+        ]
+        blocking_keep_missing = (
+            missing_keep_phrases if must_keep_origin != _AUTOMATIC_MUST_KEEP_ORIGIN else []
+        )
+        blocking_keep_cut_hits = {
+            phrase: hits for phrase, hits in must_keep_cut_hits.items() if hits
+        }
         forbidden = _semantic_join_forbidden_patterns(local_text)
         delete_occurrence_count = sum(
             _overlapping_phrase_occurrence_count(local_text, phrase) for phrase in delete_phrases
@@ -2438,7 +2540,7 @@ def build_full_candidate_reverse_report(
             reported_delete_hits = list(kept_recurrence_hits)
         if delete_hits:
             status = "review"
-        elif not all(keep_hits.values()) or forbidden:
+        elif blocking_keep_missing or blocking_keep_cut_hits or forbidden:
             status = "review"
         elif unmapped_delete_occurrence_count:
             status = "review"
@@ -2456,6 +2558,9 @@ def build_full_candidate_reverse_report(
             "strategy": row["strategy"],
             "delete": row["delete"],
             "must_keep": list(row.get("must_keep") or []),
+            "must_keep_origin": must_keep_origin,
+            "must_keep_warnings": automatic_keep_warnings,
+            "must_keep_cut_hits": must_keep_cut_hits,
             "source_cut_windows": deepcopy(source_windows),
             "mapped_join_times": [round(value, 9) for value in mapped_join_times],
             "local_joined_text": local_text,
@@ -2468,7 +2573,11 @@ def build_full_candidate_reverse_report(
             "delete_occurrence_count": delete_occurrence_count,
             "unmapped_delete_occurrence_count": unmapped_delete_occurrence_count,
             "semantic_join_validation": {
-                "status": "pass" if not forbidden and all(keep_hits.values()) else "review",
+                "status": (
+                    "pass"
+                    if not forbidden and not blocking_keep_missing and not blocking_keep_cut_hits
+                    else "review"
+                ),
                 "method": REVERSE_REPORT_VERSION,
                 "forbidden_patterns": forbidden,
             },

@@ -4684,6 +4684,83 @@ class TestRevisionRunner(unittest.TestCase):
             result["errors"],
         )
 
+    def test_automatic_must_keep_warning_is_attributable_but_explicit_is_strict(self):
+        automatic_row = {
+            "id": "item01",
+            "status": "pass",
+            "strategy": "hybrid",
+            "delete": "bad",
+            "must_keep": ["保护"],
+            "must_keep_origin": "automatic_adjacent_asr_context",
+            "must_keep_warnings": [
+                {
+                    "phrase": "保护",
+                    "origin": "automatic_adjacent_asr_context",
+                    "reason": "automatic_context_not_recognized",
+                }
+            ],
+            "must_keep_cut_hits": {"保护": []},
+            "source_cut_windows": [[1.0, 2.0]],
+            "mapped_join_times": [1.0],
+            "local_joined_text": "其他内容",
+            "delete_hits": [],
+            "keep_hits": {"保护": False},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        automatic_request = self._conditional_request(
+            kind="spoken_delete",
+            op_type="delete",
+            evidence={
+                "executed": True,
+                "cut_window": [1.0, 2.0],
+                "delete": "bad",
+                "must_keep": ["保护"],
+                "must_keep_origin": "automatic_adjacent_asr_context",
+                "strategy": "hybrid",
+            },
+            validation={"status": "pass"},
+        )
+
+        automatic_problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            automatic_row,
+            request=automatic_request,
+            item_id="item01",
+        )
+        automatic_anomalies = revision_validation_api._collect_semantic_join_anomalies(
+            {"rows": [automatic_row]}
+        )
+
+        explicit_row = {**automatic_row, "must_keep_origin": "explicit"}
+        explicit_request = self._conditional_request(
+            kind="spoken_delete",
+            op_type="delete",
+            evidence={
+                "executed": True,
+                "cut_window": [1.0, 2.0],
+                "delete": "bad",
+                "must_keep": ["保护"],
+                "must_keep_origin": "explicit",
+                "strategy": "hybrid",
+            },
+            validation={"status": "pass"},
+        )
+        explicit_problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            explicit_row,
+            request=explicit_request,
+            item_id="item01",
+        )
+        explicit_anomalies = revision_validation_api._collect_semantic_join_anomalies(
+            {"rows": [explicit_row]}
+        )
+
+        self.assertEqual(automatic_problems, [])
+        self.assertEqual(automatic_anomalies, [])
+        self.assertTrue(
+            any("keep_hits do not prove" in problem for problem in explicit_problems),
+            explicit_problems,
+        )
+        self.assertIn("item01:must_keep_missing:保护", explicit_anomalies)
+
     def test_spoken_reverse_asr_row_rejects_unstructured_delete_hit_adjudication(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             processed_audio = self._write_full_candidate_reverse_asr(

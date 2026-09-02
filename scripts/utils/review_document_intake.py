@@ -21,7 +21,7 @@ from utils.execution_input import resolve_artifact_name
 
 INTAKE_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = 1
-LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v1"
+LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v2"
 
 _MAX_DOCUMENT_XML_BYTES = 16 * 1024 * 1024
 _MAX_DOCUMENT_XML_ELEMENTS = 50_000
@@ -53,17 +53,18 @@ _VISUAL_NAME_CUES = (
     "hand",
     "arrow",
 )
-_IMAGE_REPLACEMENT_CUES = (
-    "formula",
-    "icon",
-    "image",
-    "label",
-    "replace",
-    "公式",
-    "图标",
-    "图片",
-    "标签",
-    "替换",
+_IMAGE_REPLACEMENT_RELATION_RE = re.compile(
+    r"(?:"
+    r"(?:用|使用|采用|拿|将|把)?(?:下方|下图|此|这张|该|右侧|右边|左侧|左边)?"
+    r"(?:图片|图像|图|公式|图标|标签).{0,16}?(?:替换|换成|替换为|改为|更换)"
+    r"|(?:替换|换成|替换为|更换|改为).{0,16}?"
+    r"(?:下方|下图|此|这张|该|右侧|右边|左侧|左边)?(?:图片|图像|图|公式|图标|标签)"
+    r"|(?:图片|图像|图|公式|图标|标签)\s*[/／]\s*"
+    r"(?:图片|图像|图|公式|图标|标签)\s*(?:替换|更换)"
+    r"|(?:use).{0,16}?(?:image|picture).{0,16}?(?:replace|swap|substitute)"
+    r"|(?:replace|swap|substitute).{0,24}?(?:image|picture|formula|icon|label)"
+    r")",
+    re.IGNORECASE,
 )
 _VISUAL_RECOMMENDATION_RE = re.compile(
     r"(?:建议|推荐|优先|请选|首选|preferred|recommend(?:ed)?)"
@@ -1268,10 +1269,20 @@ def _pointer_review_item(item: Mapping[str, Any]) -> bool:
 
 
 def _known_image_replacement_item(item: Mapping[str, Any]) -> bool:
-    text = str(item.get("source_text") or "").casefold()
-    kind = str(item.get("kind") or "").casefold()
-    return _pointer_review_item(item) or any(
-        cue.casefold() in text or cue.casefold() in kind for cue in _IMAGE_REPLACEMENT_CUES
+    text = str(item.get("source_text") or "")
+    kind = str(item.get("kind") or "").strip().casefold()
+    explicit_replacement_kind = kind in {
+        "image_replace",
+        "image_replacement",
+        "replace_picture",
+        "replacement_picture",
+        "visual_replace",
+        "visual_replacement",
+    }
+    return (
+        _pointer_review_item(item)
+        or explicit_replacement_kind
+        or bool(_IMAGE_REPLACEMENT_RELATION_RE.search(f"{kind} {text}"))
     )
 
 

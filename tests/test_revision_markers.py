@@ -596,6 +596,36 @@ class TestReviewMarkerRendering(unittest.TestCase):
                 0.9,
             )
 
+    def test_lite_groups_visual_delete_and_content_edit_on_visual_tracks(self):
+        project = _ReviewMarkerProject()
+        receipts = project.add_review_markers(
+            [
+                ReviewMarkerItem(
+                    label="删除红圈",
+                    source_text="删除红圈",
+                    start_time="10s",
+                    duration="2s",
+                    item_id="visual-delete",
+                    kind="visual_delete",
+                ),
+                ReviewMarkerItem(
+                    label="绿圈中的文字改为公元229年",
+                    source_text="绿圈中的文字改为公元229年",
+                    start_time="10s",
+                    duration="2s",
+                    item_id="visual-content",
+                    kind="visual_content_edit",
+                ),
+            ],
+            layout_mode="lite_grouped",
+        )
+
+        self.assertEqual(
+            [receipt.track_name for receipt in receipts],
+            ["Review Marker Visual 1", "Review Marker Visual 2"],
+        )
+        self.assertTrue(all(call["background"].color == "#15803D" for call in project.text_calls))
+
     def test_lite_grouped_long_marker_forces_wrapping_without_rewriting_text(self):
         project = _ReviewMarkerProject()
         source_text = "30，当时法国就是法兰西第二帝国，他的皇帝拿破仑三世和10万官兵就成了俘虏，这法法军就惨败"

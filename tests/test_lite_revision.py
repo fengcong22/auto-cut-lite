@@ -610,6 +610,43 @@ class LiteRevisionTests(unittest.TestCase):
             self.assertEqual(item["start"], expected_start)
             self.assertEqual(item["evidence"]["timing_source"], "review_timestamp")
 
+    def test_lite_content_and_animation_changes_override_stale_delete_labels(self):
+        rows = [
+            {
+                "id": "content-edit",
+                "kind": "phrase_delete",
+                "source_text": "04:23，绿圈中的文字，改为“公元229年”",
+            },
+            {
+                "id": "animation-direction",
+                "kind": "visual_overlay",
+                "source_text": "05:00，红线动画的方向，改为从左到右",
+            },
+            {
+                "id": "spoken-delete",
+                "source_text": "05:10，删除“普通删词”",
+            },
+        ]
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {"review_items": rows},
+                {
+                    "draft_name": "ContentClassification",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                items = {item["id"]: item for item in json.load(source_file)["review_items"]}
+
+        self.assertEqual(items["content-edit"]["kind"], "visual_content_edit")
+        self.assertFalse(items["content-edit"]["execution_required"])
+        self.assertEqual(items["animation-direction"]["kind"], "animation_timing")
+        self.assertFalse(items["animation-direction"]["execution_required"])
+        self.assertEqual(items["spoken-delete"]["kind"], "phrase_delete")
+        self.assertTrue(items["spoken-delete"]["execution_required"])
+
     def test_lite_audio_marker_requires_asr_instead_of_zero_or_review_time(self):
         request = _load_request(
             {

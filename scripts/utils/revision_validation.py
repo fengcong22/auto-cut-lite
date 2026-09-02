@@ -1207,6 +1207,51 @@ def _semantic_join_adjudication_is_attributable(validation: Dict[str, Any]) -> b
     )
 
 
+_AUTOMATIC_MUST_KEEP_ORIGIN = "automatic_adjacent_asr_context"
+
+
+def _reverse_row_must_keep_origin(row: Dict[str, Any]) -> str:
+    origin = str(row.get("must_keep_origin") or "").strip().casefold()
+    if origin == _AUTOMATIC_MUST_KEEP_ORIGIN:
+        return _AUTOMATIC_MUST_KEEP_ORIGIN
+    if origin:
+        return "explicit"
+    for window in row.get("must_keep_source_windows") or []:
+        if not isinstance(window, dict):
+            continue
+        if str(window.get("source") or "").strip().casefold() == _AUTOMATIC_MUST_KEEP_ORIGIN:
+            return _AUTOMATIC_MUST_KEEP_ORIGIN
+    return "explicit"
+
+
+def _attributable_automatic_must_keep_warning_phrases(row: Dict[str, Any]) -> set[str]:
+    if _reverse_row_must_keep_origin(row) != _AUTOMATIC_MUST_KEEP_ORIGIN:
+        return set()
+    keep_hits = row.get("keep_hits") if isinstance(row.get("keep_hits"), dict) else {}
+    cut_hits = (
+        row.get("must_keep_cut_hits") if isinstance(row.get("must_keep_cut_hits"), dict) else {}
+    )
+    expected = set(_phrase_list(row.get("must_keep")))
+    warnings = row.get("must_keep_warnings")
+    if not isinstance(warnings, list):
+        return set()
+    result: set[str] = set()
+    for warning in warnings:
+        if not isinstance(warning, dict):
+            continue
+        phrase = str(warning.get("phrase") or "").strip()
+        if (
+            phrase in expected
+            and keep_hits.get(phrase) is False
+            and not cut_hits.get(phrase)
+            and str(warning.get("origin") or "").strip().casefold() == _AUTOMATIC_MUST_KEEP_ORIGIN
+            and str(warning.get("reason") or "").strip().casefold()
+            == "automatic_context_not_recognized"
+        ):
+            result.add(phrase)
+    return result
+
+
 def _collect_semantic_join_anomalies(
     payload: Dict[str, Any],
     *,
@@ -1248,8 +1293,9 @@ def _collect_semantic_join_anomalies(
 
         keep_hits = row.get("keep_hits")
         if isinstance(keep_hits, dict):
+            warning_phrases = _attributable_automatic_must_keep_warning_phrases(row)
             for keep, hit in keep_hits.items():
-                if hit is False:
+                if hit is False and str(keep) not in warning_phrases:
                     anomalies.append(f"{prefix}:must_keep_missing:{keep}")
 
         if isinstance(semantic_validation, dict):
@@ -1448,12 +1494,18 @@ def _spoken_item_contract(request: RevisionRequest, item_id: str) -> Dict[str, A
     strategy_present = "strategy" in evidence or "strategy" in reverse_row
     delete_present = "delete" in evidence or "delete" in reverse_row
     must_keep_present = "must_keep" in evidence or "must_keep" in reverse_row
+    must_keep_origin_present = "must_keep_origin" in evidence or "must_keep_origin" in reverse_row
     strategy_value = (
         evidence.get("strategy") if "strategy" in evidence else reverse_row.get("strategy")
     )
     delete_value = evidence.get("delete") if "delete" in evidence else reverse_row.get("delete")
     must_keep_value = (
         evidence.get("must_keep") if "must_keep" in evidence else reverse_row.get("must_keep")
+    )
+    must_keep_origin_value = (
+        evidence.get("must_keep_origin")
+        if "must_keep_origin" in evidence
+        else reverse_row.get("must_keep_origin")
     )
     windows = sorted(
         [
@@ -1485,6 +1537,12 @@ def _spoken_item_contract(request: RevisionRequest, item_id: str) -> Dict[str, A
         "delete_present": delete_present,
         "must_keep": _phrase_list(must_keep_value),
         "must_keep_present": must_keep_present,
+        "must_keep_origin": (
+            _AUTOMATIC_MUST_KEEP_ORIGIN
+            if str(must_keep_origin_value or "").strip().casefold() == _AUTOMATIC_MUST_KEEP_ORIGIN
+            else "explicit"
+        ),
+        "must_keep_origin_present": must_keep_origin_present,
         "source_cut_windows": windows,
     }
 
@@ -1638,6 +1696,10 @@ def _spoken_reverse_asr_row_evidence_problems(
         expected_must_keep
     ):
         contract_problems.append("must_keep phrases do not match item contract")
+    expected_must_keep_origin = contract["must_keep_origin"]
+    row_must_keep_origin = _reverse_row_must_keep_origin(row)
+    if contract["must_keep_origin_present"] and row_must_keep_origin != expected_must_keep_origin:
+        contract_problems.append("must_keep origin does not match item contract")
 
     raw_windows = row.get("source_cut_windows")
     normalized_windows: List[List[float]] = []
@@ -1763,12 +1825,25 @@ def _spoken_reverse_asr_row_evidence_problems(
         )
 
     keep_hits = row.get("keep_hits") if isinstance(row.get("keep_hits"), dict) else {}
-    if any(keep_hits.get(phrase) is not True for phrase in expected_must_keep):
+    warning_phrases = _attributable_automatic_must_keep_warning_phrases(row)
+    if any(
+        keep_hits.get(phrase) is not True and phrase not in warning_phrases
+        for phrase in expected_must_keep
+    ):
         contract_problems.append("keep_hits do not prove the item must_keep contract")
-    if expected_must_keep and not all(
-        _transcript_supports_phrase(normalized_transcript, phrase) for phrase in expected_must_keep
+    required_transcript_phrases = [
+        phrase for phrase in expected_must_keep if phrase not in warning_phrases
+    ]
+    if required_transcript_phrases and not all(
+        _transcript_supports_phrase(normalized_transcript, phrase)
+        for phrase in required_transcript_phrases
     ):
         contract_problems.append("local transcript does not contain every item must_keep phrase")
+    must_keep_cut_hits = (
+        row.get("must_keep_cut_hits") if isinstance(row.get("must_keep_cut_hits"), dict) else {}
+    )
+    if any(must_keep_cut_hits.get(phrase) for phrase in expected_must_keep):
+        contract_problems.append("must_keep phrase appears inside a source cut window")
     missing.extend(f"item contract: {problem}" for problem in contract_problems)
     return missing
 

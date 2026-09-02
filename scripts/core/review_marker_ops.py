@@ -126,13 +126,19 @@ class ReviewMarkerOpsMixin:
             "range_delete",
             "gap_delete",
             "pause_delete",
-            "visual_delete",
             "noise_cleanup",
             "review_only",
         }
     )
     LITE_GROUPED_VISUAL_KINDS = frozenset(
-        {"pointer_overlay", "visual_overlay", "visual_addition", "other_visual"}
+        {
+            "pointer_overlay",
+            "visual_content_edit",
+            "visual_delete",
+            "visual_overlay",
+            "visual_addition",
+            "other_visual",
+        }
     )
     REVIEW_MARKER_BACKGROUND_COLORS = {
         "spoken_delete": "#B42318",
@@ -147,6 +153,7 @@ class ReviewMarkerOpsMixin:
         "colored_span_delete": "#6D28D9",
         "gap_delete": "#A16207",
         "pause_delete": "#C2410C",
+        "visual_content_edit": "#15803D",
         "visual_delete": "#9F1239",
         "pointer_overlay": "#1D4ED8",
         "visual_overlay": "#2563EB",

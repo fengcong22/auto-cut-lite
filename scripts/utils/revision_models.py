@@ -209,6 +209,28 @@ _ANIMATION_KEYWORDS = (
     "直线",
 )
 _ANIMATION_ACTION_KEYWORDS = ("提前", "推迟", "延后", "加快", "变速", "挪", "移到", "改到", "调到")
+_CONTENT_CHANGE_ACTION_KEYWORDS = (
+    "改为",
+    "改成",
+    "修改为",
+    "更正为",
+    "替换为",
+    "换成",
+)
+_VISUAL_CONTENT_KEYWORDS = (
+    "画面内容",
+    "画面文字",
+    "图中文字",
+    "图中数据",
+    "文字内容",
+    "数据",
+    "数字",
+    "日期",
+    "年份",
+    "公式",
+    "标题",
+    "标签",
+)
 _DELETE_KEYWORDS = ("删除", "删掉", "剪掉", "去掉", "移除")
 _COLORED_TEXT_REFERENCE_KEYWORDS = (
     "蓝色字",
@@ -289,6 +311,7 @@ _LITE_AUDIO_TIMING_TEXT_HINTS = (
 _VISUAL_KINDS = {
     "pointer_overlay",
     "animation_timing",
+    "visual_content_edit",
     "visual_delete",
     "visual_insert",
     "visual_overlay",
@@ -320,6 +343,7 @@ _LITE_LABEL_ONLY_KINDS = _LITE_PAUSE_LABEL_ONLY_KINDS | {
     "state_release",
     "state_reveal",
     "timing",
+    "visual_content_edit",
 }
 _LITE_PAUSE_CHANGE_PATTERNS = tuple(
     re.compile(pattern, re.IGNORECASE)
@@ -416,6 +440,7 @@ _LITE_KNOWN_VISUAL_KINDS = _LITE_POINTER_KINDS | {
     "visual_insert",
     "visual_overlay",
     "visual_replace",
+    "visual_content_edit",
 }
 
 
@@ -755,9 +780,14 @@ def _classify_review_text(text: str) -> str:
     ):
         return "animation_timing"
     if _contains_any(normalized, _ANIMATION_KEYWORDS) and _contains_any(
-        normalized, _ANIMATION_ACTION_KEYWORDS
+        normalized, _ANIMATION_ACTION_KEYWORDS + _CONTENT_CHANGE_ACTION_KEYWORDS
     ):
         return "animation_timing"
+    if _contains_any(normalized, _CONTENT_CHANGE_ACTION_KEYWORDS) and (
+        _contains_any(normalized, _VISUAL_OBJECT_KEYWORDS)
+        or _contains_any(normalized, _VISUAL_CONTENT_KEYWORDS)
+    ):
+        return "visual_content_edit"
     if _contains_any(normalized, _VISUAL_OBJECT_KEYWORDS) and _contains_any(
         normalized, _DELETE_KEYWORDS
     ):
