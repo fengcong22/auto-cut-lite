@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import wave
+from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -1410,28 +1411,199 @@ def _overlapping_phrase_occurrence_count(text: str, phrase: str) -> int:
 
 
 def _positive_delete_hit_phrases(delete_hits: Any) -> List[str]:
-    phrases: List[str] = []
+    return [
+        _normalized_phrase_text(value.get("phrase") or value.get("text"))
+        for value in _positive_delete_hit_rows(delete_hits)
+    ]
+
+
+def _positive_delete_hit_rows(delete_hits: Any) -> List[Dict[str, Any]]:
+    hits: List[Dict[str, Any]] = []
     if isinstance(delete_hits, list):
         for value in delete_hits:
             if not bool(value):
                 continue
-            phrase = (
-                value.get("text") or value.get("phrase") or value.get("delete") or ""
-                if isinstance(value, dict)
-                else value
-            )
-            phrases.append(_normalized_phrase_text(phrase))
+            if isinstance(value, dict):
+                hit = dict(value)
+                phrase = hit.get("phrase") or hit.get("delete") or hit.get("text") or ""
+                hit.setdefault("phrase", phrase)
+                hit.setdefault("text", hit.get("phrase") or "")
+            else:
+                hit = {"phrase": str(value), "text": str(value)}
+            hits.append(hit)
     elif isinstance(delete_hits, dict):
-        for key, value in delete_hits.items():
-            if not bool(value):
-                continue
-            phrase = (
-                value.get("text") or value.get("phrase") or value.get("delete") or key
-                if isinstance(value, dict)
-                else key
+        if any(
+            field in delete_hits
+            for field in ("phrase", "text", "start", "end", "match_method")
+        ):
+            hit = dict(delete_hits)
+            phrase = hit.get("phrase") or hit.get("delete") or hit.get("text") or ""
+            hit.setdefault("phrase", phrase)
+            hit.setdefault("text", hit.get("phrase") or "")
+            hits.append(hit)
+        else:
+            for key, value in delete_hits.items():
+                if not bool(value):
+                    continue
+                if isinstance(value, dict):
+                    hit = dict(value)
+                    hit.setdefault("phrase", hit.get("delete") or hit.get("text") or key)
+                    hit.setdefault("text", hit.get("phrase") or key)
+                else:
+                    hit = {"phrase": str(key), "text": str(key)}
+                hits.append(hit)
+    return hits
+
+
+def _exact_delete_hit_identity(hit: Any) -> tuple[str, str, float, float, str] | None:
+    if not isinstance(hit, dict):
+        return None
+    phrase = _normalized_phrase_text(hit.get("phrase"))
+    text = _normalized_phrase_text(hit.get("text"))
+    start = _safe_float(hit.get("start"))
+    end = _safe_float(hit.get("end"))
+    match_method = str(hit.get("match_method") or "").strip().casefold()
+    if (
+        not phrase
+        or not text
+        or start is None
+        or end is None
+        or end <= start
+        or not match_method
+    ):
+        return None
+    return phrase, text, round(start, 6), round(end, 6), match_method
+
+
+def _expected_kept_occurrence_role(
+    hit: Dict[str, Any], source_windows: Sequence[Sequence[float]]
+) -> str:
+    identity = _exact_delete_hit_identity(hit)
+    if identity is None or not source_windows:
+        return ""
+    hit_start, hit_end = identity[2], identity[3]
+    windows = sorted(
+        ([float(window[0]), float(window[1])] for window in source_windows),
+        key=lambda window: (window[0], window[1]),
+    )
+    if any(
+        hit_start < window_end - 1e-6 and window_start < hit_end - 1e-6
+        for window_start, window_end in windows
+    ):
+        return ""
+    if hit_end <= windows[0][0] + 1e-6:
+        return "earlier_kept_occurrence"
+    if hit_start >= windows[-1][1] - 1e-6:
+        return "later_kept_occurrence"
+    if any(
+        hit_start >= previous[1] - 1e-6 and hit_end <= following[0] + 1e-6
+        for previous, following in zip(windows, windows[1:])
+    ):
+        return "between_kept_occurrence"
+    return ""
+
+
+def _per_hit_adjudication_problems(
+    adjudications: Any,
+    *,
+    positive_hits: Sequence[Dict[str, Any]],
+    allowed_delete_phrases: Sequence[str],
+    normalized_transcript: str,
+    source_windows: Sequence[Sequence[float]],
+    row_status: str,
+) -> List[str]:
+    problems: List[str] = []
+    if not isinstance(adjudications, list):
+        return ["delete_hit_adjudications must be a list"]
+    if row_status != "pass_adjudicated":
+        problems.append("per-hit adjudications require status=pass_adjudicated")
+
+    hit_identities = [_exact_delete_hit_identity(hit) for hit in positive_hits]
+    if any(identity is None for identity in hit_identities):
+        problems.append(
+            "every positive delete_hit requires phrase, text, start, end, and match_method"
+        )
+    exact_hit_identities = [identity for identity in hit_identities if identity is not None]
+    expected_counts = Counter(exact_hit_identities)
+    if any(count != 1 for count in expected_counts.values()):
+        problems.append("positive delete_hits contain duplicate exact hit identities")
+    if len(adjudications) != len(positive_hits):
+        problems.append("every positive delete_hit requires exactly one adjudication")
+
+    allowed = {
+        _normalized_phrase_text(phrase)
+        for phrase in allowed_delete_phrases
+        if _normalized_phrase_text(phrase)
+    }
+    seen_counts: Counter[tuple[str, str, float, float, str]] = Counter()
+    context_receipts: set[tuple[str, str]] = set()
+    for index, adjudication in enumerate(adjudications):
+        prefix = f"delete_hit_adjudications[{index}]"
+        if not isinstance(adjudication, dict):
+            problems.append(f"{prefix} must be an object")
+            continue
+        if str(adjudication.get("classification") or "").strip().casefold() != "kept_recurrence":
+            problems.append(f"{prefix} classification is not kept_recurrence")
+
+        receipt_hit = adjudication.get("hit")
+        receipt_identity = _exact_delete_hit_identity(receipt_hit)
+        if receipt_identity is None:
+            problems.append(
+                f"{prefix} hit requires phrase, text, start, end, and match_method"
             )
-            phrases.append(_normalized_phrase_text(phrase))
-    return phrases
+            continue
+        seen_counts[receipt_identity] += 1
+        if receipt_identity not in expected_counts:
+            problems.append(f"{prefix} does not identify a positive delete_hit exactly")
+        if receipt_identity[0] not in allowed:
+            problems.append(f"{prefix} hit phrase is not allowed by the item contract")
+
+        adjudicated_phrase = _normalized_phrase_text(adjudication.get("phrase"))
+        if adjudicated_phrase != receipt_identity[0]:
+            problems.append(f"{prefix} phrase does not match its exact hit")
+
+        assert isinstance(receipt_hit, dict)
+        expected_role = _expected_kept_occurrence_role(receipt_hit, source_windows)
+        occurrence_role = str(adjudication.get("occurrence_role") or "").strip().casefold()
+        if not expected_role:
+            problems.append(f"{prefix} hit overlaps a target source cut window")
+        elif occurrence_role != expected_role:
+            problems.append(f"{prefix} occurrence_role does not match its exact hit")
+
+        local_context = _normalized_phrase_text(adjudication.get("local_context"))
+        context_anchor = _normalized_phrase_text(adjudication.get("context_anchor"))
+        reason = str(adjudication.get("reason") or "").strip()
+        if not local_context or local_context not in normalized_transcript:
+            problems.append(f"{prefix} local_context is not attributable to the transcript")
+        hit_text = receipt_identity[1]
+        if hit_text not in local_context:
+            problems.append(f"{prefix} local_context does not contain its exact hit text")
+        context_without_hit = local_context.replace(hit_text, "", 1)
+        if (
+            not context_anchor
+            or context_anchor == receipt_identity[0]
+            or context_anchor == hit_text
+            or context_anchor in receipt_identity[0]
+            or receipt_identity[0] in context_anchor
+            or context_anchor in hit_text
+            or hit_text in context_anchor
+            or context_anchor not in context_without_hit
+        ):
+            problems.append(f"{prefix} context_anchor is not independent of its hit")
+        if not reason:
+            problems.append(f"{prefix} reason is missing")
+        context_key = (local_context, context_anchor)
+        if context_key in context_receipts:
+            problems.append(f"{prefix} reuses another hit's context evidence")
+        context_receipts.add(context_key)
+
+    for identity, expected_count in expected_counts.items():
+        actual_count = seen_counts.get(identity, 0)
+        if actual_count < expected_count:
+            problems.append("a positive delete_hit is missing its exact adjudication")
+        elif actual_count > expected_count:
+            problems.append("a positive delete_hit has duplicate adjudications")
+    return list(dict.fromkeys(problems))
 
 
 def _has_attributable_kept_recurrence_adjudication(
@@ -1493,12 +1665,18 @@ def _spoken_item_contract(request: RevisionRequest, item_id: str) -> Dict[str, A
     )
     strategy_present = "strategy" in evidence or "strategy" in reverse_row
     delete_present = "delete" in evidence or "delete" in reverse_row
+    delete_phrases_present = "delete_phrases" in evidence or "delete_phrases" in reverse_row
     must_keep_present = "must_keep" in evidence or "must_keep" in reverse_row
     must_keep_origin_present = "must_keep_origin" in evidence or "must_keep_origin" in reverse_row
     strategy_value = (
         evidence.get("strategy") if "strategy" in evidence else reverse_row.get("strategy")
     )
     delete_value = evidence.get("delete") if "delete" in evidence else reverse_row.get("delete")
+    delete_phrases_value = (
+        evidence.get("delete_phrases")
+        if "delete_phrases" in evidence
+        else reverse_row.get("delete_phrases")
+    )
     must_keep_value = (
         evidence.get("must_keep") if "must_keep" in evidence else reverse_row.get("must_keep")
     )
@@ -1535,6 +1713,8 @@ def _spoken_item_contract(request: RevisionRequest, item_id: str) -> Dict[str, A
         "strategy_present": strategy_present,
         "delete": str(delete_value or "").strip(),
         "delete_present": delete_present,
+        "delete_phrases": _phrase_list(delete_phrases_value),
+        "delete_phrases_present": delete_phrases_present,
         "must_keep": _phrase_list(must_keep_value),
         "must_keep_present": must_keep_present,
         "must_keep_origin": (
@@ -1744,74 +1924,101 @@ def _spoken_reverse_asr_row_evidence_problems(
                 break
 
     normalized_transcript = _normalized_phrase_text(transcript)
-    delete_phrases = [
+    row_delete_phrases = [
         str(value).strip()
         for value in row.get("delete_phrases") or []
         if str(value).strip()
     ]
+    expected_delete_phrases = contract["delete_phrases"]
+    if is_colored_span_item:
+        if not contract["delete_phrases_present"] or not expected_delete_phrases:
+            contract_problems.append("delete_phrases are missing for colored-span item")
+        elif [
+            _normalized_phrase_text(value) for value in row_delete_phrases
+        ] != [
+            _normalized_phrase_text(value) for value in expected_delete_phrases
+        ]:
+            contract_problems.append(
+                "ordered delete_phrases do not match colored-span item contract"
+            )
+        allowed_delete_phrases = expected_delete_phrases
+    else:
+        allowed_delete_phrases = [expected_delete] if expected_delete else []
+
     delete_hits = row.get("delete_hits")
+    positive_delete_hit_rows = _positive_delete_hit_rows(delete_hits)
     positive_delete_hit_phrases = _positive_delete_hit_phrases(delete_hits)
     positive_delete_hit_count = len(positive_delete_hit_phrases)
     positive_delete_hits = positive_delete_hit_count > 0
     row_status = str(row.get("status") or "").strip().casefold()
-    adjudication = row.get("delete_hit_adjudication") or row.get("adjudication")
-    has_structured_adjudication = _has_attributable_kept_recurrence_adjudication(
-        adjudication,
-        expected_delete=expected_delete,
-        normalized_transcript=normalized_transcript,
-        row_status=row_status,
-    )
-    normalized_delete = _normalized_phrase_text(expected_delete)
-    normalized_delete_phrases = {
-        _normalized_phrase_text(value) for value in delete_phrases
+    normalized_allowed_delete_phrases = {
+        _normalized_phrase_text(value) for value in allowed_delete_phrases
+        if _normalized_phrase_text(value)
     }
-    if positive_delete_hits and (
-        (is_colored_span_item and any(
-            phrase not in normalized_delete_phrases
-            for phrase in positive_delete_hit_phrases
-        ))
-        or (
-            not is_colored_span_item
-            and any(phrase != normalized_delete for phrase in positive_delete_hit_phrases)
-        )
+    if positive_delete_hits and any(
+        phrase not in normalized_allowed_delete_phrases
+        for phrase in positive_delete_hit_phrases
     ):
         contract_problems.append("positive delete_hit does not match the item delete phrase")
-    if is_colored_span_item and normalized_delete_phrases:
-        transcript_delete_occurrence_count = sum(
-            _overlapping_phrase_occurrence_count(normalized_transcript, phrase)
-            for phrase in normalized_delete_phrases
-            if phrase
+
+    unreported_transcript_occurrences = False
+    for phrase in normalized_allowed_delete_phrases:
+        transcript_count = _overlapping_phrase_occurrence_count(normalized_transcript, phrase)
+        exact_hit_count = sum(
+            _normalized_phrase_text(hit.get("phrase")) == phrase
+            and _normalized_phrase_text(hit.get("text")) == phrase
+            for hit in positive_delete_hit_rows
         )
+        if transcript_count > exact_hit_count:
+            unreported_transcript_occurrences = True
+            break
+
+    per_hit_adjudications_present = "delete_hit_adjudications" in row
+    if per_hit_adjudications_present:
+        adjudication_problems = _per_hit_adjudication_problems(
+            row.get("delete_hit_adjudications"),
+            positive_hits=positive_delete_hit_rows,
+            allowed_delete_phrases=allowed_delete_phrases,
+            normalized_transcript=normalized_transcript,
+            source_windows=normalized_windows,
+            row_status=row_status,
+        )
+        contract_problems.extend(adjudication_problems)
+        has_attributable_adjudication = bool(positive_delete_hits and not adjudication_problems)
     else:
-        transcript_delete_occurrence_count = (
-            _overlapping_phrase_occurrence_count(normalized_transcript, normalized_delete)
-            if normalized_delete
-            else 0
+        adjudication = row.get("delete_hit_adjudication") or row.get("adjudication")
+        legacy_expected_delete = (
+            str(positive_delete_hit_rows[0].get("phrase") or "")
+            if positive_delete_hit_count == 1
+            else expected_delete
         )
-    has_attributable_adjudication = (
-        has_structured_adjudication
-        and positive_delete_hit_count == 1
-        and transcript_delete_occurrence_count == 1
-    )
-    if has_structured_adjudication and positive_delete_hit_count == 0:
-        contract_problems.append(
-            "structured kept-recurrence adjudication requires exactly one positive delete_hit"
+        has_structured_adjudication = _has_attributable_kept_recurrence_adjudication(
+            adjudication,
+            expected_delete=legacy_expected_delete,
+            normalized_transcript=normalized_transcript,
+            row_status=row_status,
         )
-    elif positive_delete_hit_count > 1:
-        contract_problems.append(
-            "multiple positive delete_hits require per-hit adjudication evidence"
+        has_attributable_adjudication = (
+            has_structured_adjudication
+            and positive_delete_hit_count == 1
+            and not unreported_transcript_occurrences
         )
-    if transcript_delete_occurrence_count > 1:
+        if has_structured_adjudication and positive_delete_hit_count == 0:
+            contract_problems.append(
+                "structured kept-recurrence adjudication requires exactly one positive delete_hit"
+            )
+        elif positive_delete_hit_count > 1:
+            contract_problems.append(
+                "multiple positive delete_hits require per-hit adjudication evidence"
+            )
+
+    if unreported_transcript_occurrences:
         contract_problems.append(
             "multiple local transcript delete occurrences require per-hit adjudication evidence"
         )
     delete_phrase_in_transcript = bool(
-        (
-            normalized_delete_phrases
-            and any(phrase in normalized_transcript for phrase in normalized_delete_phrases)
-        )
-        if is_colored_span_item
-        else (normalized_delete and normalized_delete in normalized_transcript)
+        normalized_allowed_delete_phrases
+        and any(phrase in normalized_transcript for phrase in normalized_allowed_delete_phrases)
     )
     if positive_delete_hits and not has_attributable_adjudication:
         contract_problems.append(

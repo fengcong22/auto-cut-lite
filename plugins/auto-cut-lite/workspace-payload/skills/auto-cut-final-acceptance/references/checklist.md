@@ -23,6 +23,12 @@ Use this checklist together with the
   source media remains complete and the windows are visible through the complementary V1/V2 and
   A1/A2 split traces.
 - Reverse-ASR, candidate decode, segmented-audio, and semantic-join checks pass when required.
+- Every retained same-word occurrence has one positive `delete_hit` and exactly one attributable
+  `delete_hit_adjudications` receipt whose exact `hit` object matches phrase, text, start, end,
+  and match method, stays outside all target windows, and carries the correct earlier/later/between
+  role plus independent local context. A single legacy receipt is accepted only for one hit.
+- Colored-span rows use the ordered item-contract `delete_phrases`; aggregate display text cannot
+  authorize a hit, and uncolored inter-span ASR text is protected through automatic `must_keep`.
 - A1 equals the complement of logical ASR delete windows. A2 has exactly one independent, audible
   clip per logical ASR/V2 delete window with matching source start and source-aligned timeline start
   and duration. Same-item overlaps may merge; adjacent different-item windows stay separate and

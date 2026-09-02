@@ -38,13 +38,13 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v6"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v7"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
 CANDIDATE_RENDERER_VERSION = "lite-source-aligned-silence-v2"
 REVERSE_ASR_DIAGNOSTIC_PURPOSE = "reverse_asr_diagnostic_only"
-REVERSE_REPORT_VERSION = "lite-reverse-report-v4"
+REVERSE_REPORT_VERSION = "lite-reverse-report-v5"
 ASR_REQUEST_OPTIONS = {
     "enable_ddc": True,
     "enable_itn": True,
@@ -1181,6 +1181,44 @@ def _context_phrases(
     return phrases, windows
 
 
+def _inter_span_context_phrases(
+    words: Sequence[Mapping[str, Any]], matches: Sequence[Mapping[str, Any]]
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Protect every uncoloured ASR word between independently deleted spans."""
+
+    phrases: list[str] = []
+    windows: list[dict[str, Any]] = []
+    ordered = sorted(
+        matches,
+        key=lambda value: (
+            int(value.get("word_start_index", -1)),
+            int(value.get("word_end_index", -1)),
+        ),
+    )
+    for previous, current in zip(ordered, ordered[1:]):
+        gap_start = int(previous.get("word_end_index", -1)) + 1
+        gap_end = int(current.get("word_start_index", -1))
+        if gap_start < 0 or gap_end <= gap_start:
+            continue
+        selected = words[gap_start:gap_end]
+        if not selected:
+            continue
+        phrase = "".join(str(word.get("text") or "") for word in selected).strip()
+        if not _normalized_text(phrase):
+            continue
+        phrases.append(phrase)
+        windows.append(
+            {
+                "phrase": phrase,
+                "start": round(float(selected[0]["start"]), 6),
+                "end": round(float(selected[-1]["end"]), 6),
+                "source": _AUTOMATIC_MUST_KEEP_ORIGIN,
+                "context_role": "uncolored_inter_span",
+            }
+        )
+    return phrases, windows
+
+
 def _prune_cross_cut_auto_must_keep(rows: Sequence[dict[str, Any]]) -> None:
     executable = [row for row in rows if row.get("execution_required")]
     for row in executable:
@@ -1207,6 +1245,13 @@ def _prune_cross_cut_auto_must_keep(rows: Sequence[dict[str, Any]]) -> None:
             )
             if not overlaps_own_cut and not overlaps_other_cut:
                 retained.append(dict(raw_window))
+        retained.sort(
+            key=lambda value: (
+                float(value["start"]),
+                float(value["end"]),
+                str(value["phrase"]),
+            )
+        )
         row["must_keep_source_windows"] = retained
         row["must_keep"] = [str(window["phrase"]) for window in retained]
 
@@ -1497,10 +1542,24 @@ def resolve_lite_audio_items(
                 physical_windows.sort(key=lambda value: (value[0], value[1]))
                 matched_words = _dedupe_word_rows(matched_words)
                 if not must_keep:
+                    if colored_span_mode:
+                        inter_span_keep, inter_span_windows = _inter_span_context_phrases(
+                            words,
+                            physical_matches,
+                        )
+                        generated_must_keep.extend(inter_span_keep)
+                        generated_must_keep_windows.extend(inter_span_windows)
                     must_keep = list(dict.fromkeys(generated_must_keep))
                     must_keep_source_windows = []
                     seen_keep: set[tuple[float, float, str]] = set()
-                    for keep_window in generated_must_keep_windows:
+                    for keep_window in sorted(
+                        generated_must_keep_windows,
+                        key=lambda value: (
+                            float(value["start"]),
+                            float(value["end"]),
+                            str(value["phrase"]),
+                        ),
+                    ):
                         key = (
                             float(keep_window["start"]),
                             float(keep_window["end"]),
@@ -2379,12 +2438,26 @@ def _kept_recurrence_adjudication(
     source_windows: Sequence[Sequence[float]],
 ) -> dict[str, Any] | None:
     normalized_delete = _normalized_text(delete_phrase)
-    context_without_delete = _normalized_text(local_text).replace(normalized_delete, "", 1)
     hit_start = float(hit["start"])
     hit_end = float(hit["end"])
+    hit_text = str(hit.get("text") or delete_phrase)
+    hit_word_indexes = [
+        index
+        for index, word in enumerate(local_words)
+        if float(word["start"]) < hit_end - 1e-6
+        and hit_start < float(word["end"]) - 1e-6
+    ]
+    if not hit_word_indexes:
+        return None
+    context_start = max(0, hit_word_indexes[0] - 1)
+    context_end = min(len(local_words), hit_word_indexes[-1] + 2)
+    context_words = list(local_words[context_start:context_end])
+    local_context = "".join(str(word.get("text") or "") for word in context_words)
+    normalized_hit_text = _normalized_text(hit_text)
+    context_without_hit = _normalized_text(local_context).replace(normalized_hit_text, "", 1)
     anchor = ""
     candidates = sorted(
-        local_words,
+        context_words,
         key=lambda word: min(
             abs(float(word["end"]) - hit_start),
             abs(float(word["start"]) - hit_end),
@@ -2401,7 +2474,9 @@ def _kept_recurrence_adjudication(
             normalized_candidate
             and normalized_candidate not in normalized_delete
             and normalized_delete not in normalized_candidate
-            and normalized_candidate in context_without_delete
+            and normalized_candidate not in normalized_hit_text
+            and normalized_hit_text not in normalized_candidate
+            and normalized_candidate in context_without_hit
         ):
             anchor = candidate
             break
@@ -2413,11 +2488,12 @@ def _kept_recurrence_adjudication(
         if len(window) >= 2
     ):
         return None
-    cut_start = float(source_windows[0][0])
-    cut_end = float(source_windows[-1][1])
-    if hit_end < cut_start:
+    ordered_windows = sorted(source_windows, key=lambda window: (float(window[0]), float(window[1])))
+    cut_start = float(ordered_windows[0][0])
+    cut_end = float(ordered_windows[-1][1])
+    if hit_end <= cut_start:
         occurrence_role = "earlier_kept_occurrence"
-    elif hit_start > cut_end:
+    elif hit_start >= cut_end:
         occurrence_role = "later_kept_occurrence"
     else:
         occurrence_role = "between_kept_occurrence"
@@ -2425,7 +2501,14 @@ def _kept_recurrence_adjudication(
         "classification": "kept_recurrence",
         "occurrence_role": occurrence_role,
         "phrase": delete_phrase,
-        "local_context": local_text,
+        "hit": {
+            "phrase": str(hit.get("phrase") or delete_phrase),
+            "text": hit_text,
+            "start": round(hit_start, 6),
+            "end": round(hit_end, 6),
+            "match_method": str(hit.get("match_method") or "exact_phrase"),
+        },
+        "local_context": local_context,
         "context_anchor": anchor,
         "reason": ("The ASR hit is outside the source cut window and belongs to retained context."),
     }

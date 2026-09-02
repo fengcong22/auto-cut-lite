@@ -14,7 +14,7 @@ status counts or a generic item-level pass cannot substitute for rows. Candidate
 equal the source timeline. Cache hits never waive `delete`, `must_keep`, semantic-join, or final
 acceptance evidence.
 
-The local transcript must contain alphanumeric content, and transcript aliases must agree after normalization. Cross-check each row's hit fields against its normalized local transcript: the transcript must not contain the delete phrase and must support every `must_keep` phrase. A retained same-word occurrence requires exactly one positive `delete_hit` and structured `delete_hit_adjudication` with `classification=kept_recurrence`, `occurrence_role`, `phrase`, `local_context`, `context_anchor`, and `reason`; the local context must occur in the transcript, the context anchor is not a substring of the delete phrase, and that anchor remains after removing the delete phrase from the local context. Multiple positive `delete_hits` or multiple local transcript delete occurrences, including overlapping occurrences, require per-hit adjudication and fail until one-to-many receipts are supported.
+The local transcript must contain alphanumeric content, transcript aliases must agree after normalization, and the transcript must prove every `must_keep` phrase. Cross-check each row's hit fields against its normalized local transcript: every retained occurrence is one positive `delete_hit` paired with exactly one `delete_hit_adjudications` receipt. Each receipt contains `classification=kept_recurrence`, the correct `occurrence_role`, `phrase`, independent `local_context`, `context_anchor`, `reason`, and an exact `hit` object with `phrase`, `text`, `start`, `end`, and `match_method`. The hit must match one reported hit exactly, use an allowed item-contract delete phrase, and lie outside every target cut window. Missing, duplicate, tampered, overlapping, or unreported occurrences fail. A single legacy `delete_hit_adjudication` remains valid only for exactly one positive hit. For `colored_span_delete`, use the ordered item-contract `delete_phrases`, not the aggregate display phrase, to determine allowed hits.
 
 Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 
@@ -155,13 +155,13 @@ Report:
   preserved in Lite)
 - any accepted listening tradeoffs
 
-## 9. V4 Precision Gate For JianYing Drafts
+## 9. V5 Precision Gate For JianYing Drafts
 
 Use this gate when Feishu/Lark review-document audio edits are delivered as an editable JianYing draft.
 
 ### Preserve Review Semantics
 
-- `colored_span_delete`: inspect document markup and keep colored fragments separate. If only `你看。那个`, `它`, and `是不是` are blue, create three delete windows and preserve the uncolored words between them.
+- `colored_span_delete`: inspect document markup and keep colored fragments separate. If only `你看。那个`, `它`, and `是不是` are blue, create three delete windows and preserve the uncolored words between them. Add that inter-span text and its exact source-ASR window to automatic `must_keep` evidence.
 - `gap_delete`: in Lite, keep both anchors as ASR context and create only the exact source-text
   label at the unique gap point, or at the review-comment time when ASR fails or is non-unique. Do
   not delete the gap or filler.

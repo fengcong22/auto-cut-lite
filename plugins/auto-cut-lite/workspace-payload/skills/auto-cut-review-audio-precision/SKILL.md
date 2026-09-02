@@ -72,7 +72,7 @@ Classify each review item before matching ASR. Do not flatten every item into on
 
 - `phrase_delete`: delete the exact requested spoken phrase.
 - `ellipsis_range_delete`: when the reviewer writes `...` or `……`, delete the full spoken range between the matched prefix and suffix, not only the suffix phrase.
-- `colored_span_delete`: when the Feishu/Lark document uses colored spans, preserve span boundaries and create one delete window per colored fragment. Do not join uncolored words between colored spans into the deletion.
+- `colored_span_delete`: when the Feishu/Lark document uses colored spans, preserve span boundaries and create one delete window per colored fragment. Do not join uncolored words between colored spans into the deletion. Record the uncolored inter-span text and its exact ASR window as automatic `must_keep` evidence.
 - `gap_delete`: in Lite, when the note says delete the pause between two anchors, keep both anchors
   as ASR context when available but create only the source-text label; do not delete the gap or
   filler. Fall back to the review-comment time when ASR fails or is non-unique.
@@ -177,7 +177,7 @@ After processing every clip:
 - The candidate duration must cover the normalized segmented delivery timeline; only a two-sided fade at an exactly adjacent audible-segment boundary counts as crossfade overlap, while isolated fades do not shorten the required duration.
 - Hash and fully decode the actual candidate bytes. Non-WAV candidates require a complete FFmpeg audio-stream decode, not only container-duration probing.
 - Every spoken-delete result row contains attributable local transcript, strategy, source cut windows, mapped join times, explicit `delete_hits`, `keep_hits`, and passing semantic-join validation, all matching that item's request contract and segmented-plan mapping. A generic item-level `status=pass` is invalid.
-- The local transcript must contain alphanumeric content, and transcript aliases must agree after normalization. Cross-check hit fields against the normalized local transcript: it must not contain the delete phrase and must support every `must_keep` phrase. A retained same-word occurrence passes only with exactly one positive `delete_hit` and structured `delete_hit_adjudication` fields `classification=kept_recurrence`, `occurrence_role`, `phrase`, `local_context`, `context_anchor`, and `reason`; the local context must occur in the transcript, the context anchor is not a substring of the delete phrase, and that anchor remains after removing the delete phrase from the local context. Multiple positive `delete_hits` or multiple local transcript delete occurrences, including overlapping occurrences, require per-hit adjudication and fail until one-to-many receipts are supported.
+- The local transcript must contain alphanumeric content, transcript aliases must agree after normalization, and the transcript must prove every `must_keep` phrase. Cross-check hit fields against the normalized local transcript: every retained occurrence is one positive `delete_hit` paired with exactly one `delete_hit_adjudications` receipt. Each receipt contains `classification=kept_recurrence`, the correct `occurrence_role`, `phrase`, independent `local_context`, `context_anchor`, `reason`, and an exact `hit` object with `phrase`, `text`, `start`, `end`, and `match_method`. The hit must match one reported hit exactly, use an allowed item-contract delete phrase, and lie outside every target cut window; the context must occur in the transcript and retain an anchor independent of the hit. Missing, duplicate, tampered, overlapping, or unreported occurrences fail. A single legacy `delete_hit_adjudication` remains valid only when there is exactly one positive hit. For `colored_span_delete`, the ordered item-contract `delete_phrases` are authoritative; the aggregate display phrase is not an allowed-hit substitute.
 - Every spoken-delete row is checked against a non-empty item contract containing strategy and delete plus an explicit `must_keep` field. Each positive `delete_hit` must match the item delete phrase. The candidate SHA-256 participates in the duration cache key so same-path media replacement cannot reuse stale timing.
 - The latest canonical doc item kind determines whether the spoken-delete contract applies. Pause
   requests are validated independently as ASR-first, review-time-fallback label-only items and must not produce
@@ -195,7 +195,7 @@ After processing every clip:
 - If the result follows `listening_first` and removed an extra particle/filler, state that in the version label or rationale.
 - Keep separate versions when comparing literal precision with cleaner listening flow.
 
-For multi-edit JianYing review jobs, use the V4-style validation gate:
+For multi-edit JianYing review jobs, use the V5-style validation gate:
 
 - reverse ASR the processed audio and check every delete item near its mapped join time
 - write each spoken-delete `review_items[*].evidence` with the ASR source, cut window, delete phrase, must-keep phrase, strategy, and reverse validation status

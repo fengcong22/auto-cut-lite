@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import wave
+from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -133,6 +134,67 @@ class TestRevisionRunner(unittest.TestCase):
         if processed_audio is not None:
             payload["processed_audio"] = processed_audio
         return self._load_request_payload(payload)
+
+    def _spoken_contract_request(
+        self,
+        *,
+        kind,
+        windows,
+        delete,
+        delete_phrases=None,
+        must_keep=(),
+    ):
+        evidence = {
+            "executed": True,
+            "delete": delete,
+            "must_keep": list(must_keep),
+            "strategy": "precision_first",
+        }
+        if delete_phrases is not None:
+            evidence["delete_phrases"] = list(delete_phrases)
+        return self._load_request_payload(
+            {
+                "project": {
+                    "draft_name": "SpokenRecurrenceContract",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": "C:/media/source.wav",
+                },
+                "edits": [
+                    {
+                        "type": "delete",
+                        "doc_item_id": "item01",
+                        "source_kind": kind,
+                        "start": start,
+                        "end": end,
+                        "label": "item01 requested edit",
+                    }
+                    for start, end in windows
+                ],
+                "markers": [],
+                "review_items": [
+                    {
+                        "id": "item01",
+                        "kind": kind,
+                        "source_text": "item01 requested edit",
+                        "execution_required": True,
+                        "evidence": evidence,
+                        "validation": {"status": "pass_adjudicated"},
+                    }
+                ],
+            }
+        )
+
+    @staticmethod
+    def _exact_recurrence_receipt(hit, *, role, context, anchor):
+        return {
+            "classification": "kept_recurrence",
+            "occurrence_role": role,
+            "phrase": hit["phrase"],
+            "hit": dict(hit),
+            "local_context": context,
+            "context_anchor": anchor,
+            "reason": "The exact hit belongs to retained context outside the cut.",
+        }
 
     def _write_full_candidate_reverse_asr(
         self,
@@ -4846,6 +4908,300 @@ class TestRevisionRunner(unittest.TestCase):
             )
 
         self.assertEqual(result["errors"], [])
+
+    def test_spoken_reverse_asr_row_accepts_colored_span_0833_exact_receipt(self):
+        hit = {
+            "phrase": "我们",
+            "text": "我们",
+            "start": 515.88,
+            "end": 516.2,
+            "match_method": "exact_phrase",
+        }
+        row = {
+            "id": "item01",
+            "status": "pass_adjudicated",
+            "strategy": "precision_first",
+            "delete": "我们就看",
+            "delete_phrases": ["我们", "看"],
+            "must_keep": ["北朝", "就", "进入"],
+            "source_cut_windows": [[513.44, 513.64], [513.76, 514.0]],
+            "mapped_join_times": [513.44, 513.76],
+            "local_joined_text": (
+                "那么西晋灭亡之后呢这个魏晋南北朝就进入到下一个阶段"
+                "我们称之为东晋十六国"
+            ),
+            "delete_hits": [hit],
+            "delete_hit_adjudications": [
+                self._exact_recurrence_receipt(
+                    hit,
+                    role="later_kept_occurrence",
+                    context="阶段我们称",
+                    anchor="称",
+                )
+            ],
+            "keep_hits": {"北朝": True, "就": True, "进入": True},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        request = self._spoken_contract_request(
+            kind="colored_span_delete",
+            windows=[[513.44, 513.64], [513.76, 514.0]],
+            delete="我们就看",
+            delete_phrases=["我们", "看"],
+            must_keep=["北朝", "就", "进入"],
+        )
+
+        problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            row,
+            request=request,
+            item_id="item01",
+        )
+
+        self.assertEqual(problems, [])
+
+    def test_spoken_reverse_asr_row_accepts_0928_three_exact_receipts(self):
+        hits = [
+            {
+                "phrase": "是",
+                "text": "是",
+                "start": 565.89,
+                "end": 566.01,
+                "match_method": "exact_phrase",
+            },
+            {
+                "phrase": "是",
+                "text": "是",
+                "start": 569.67,
+                "end": 569.87,
+                "match_method": "exact_phrase",
+            },
+            {
+                "phrase": "是",
+                "text": "是",
+                "start": 572.75,
+                "end": 572.91,
+                "match_method": "exact_phrase",
+            },
+        ]
+        contexts = [
+            ("earlier_kept_occurrence", "国不是同时", "不"),
+            ("later_kept_occurrence", "很多是并列", "多"),
+            ("later_kept_occurrence", "关系但是总", "但"),
+        ]
+        row = {
+            "id": "item01",
+            "status": "pass_adjudicated",
+            "strategy": "precision_first",
+            "delete": "是",
+            "delete_phrases": ["是"],
+            "must_keep": ["有很"],
+            "source_cut_windows": [[568.68, 568.96]],
+            "mapped_join_times": [568.68],
+            "local_joined_text": (
+                "这16国不是同时出现的有很多是并列的也有更迭的"
+                "这种关系但是总"
+            ),
+            "delete_hits": hits,
+            "delete_hit_adjudications": [
+                self._exact_recurrence_receipt(
+                    hit,
+                    role=role,
+                    context=context,
+                    anchor=anchor,
+                )
+                for hit, (role, context, anchor) in zip(hits, contexts)
+            ],
+            "keep_hits": {"有很": True},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        request = self._spoken_contract_request(
+            kind="phrase_delete",
+            windows=[[568.68, 568.96]],
+            delete="是",
+            delete_phrases=["是"],
+            must_keep=["有很"],
+        )
+
+        problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            row,
+            request=request,
+            item_id="item01",
+        )
+
+        self.assertEqual(problems, [])
+
+    def test_spoken_reverse_asr_row_rejects_missing_tampered_and_duplicate_receipts(self):
+        hits = [
+            {
+                "phrase": "foo",
+                "text": "foo",
+                "start": 0.2,
+                "end": 0.4,
+                "match_method": "exact_phrase",
+            },
+            {
+                "phrase": "foo",
+                "text": "foo",
+                "start": 3.0,
+                "end": 3.2,
+                "match_method": "exact_phrase",
+            },
+        ]
+        base_row = {
+            "id": "item01",
+            "status": "pass_adjudicated",
+            "strategy": "precision_first",
+            "delete": "foo",
+            "must_keep": [],
+            "source_cut_windows": [[1.0, 2.0]],
+            "mapped_join_times": [1.0],
+            "local_joined_text": "early foo context and later foo kept",
+            "delete_hits": hits,
+            "delete_hit_adjudications": [
+                self._exact_recurrence_receipt(
+                    hits[0],
+                    role="earlier_kept_occurrence",
+                    context="early foo context",
+                    anchor="early",
+                ),
+                self._exact_recurrence_receipt(
+                    hits[1],
+                    role="later_kept_occurrence",
+                    context="later foo kept",
+                    anchor="later",
+                ),
+            ],
+            "keep_hits": {},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        request = self._spoken_contract_request(
+            kind="spoken_delete",
+            windows=[[1.0, 2.0]],
+            delete="foo",
+        )
+        cases = {}
+        missing = deepcopy(base_row)
+        missing["delete_hit_adjudications"].pop()
+        cases["missing"] = missing
+        tampered = deepcopy(base_row)
+        tampered["delete_hit_adjudications"][1]["hit"]["start"] = 2.9
+        cases["tampered"] = tampered
+        duplicate = deepcopy(base_row)
+        duplicate["delete_hit_adjudications"][1] = deepcopy(
+            duplicate["delete_hit_adjudications"][0]
+        )
+        cases["duplicate"] = duplicate
+
+        for name, row in cases.items():
+            with self.subTest(name=name):
+                problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+                    row,
+                    request=request,
+                    item_id="item01",
+                )
+                self.assertTrue(problems)
+                self.assertTrue(
+                    any(
+                        marker in problem
+                        for marker in ("exactly one", "does not identify", "missing", "duplicate")
+                        for problem in problems
+                    ),
+                    problems,
+                )
+
+    def test_spoken_reverse_asr_row_rejects_receipt_hit_inside_target_window(self):
+        hit = {
+            "phrase": "foo",
+            "text": "foo",
+            "start": 1.2,
+            "end": 1.4,
+            "match_method": "exact_phrase",
+        }
+        row = {
+            "id": "item01",
+            "status": "pass_adjudicated",
+            "strategy": "precision_first",
+            "delete": "foo",
+            "must_keep": [],
+            "source_cut_windows": [[1.0, 2.0]],
+            "mapped_join_times": [1.0],
+            "local_joined_text": "bad foo residue",
+            "delete_hits": [hit],
+            "delete_hit_adjudications": [
+                self._exact_recurrence_receipt(
+                    hit,
+                    role="later_kept_occurrence",
+                    context="foo residue",
+                    anchor="residue",
+                )
+            ],
+            "keep_hits": {},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        request = self._spoken_contract_request(
+            kind="spoken_delete",
+            windows=[[1.0, 2.0]],
+            delete="foo",
+        )
+
+        problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            row,
+            request=request,
+            item_id="item01",
+        )
+
+        self.assertTrue(any("overlaps a target source cut window" in value for value in problems))
+
+    def test_spoken_reverse_asr_row_rejects_wrong_colored_fragment_receipt(self):
+        hit = {
+            "phrase": "就",
+            "text": "就",
+            "start": 515.0,
+            "end": 515.2,
+            "match_method": "exact_phrase",
+        }
+        row = {
+            "id": "item01",
+            "status": "pass_adjudicated",
+            "strategy": "precision_first",
+            "delete": "我们就看",
+            "delete_phrases": ["我们", "看"],
+            "must_keep": [],
+            "source_cut_windows": [[513.44, 513.64], [513.76, 514.0]],
+            "mapped_join_times": [513.44, 513.76],
+            "local_joined_text": "保留就后文",
+            "delete_hits": [hit],
+            "delete_hit_adjudications": [
+                self._exact_recurrence_receipt(
+                    hit,
+                    role="later_kept_occurrence",
+                    context="保留就后文",
+                    anchor="保留",
+                )
+            ],
+            "keep_hits": {},
+            "semantic_join_validation": {"status": "pass"},
+        }
+        request = self._spoken_contract_request(
+            kind="colored_span_delete",
+            windows=[[513.44, 513.64], [513.76, 514.0]],
+            delete="我们就看",
+            delete_phrases=["我们", "看"],
+        )
+
+        problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(
+            row,
+            request=request,
+            item_id="item01",
+        )
+
+        self.assertTrue(
+            any("positive delete_hit does not match" in value for value in problems),
+            problems,
+        )
+        self.assertTrue(
+            any("hit phrase is not allowed" in value for value in problems),
+            problems,
+        )
 
     def test_spoken_reverse_asr_row_rejects_delete_substring_as_context_anchor(self):
         problems = revision_validation_api._spoken_reverse_asr_row_evidence_problems(

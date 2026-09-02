@@ -890,6 +890,64 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 [edit["start"], edit["end"]],
             )
 
+    def test_colored_span_0833_protects_uncolored_inter_span_word(self):
+        cut_plan = resolve_lite_audio_items(
+            [
+                {
+                    "id": "block_d73f7fab583ea21fe9bdddf2",
+                    "kind": "colored_span_delete",
+                    "source_text": "08：33，删除蓝色字“我们就看”",
+                    "start": 513.0,
+                    "execution_required": True,
+                    "colored_spans": [{"text": "我们"}, {"text": "看"}],
+                    "evidence": {
+                        "delete": "我们就看",
+                        "colored_spans": [{"text": "我们"}, {"text": "看"}],
+                    },
+                }
+            ],
+            _source_asr(
+                [
+                    {"text": "北", "start": 513.08, "end": 513.28},
+                    {"text": "朝", "start": 513.28, "end": 513.44},
+                    {"text": "我", "start": 513.44, "end": 513.56},
+                    {"text": "们", "start": 513.56, "end": 513.64},
+                    {"text": "就", "start": 513.64, "end": 513.76},
+                    {"text": "看", "start": 513.76, "end": 514.0},
+                    {"text": "进", "start": 514.2, "end": 514.4},
+                    {"text": "入", "start": 514.4, "end": 514.52},
+                    {"text": "阶", "start": 515.4, "end": 515.56},
+                    {"text": "段", "start": 515.56, "end": 515.72},
+                    {"text": "我", "start": 515.88, "end": 516.08},
+                    {"text": "们", "start": 516.08, "end": 516.2},
+                    {"text": "称", "start": 516.2, "end": 516.36},
+                ]
+            ),
+            source_duration_seconds=520.0,
+        )
+
+        row = cut_plan["rows"][0]
+        self.assertEqual(cut_plan["planner_version"], "lite-asr-cut-planner-v7")
+        self.assertEqual(
+            row["source_cut_windows"],
+            [[513.44, 513.64], [513.76, 514.0]],
+        )
+        self.assertEqual(row["must_keep"], ["北朝", "就", "进入"])
+        self.assertEqual(
+            next(
+                window
+                for window in row["must_keep_source_windows"]
+                if window["phrase"] == "就"
+            ),
+            {
+                "phrase": "就",
+                "start": 513.64,
+                "end": 513.76,
+                "source": "automatic_adjacent_asr_context",
+                "context_role": "uncolored_inter_span",
+            },
+        )
+
     def test_apply_audio_plan_touches_only_asr_items_and_keeps_source_text_exact(self):
         audio_text = "00:05 这里的读音暂不自动修，原文标记。\n第二行保持。"
         visual_text = "00:07 添加给定图片"
@@ -1287,6 +1345,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             parsed_request = load_revision_request(str(request_path))
 
         row = report["rows"][0]
+        self.assertEqual(report["report_builder_version"], "lite-reverse-report-v5")
         self.assertEqual(row["mapped_join_times"], [1.0])
         self.assertNotEqual(row["mapped_join_times"], [row["source_cut_windows"][0][0]])
         self.assertEqual(
@@ -1410,11 +1469,67 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 candidate_audio_path=candidate,
                 audio_delivery_plan_sha256=canonical_json_sha256(delivery_plan),
             )
+            request_payload = {
+                "workflow_mode": "lite",
+                "project": {
+                    "draft_name": "RepeatedRecurrence",
+                    "source_video": "C:/media/source.mp4",
+                    "source_audio": str(source),
+                },
+                "review_items": [
+                    {
+                        "id": "repeated-twice",
+                        "kind": "phrase_delete",
+                        "source_text": "00:01 删除这个",
+                        "execution_required": True,
+                        "evidence": {
+                            "strategy": "precision_first",
+                            "delete": "这个",
+                            "must_keep": [],
+                        },
+                    }
+                ],
+                "edits": [
+                    {
+                        "type": "delete",
+                        "doc_item_id": "repeated-twice",
+                        "start": 1.0,
+                        "end": 1.3,
+                        "label": "00:01 删除这个",
+                    }
+                ],
+                "audio_delivery_plan": delivery_plan,
+            }
+            request_path = root / "request.json"
+            request_path.write_text(
+                json.dumps(request_payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            loaded_request = load_revision_request(str(request_path))
+            strict_problems = _spoken_reverse_asr_row_evidence_problems(
+                report["rows"][0],
+                request=loaded_request,
+                item_id="repeated-twice",
+            )
 
         row = report["rows"][0]
         self.assertEqual(row["status"], "pass_adjudicated")
         self.assertEqual(len(row["kept_recurrence_hits"]), 2)
         self.assertEqual(len(row["delete_hit_adjudications"]), 2)
+        self.assertEqual(
+            [receipt["hit"] for receipt in row["delete_hit_adjudications"]],
+            row["delete_hits"],
+        )
+        self.assertEqual(
+            len(
+                {
+                    receipt["local_context"]
+                    for receipt in row["delete_hit_adjudications"]
+                }
+            ),
+            2,
+        )
+        self.assertEqual(strict_problems, [])
         self.assertEqual(report["unresolved_ids"], [])
 
     def test_reverse_report_uses_source_asr_window_for_boundary_drift_only(self):
