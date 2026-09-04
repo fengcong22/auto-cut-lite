@@ -1,6 +1,15 @@
 # Auto-Cut | AI 全自动用你的剪映替你剪辑
 ![封面图](assets/cover.png)
 
+## Auto-Cut Lite（精简版）
+
+普通用户请从 GitHub Releases 下载 Lite 安装包，不要下载 GitHub 自动生成的
+`Source code (zip)`：
+
+- [下载 Lite 最新安装包](https://github.com/fengcong22/auto-cut-lite/releases/latest)
+- [查看 Lite 更新记录](https://github.com/fengcong22/auto-cut-lite/blob/feature/auto-cut-lite/plugins/auto-cut-lite/更新说明.md)
+- [查看 Lite 源码分支](https://github.com/fengcong22/auto-cut-lite/tree/feature/auto-cut-lite)
+
 ## Full Windows Install (v1.7.0)
 
 On Windows 10/11 x64, install 64-bit Python 3.10-3.12 for the main runtime.
