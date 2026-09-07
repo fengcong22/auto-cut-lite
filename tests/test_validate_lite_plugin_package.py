@@ -109,7 +109,7 @@ def test_offline_validator_proves_workspace_skill_and_review_runtime_contract(
     assert result["plugin_manifest_exposes_skills"] is False
     assert result["plugin_top_level_skills_present"] is False
     assert result["review_runtime_contract"] == "pass"
-    assert result["review_runtime_required_path_count"] == 2
+    assert result["review_runtime_required_path_count"] == 3
 
 
 def _manifest_exposes_skills(root: Path) -> None:

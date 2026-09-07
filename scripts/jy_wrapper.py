@@ -2576,9 +2576,23 @@ def _build_command_handlers():
             package_zip=args.package_zip,
             relink_tool=args.relink_tool,
             **(
-                {"execution_input_json": args.execution_input_json}
-                if args.execution_input_json
-                else {}
+                {
+                    **(
+                        {"execution_input_json": args.execution_input_json}
+                        if args.execution_input_json
+                        else {}
+                    ),
+                    **(
+                        {"source_manifest_json": args.source_manifest_json}
+                        if getattr(args, "source_manifest_json", None)
+                        else {}
+                    ),
+                    **(
+                        {"result_path": args.result_path}
+                        if getattr(args, "result_path", None)
+                        else {}
+                    ),
+                }
             ),
             mock_media=args.mock_media,
             asr_timeout_seconds=args.asr_timeout_seconds,

@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import time
+import wave
 import zipfile
 from copy import deepcopy
 from pathlib import Path
@@ -84,6 +85,13 @@ from utils.revision_runner import (
     load_review_items_json,
     load_revision_request,
 )
+from utils.source_manifest import (
+    LoadedSourceManifest,
+    SourceManifestError,
+    compile_manifest_project,
+    load_source_manifest,
+    materialize_manifest_sources,
+)
 
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
@@ -129,6 +137,12 @@ class ReviewDocumentRunError(RuntimeError):
         self.result = dict(result)
 
 
+class OrderedSourceAsrIntegrityError(ValueError):
+    """Ordered source ASR evidence no longer matches its manifest timebase."""
+
+    code = "source_pair_asr_integrity"
+
+
 class LiteVisualAssetError(ValueError):
     """A privacy-safe, machine-readable visual material failure."""
 
@@ -158,6 +172,76 @@ class LiteVisualAssetError(ValueError):
         return payload
 
 
+def _sanitize_manifest_failure_details(value: Any) -> Any:
+    """Keep manifest terminal errors bounded and free of local/provider data."""
+
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            normalized = str(key).casefold()
+            if any(token in normalized for token in ("token", "secret", "credential", "url")):
+                continue
+            if normalized in {
+                "path",
+                "video_path",
+                "audio_path",
+                "replacement_audio_path",
+                "filename",
+            }:
+                continue
+            result[str(key)] = _sanitize_manifest_failure_details(child)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_manifest_failure_details(child) for child in value]
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _trusted_manifest_terminal_context() -> tuple[dict[str, Any], str] | None:
+    """Read the server-injected binding used when manifest parsing fails."""
+
+    values = {
+        "task_id": os.environ.get("CODEX_AUTOCUT_TASK_ID"),
+        "run_id": os.environ.get("CODEX_AUTOCUT_RUN_ID"),
+        "subject_key": os.environ.get("CODEX_AUTOCUT_SUBJECT_KEY"),
+        "config_version": os.environ.get("CODEX_AUTOCUT_CONFIG_VERSION"),
+        "stage_id": os.environ.get("CODEX_AUTOCUT_STAGE_ID"),
+        "event_id": os.environ.get("CODEX_AUTOCUT_EVENT_ID"),
+    }
+    if any(value is None or not str(value).strip() for value in values.values()):
+        return None
+    try:
+        config_version = int(str(values["config_version"]).strip())
+    except (TypeError, ValueError):
+        return None
+    manifest_sha256 = str(
+        os.environ.get("CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256") or ""
+    ).strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256):
+        return None
+    binding = {
+        "task_id": str(values["task_id"]).strip(),
+        "run_id": str(values["run_id"]).strip(),
+        "subject_key": str(values["subject_key"]).strip(),
+        "config_version": config_version,
+        "stage_id": str(values["stage_id"]).strip(),
+        "event_id": str(values["event_id"]).strip(),
+    }
+    return binding, manifest_sha256
+
+
+def _validate_manifest_package_path(requested_package_path: Path, draft_name: str) -> None:
+    """Require the Taskboard-owned ZIP path to use the final draft name."""
+
+    expected = requested_package_path.with_name(f"{str(draft_name).strip()}.zip")
+    if requested_package_path.resolve(strict=False) != expected.resolve(strict=False):
+        raise SourceManifestError(
+            "package_path_mismatch",
+            "manifest package path must match the final artifact name",
+        )
+
+
 def _read_json_object(path: str | os.PathLike[str], label: str) -> dict[str, Any]:
     source = Path(path).expanduser().resolve(strict=True)
     try:
@@ -177,15 +261,37 @@ def _job_input_digest(
     options: Mapping[str, Any],
 ) -> str:
     materials: dict[str, Any] = {}
-    for field in ("source_video", "source_audio", "replacement_audio"):
-        value = str(project.get(field) or "").strip()
-        if not value:
-            continue
-        path = Path(value).expanduser().resolve(strict=False)
-        materials[field] = {
-            "path": os.path.normcase(str(path)),
-            "sha256": sha256_file(path) if path.is_file() else "missing",
-        }
+    source_pairs = project.get("source_pairs")
+    if isinstance(source_pairs, list) and source_pairs:
+        pair_materials: list[dict[str, Any]] = []
+        for index, raw_pair in enumerate(source_pairs):
+            if not isinstance(raw_pair, Mapping):
+                pair_materials.append({"pair_index": index, "invalid": True})
+                continue
+            row: dict[str, Any] = {
+                "pair_index": raw_pair.get("pair_index", index),
+            }
+            for field in ("video_path", "replacement_audio_path"):
+                value = str(raw_pair.get(field) or "").strip()
+                if not value:
+                    continue
+                path = Path(value).expanduser().resolve(strict=False)
+                row[field] = {
+                    "path": os.path.normcase(str(path)),
+                    "sha256": sha256_file(path) if path.is_file() else "missing",
+                }
+            pair_materials.append(row)
+        materials["source_pairs"] = pair_materials
+    else:
+        for field in ("source_video", "source_audio", "replacement_audio"):
+            value = str(project.get(field) or "").strip()
+            if not value:
+                continue
+            path = Path(value).expanduser().resolve(strict=False)
+            materials[field] = {
+                "path": os.path.normcase(str(path)),
+                "sha256": sha256_file(path) if path.is_file() else "missing",
+            }
     return canonical_json_sha256(
         {
             "snapshot_sha256": sha256_file(snapshot_path),
@@ -1357,16 +1463,399 @@ def _audio_execution_summary(
     }
 
 
+def _merge_source_asr_words(
+    pair_rows: Sequence[Mapping[str, Any]],
+    *,
+    boundary_tolerance_seconds: float = 0.001,
+) -> list[dict[str, Any]]:
+    """Merge pair-local ASR words into one authoritative global timebase.
+
+    The manifest order is the only ordering signal. Every local timing row is
+    checked against its pair duration before the cumulative offset is applied;
+    an out-of-range provider response is a hard failure instead of a silently
+    shifted cut.
+    """
+
+    if not isinstance(pair_rows, Sequence) or isinstance(pair_rows, (str, bytes)):
+        raise OrderedSourceAsrIntegrityError("source ASR pair rows must be a sequence")
+    merged: list[dict[str, Any]] = []
+    expected_pair_index = 0
+    expected_offset = 0.0
+    for row_index, raw_pair in enumerate(pair_rows):
+        if not isinstance(raw_pair, Mapping):
+            raise OrderedSourceAsrIntegrityError(f"source ASR pair {row_index} is invalid")
+        pair_index = raw_pair.get("pair_index", row_index)
+        if (
+            isinstance(pair_index, bool)
+            or not isinstance(pair_index, int)
+            or pair_index != expected_pair_index
+        ):
+            raise OrderedSourceAsrIntegrityError(
+                "source ASR pairs must preserve contiguous manifest order"
+            )
+        expected_pair_index += 1
+        try:
+            offset = float(raw_pair.get("offset", 0.0))
+            duration = float(raw_pair.get("duration"))
+            tolerance = float(boundary_tolerance_seconds)
+        except (TypeError, ValueError) as exc:
+            raise OrderedSourceAsrIntegrityError(
+                f"source ASR pair {pair_index} has invalid timing metadata"
+            ) from exc
+        if (
+            not math.isfinite(offset)
+            or offset < 0.0
+            or not math.isfinite(duration)
+            or duration <= 0.0
+        ):
+            raise OrderedSourceAsrIntegrityError(
+                f"source ASR pair {pair_index} has invalid timing metadata"
+            )
+        if not math.isfinite(tolerance) or tolerance < 0.0:
+            raise OrderedSourceAsrIntegrityError("source ASR boundary tolerance is invalid")
+        if abs(offset - expected_offset) > tolerance:
+            raise OrderedSourceAsrIntegrityError(
+                f"source ASR pair {pair_index} offset does not preserve manifest order"
+            )
+        expected_offset += duration
+        words = raw_pair.get("words")
+        if not isinstance(words, list):
+            raise OrderedSourceAsrIntegrityError(f"source ASR pair {pair_index} has no word rows")
+        previous_start = -math.inf
+        for word_index, raw_word in enumerate(words):
+            if not isinstance(raw_word, Mapping):
+                raise OrderedSourceAsrIntegrityError(
+                    f"source ASR pair {pair_index} word {word_index} is invalid"
+                )
+            try:
+                local_start = float(raw_word.get("start"))
+                local_end = float(raw_word.get("end"))
+            except (TypeError, ValueError) as exc:
+                raise OrderedSourceAsrIntegrityError(
+                    f"source ASR pair {pair_index} word {word_index} has invalid timing"
+                ) from exc
+            if (
+                not math.isfinite(local_start)
+                or not math.isfinite(local_end)
+                or local_start < -tolerance
+                or local_end > duration + tolerance
+                or local_end < local_start
+            ):
+                raise OrderedSourceAsrIntegrityError(
+                    f"source ASR pair {pair_index} word {word_index} timing is outside pair duration"
+                )
+            if local_start + tolerance < previous_start:
+                raise OrderedSourceAsrIntegrityError(
+                    f"source ASR pair {pair_index} word timing does not preserve provider order"
+                )
+            previous_start = local_start
+            # Provider rounding may put an edge a fraction beyond the media;
+            # clamp only within the explicit boundary tolerance.
+            local_start = max(0.0, min(local_start, duration))
+            local_end = max(local_start, min(local_end, duration))
+            merged.append(
+                {
+                    **dict(raw_word),
+                    "pair_index": pair_index,
+                    "local_start": round(local_start, 6),
+                    "local_end": round(local_end, 6),
+                    "start": round(offset + local_start, 6),
+                    "end": round(offset + local_end, 6),
+                }
+            )
+    return merged
+
+
+def _concat_alignment_wavs(
+    sources: Sequence[str | os.PathLike[str]],
+    output: str | os.PathLike[str],
+) -> dict[str, Any]:
+    """Concatenate fixed mono PCM16 alignment WAVs without re-encoding."""
+
+    if not sources:
+        raise ValueError("at least one alignment WAV is required")
+    output_path = Path(output).expanduser().resolve(strict=False)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.part")
+    total_frames = 0
+    params = None
+    try:
+        with wave.open(str(temporary), "wb") as target:
+            for index, raw_source in enumerate(sources):
+                source = Path(raw_source).expanduser().resolve(strict=True)
+                with wave.open(str(source), "rb") as stream:
+                    current = stream.getparams()
+                    if (
+                        current.nchannels != 1
+                        or current.framerate != 16000
+                        or current.sampwidth != 2
+                        or current.comptype != "NONE"
+                    ):
+                        raise ValueError(
+                            f"alignment WAV {index} does not match the fixed PCM16 recipe"
+                        )
+                    if params is None:
+                        params = current
+                        target.setnchannels(current.nchannels)
+                        target.setsampwidth(current.sampwidth)
+                        target.setframerate(current.framerate)
+                        target.setcomptype(current.comptype, current.compname)
+                    elif (
+                        current.nchannels,
+                        current.sampwidth,
+                        current.framerate,
+                        current.comptype,
+                    ) != (
+                        params.nchannels,
+                        params.sampwidth,
+                        params.framerate,
+                        params.comptype,
+                    ):
+                        raise ValueError("alignment WAV recipes do not match")
+                    while True:
+                        frames = stream.readframes(8192)
+                        if not frames:
+                            break
+                        target.writeframes(frames)
+                        total_frames += len(frames) // (current.nchannels * current.sampwidth)
+        os.replace(temporary, output_path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    return {
+        "path": str(output_path),
+        "sha256": sha256_file(output_path),
+        "duration_seconds": round(total_frames / 16000.0, 6),
+    }
+
+
+def _run_ordered_source_asr(
+    alignment_sources: Sequence[Mapping[str, Any]],
+    *,
+    materials_dir: Path,
+    alignment_output: Path,
+    source_asr_output: Path,
+    cache: ArtifactCache,
+    inflight_root: Path,
+    ffmpeg_bin: str,
+    ffmpeg_info: Mapping[str, Any],
+    config: Any,
+    asr_timeout_seconds: float,
+    asr_poll_interval_seconds: float,
+    asr_max_wait_seconds: float,
+    store: JobStateStore,
+) -> tuple[dict[str, Any], dict[str, Any], list[Path], list[bool]]:
+    """Extract, recognize, and merge every ordered source pair."""
+
+    if not alignment_sources:
+        raise OrderedSourceAsrIntegrityError(
+            "ordered source ASR requires at least one alignment source"
+        )
+    pair_payloads: list[dict[str, Any]] = []
+    asr_payloads: list[dict[str, Any]] = []
+    pair_receipts: list[dict[str, Any]] = []
+    artifacts: list[Path] = []
+    cache_hits: list[bool] = []
+    alignment_paths: list[Path] = []
+    for row_index, raw_source in enumerate(alignment_sources):
+        if not isinstance(raw_source, Mapping):
+            raise OrderedSourceAsrIntegrityError(f"source alignment pair {row_index} is invalid")
+        pair_index = raw_source.get("pair_index", row_index)
+        if (
+            isinstance(pair_index, bool)
+            or not isinstance(pair_index, int)
+            or pair_index != row_index
+        ):
+            raise OrderedSourceAsrIntegrityError(
+                "source alignment pairs must preserve contiguous manifest order"
+            )
+        source = Path(str(raw_source.get("path") or "")).expanduser().resolve(strict=True)
+        source_sha256 = sha256_file(source)
+        declared_source_sha256 = str(raw_source.get("sha256") or "").strip().casefold()
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", declared_source_sha256)
+            or declared_source_sha256 != source_sha256
+        ):
+            raise OrderedSourceAsrIntegrityError(
+                f"Source alignment pair {pair_index} identity does not match source bytes"
+            )
+        pair_alignment = materials_dir / f"source_alignment_pair_{pair_index:03d}.wav"
+        alignment_identity_payload = alignment_cache_identity(
+            source_sha256=source_sha256,
+            ffmpeg=ffmpeg_info,
+        )
+        alignment_identity = CacheIdentity(
+            "source_alignment_wav_pair",
+            inputs=alignment_identity_payload["inputs"],
+            versions=alignment_identity_payload["versions"],
+        )
+        cached_alignment, alignment_hit = _cached_file(
+            cache,
+            alignment_identity,
+            build=lambda output, source_path=source: extract_alignment_wav(
+                source_path,
+                output,
+                ffmpeg_bin=ffmpeg_bin,
+            ),
+            suffix=".wav",
+        )
+        _copy_cached_file(cached_alignment, pair_alignment)
+        alignment_paths.append(pair_alignment)
+        artifacts.extend([source, pair_alignment])
+        cache_hits.append(alignment_hit)
+
+        source_identity_payload = source_asr_cache_identity(
+            alignment_audio_sha256=sha256_file(pair_alignment),
+            config=config,
+        )
+        source_identity = CacheIdentity(
+            "source_asr_words_pair",
+            inputs=source_identity_payload["inputs"],
+            versions=source_identity_payload["versions"],
+        )
+        wait_started = time.monotonic()
+        source_hit = False
+        try:
+            source_asr, source_hit = _cached_asr_json(
+                cache,
+                source_identity,
+                audio_path=pair_alignment,
+                config=config,
+                inflight_root=inflight_root,
+                timeout_seconds=float(asr_timeout_seconds),
+                poll_interval_seconds=float(asr_poll_interval_seconds),
+                max_wait_seconds=float(asr_max_wait_seconds),
+            )
+        finally:
+            if not source_hit:
+                store.add_wait_seconds(
+                    "source_asr",
+                    max(0.0, time.monotonic() - wait_started),
+                )
+        cache_hits.append(source_hit)
+        input_sha256 = str(source_asr.get("input_sha256") or "")
+        alignment_sha256 = sha256_file(pair_alignment)
+        if input_sha256 != alignment_sha256:
+            raise OrderedSourceAsrIntegrityError(
+                f"Source ASR pair {pair_index} input identity does not match alignment WAV bytes"
+            )
+        words = source_asr.get("words")
+        if not isinstance(words, list) or not words:
+            raise ValueError(f"Source ASR pair {pair_index} did not return word-level timing rows")
+        try:
+            offset = float(raw_source.get("offset"))
+            duration = float(raw_source.get("duration"))
+        except (TypeError, ValueError) as exc:
+            raise OrderedSourceAsrIntegrityError(
+                f"Source ASR pair {pair_index} has invalid timing metadata"
+            ) from exc
+        service_identity = {
+            field: str(source_asr.get(field) or "")
+            for field in ("provider", "resource_id", "model", "adapter_version")
+        }
+        if (
+            not service_identity["provider"]
+            or not (service_identity["resource_id"] or service_identity["model"])
+            or not service_identity["adapter_version"]
+        ):
+            raise OrderedSourceAsrIntegrityError(
+                f"Source ASR pair {pair_index} has incomplete provider identity"
+            )
+        if asr_payloads:
+            expected_identity = {
+                field: str(asr_payloads[0].get(field) or "")
+                for field in ("provider", "resource_id", "model", "adapter_version")
+            }
+            if service_identity != expected_identity:
+                raise OrderedSourceAsrIntegrityError(
+                    "Source ASR provider identity changed between ordered pairs"
+                )
+        asr_payloads.append(dict(source_asr))
+        pair_payloads.append(
+            {
+                "pair_index": pair_index,
+                "offset": offset,
+                "duration": duration,
+                "words": words,
+            }
+        )
+        pair_receipts.append(
+            {
+                "pair_index": pair_index,
+                "offset": offset,
+                "duration": duration,
+                "alignment_audio_path": str(pair_alignment),
+                "alignment_audio_sha256": alignment_sha256,
+                "alignment_cache_identity_digest": alignment_identity.digest(),
+                "source_asr_input_sha256": input_sha256 or alignment_sha256,
+                "source_asr_cache_identity_digest": source_identity.digest(),
+                "provider": service_identity["provider"],
+                "resource_id": service_identity["resource_id"],
+                "model": service_identity["model"],
+                "adapter_version": service_identity["adapter_version"],
+                "service_job_id": str(source_asr.get("service_job_id") or ""),
+                "service_result_sha256": str(source_asr.get("service_result_sha256") or ""),
+                "word_count": len(words),
+                "cache_hit": bool(alignment_hit and source_hit),
+            }
+        )
+
+    combined = _concat_alignment_wavs(alignment_paths, alignment_output)
+    merged_words = _merge_source_asr_words(pair_payloads)
+    first_asr = asr_payloads[0]
+    source_asr = {
+        "schema_version": _SCHEMA_VERSION,
+        "input_sha256": combined["sha256"],
+        "words": merged_words,
+        "pair_asr": pair_receipts,
+        "source_pair_count": len(pair_payloads),
+        "service_job_ids": [str(payload.get("service_job_id") or "") for payload in asr_payloads],
+        "service_result_sha256s": [
+            str(payload.get("service_result_sha256") or "") for payload in asr_payloads
+        ],
+    }
+    for field in ("provider", "resource_id", "model", "adapter_version"):
+        if field in first_asr:
+            source_asr[field] = first_asr[field]
+    source_asr["service_result_sha256"] = canonical_json_sha256(
+        source_asr["service_result_sha256s"]
+    )
+    atomic_write_json(source_asr_output, source_asr)
+    artifacts.extend([alignment_output, source_asr_output])
+    source_index = {
+        "asr_available": True,
+        "asr_status": "verified",
+        "source_pair_count": len(pair_payloads),
+        "alignment_audio_path": str(alignment_output),
+        "alignment_audio_sha256": combined["sha256"],
+        "alignment_sources": pair_receipts,
+        "alignment_cache_identity_digests": [
+            str(row["alignment_cache_identity_digest"]) for row in pair_receipts
+        ],
+        "source_asr_path": str(source_asr_output),
+        "source_asr_sha256": sha256_file(source_asr_output),
+        "source_asr_cache_identity_digests": [
+            str(row["source_asr_cache_identity_digest"]) for row in pair_receipts
+        ],
+        "source_asr_cache_identity_digest": canonical_json_sha256(
+            [row["source_asr_cache_identity_digest"] for row in pair_receipts]
+        ),
+    }
+    return source_asr, source_index, list(dict.fromkeys(artifacts)), cache_hits
+
+
 def run_review_document(
     snapshot_json: str | os.PathLike[str] | None = None,
     project_json: str | os.PathLike[str] | None = None,
     *,
     doc_url: str | None = None,
+    source_manifest_json: str | os.PathLike[str] | None = None,
     job_root: str | os.PathLike[str],
     drafts_root: str | os.PathLike[str],
     package_zip: str | os.PathLike[str],
     relink_tool: str | os.PathLike[str] | None = None,
     execution_input_json: str | os.PathLike[str] | None = None,
+    result_path: str | os.PathLike[str] | None = None,
     mock_media: bool = False,
     asr_timeout_seconds: float = 60.0,
     asr_poll_interval_seconds: float = 2.0,
@@ -1401,6 +1890,7 @@ def run_review_document(
     requested_package_path = Path(package_zip).expanduser().resolve(strict=False)
     package_path = requested_package_path
     intake: dict[str, Any] = {}
+    source_manifest: LoadedSourceManifest | None = None
     external_name = ""
     execution_input_digest = ""
     execution_input_payload: dict[str, Any] | None = None
@@ -1423,6 +1913,16 @@ def run_review_document(
     )
     draft_path_text = ""
     runtime_integrity_receipt: dict[str, Any] | None = None
+
+    # The result path is injected by Taskboard for a trusted run.  Resolve it
+    # once and never discover it by enumerating a directory.
+    result_file_path = (
+        Path(result_path).expanduser().resolve(strict=False)
+        if result_path is not None and str(result_path).strip()
+        else None
+    )
+    manifest_requested = bool(str(source_manifest_json or "").strip())
+    trusted_manifest_context = _trusted_manifest_terminal_context()
 
     def public_result(*, ok: bool, error: str = "") -> dict[str, Any]:
         state = store.snapshot() if store is not None else {}
@@ -1505,6 +2005,11 @@ def run_review_document(
             for name, candidate in artifact_candidates.items()
             if (row := _result_artifact(candidate)) is not None
         }
+        if source_manifest is not None and package_is_current and effective_package_path.is_file():
+            # Manifest callers consume this exact path/digest pair.  Keep the
+            # legacy artifact rows for all other input modes unchanged.
+            artifacts["package_zip"] = str(effective_package_path.resolve())
+            artifacts["archive_sha256"] = sha256_file(effective_package_path)
         draft_path = str(execution.get("draft_path") or draft_path_text)
         unresolved: set[str] = set()
         cut_plan_payload: dict[str, Any] = {}
@@ -1586,20 +2091,98 @@ def run_review_document(
             },
             "failure_details": _json_safe(failure_details),
         }
+        if source_manifest is not None:
+            result["source_manifest_sha256"] = source_manifest.canonical_sha256
+            result["binding"] = dict(source_manifest.data["binding"])
+            result["output_artifacts"] = artifacts
         if error:
             result["error"] = safe_error_text(error)
         return result
 
+    def write_terminal_result(
+        *,
+        status: str,
+        result: Mapping[str, Any] | None = None,
+        error: BaseException | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        """Publish only the server-owned, manifest-bound terminal receipt."""
+
+        if result_file_path is None:
+            return
+        if source_manifest is not None:
+            binding = dict(source_manifest.data["binding"])
+            manifest_sha256 = source_manifest.canonical_sha256
+        elif manifest_requested and trusted_manifest_context is not None:
+            binding, manifest_sha256 = trusted_manifest_context
+        else:
+            return
+        payload: dict[str, Any] = {
+            "schema_version": 1,
+            "binding": binding,
+            "manifest_sha256": manifest_sha256,
+            "status": str(status),
+        }
+        if status == "pass":
+            source = dict(result or {})
+            delivery = source.get("delivery")
+            if not isinstance(delivery, Mapping):
+                delivery = {}
+            name_resolution = source.get("name_resolution")
+            if not isinstance(name_resolution, Mapping):
+                name_resolution = {}
+            package_value = str(source.get("package_zip") or "").strip()
+            archive_sha = (
+                str(source.get("archive_sha256") or delivery.get("archive_sha256") or "")
+                .strip()
+                .lower()
+            )
+            draft_name = str(
+                source.get("draft_name") or name_resolution.get("final_name") or ""
+            ).strip()
+            if package_value and archive_sha:
+                payload.update(
+                    {
+                        "package_zip": str(Path(package_value).expanduser().resolve(strict=False)),
+                        "archive_sha256": archive_sha,
+                        "draft_name": draft_name,
+                    }
+                )
+        else:
+            stable_code = str(error_code or "autocut_failed").strip() or "autocut_failed"
+            if isinstance(error, SourceManifestError):
+                stable_code = error.code
+            details: Mapping[str, Any] = {}
+            if isinstance(error, SourceManifestError):
+                details = error.details
+            elif isinstance(failure_details.get("source_manifest"), Mapping):
+                details = failure_details["source_manifest"].get("details") or {}
+            payload["error"] = {
+                "code": stable_code,
+                "message": f"Auto-Cut run blocked: {stable_code}",
+                "details": _json_safe(_sanitize_manifest_failure_details(details)),
+            }
+        try:
+            atomic_write_json(result_file_path, payload)
+        except Exception:
+            # A result receipt must never mask the primary Auto-Cut outcome.
+            pass
+
     try:
         has_doc_url = bool(str(doc_url or "").strip())
+        has_manifest = bool(str(source_manifest_json or "").strip())
         has_snapshot = snapshot_json is not None and bool(str(snapshot_json).strip())
         has_project = project_json is not None and bool(str(project_json).strip())
-        if has_doc_url:
-            if has_snapshot or has_project:
+        if sum(bool(value) for value in (has_doc_url, has_manifest, has_snapshot)) > 1:
+            raise ValueError(
+                "doc_url, snapshot_json, and source_manifest_json are mutually exclusive"
+            )
+        if has_doc_url or has_manifest:
+            if has_project:
                 raise ValueError(
-                    "doc_url is mutually exclusive with snapshot_json and project_json"
+                    "doc_url/source_manifest_json is mutually exclusive with project_json"
                 )
-            validated_doc_url = validate_document_url(str(doc_url))
+            validated_doc_url = validate_document_url(str(doc_url)) if has_doc_url else ""
         else:
             if not (has_snapshot and has_project):
                 raise ValueError("JSON input mode requires snapshot_json and project_json")
@@ -1620,6 +2203,13 @@ def run_review_document(
                 raise ValueError(f"{label} must be {'non-negative' if allow_zero else 'positive'}")
         if package_path.suffix.casefold() != ".zip":
             raise ValueError("package_zip must end with .zip")
+
+        if has_manifest:
+            try:
+                source_manifest = load_source_manifest(source_manifest_json)  # type: ignore[arg-type]
+            except SourceManifestError as exc:
+                failure_details["source_manifest"] = _json_safe(exc.public_data())
+                raise
 
         root.mkdir(parents=True, exist_ok=True)
         for key in (
@@ -1652,6 +2242,22 @@ def run_review_document(
             job_identity = {
                 "input_mode": "url",
                 "document_url_sha256": document_url_digest(validated_doc_url),
+                "execution_input_digest": execution_input_digest,
+                "workflow_mode": "lite",
+            }
+        elif has_manifest:
+            if source_manifest is None:
+                raise RuntimeError("source manifest was not loaded")
+            binding = source_manifest.data["binding"]
+            job_identity = {
+                "input_mode": "source_manifest",
+                "source_manifest_sha256": source_manifest.canonical_sha256,
+                "task_id": binding["task_id"],
+                "run_id": binding["run_id"],
+                "subject_key": binding["subject_key"],
+                "config_version": binding["config_version"],
+                "stage_id": binding["stage_id"],
+                "event_id": binding["event_id"],
                 "execution_input_digest": execution_input_digest,
                 "workflow_mode": "lite",
             }
@@ -1688,6 +2294,7 @@ def run_review_document(
         expected_project_materials: dict[str, dict[str, str]] = {}
         input_options = {
             "workflow_mode": "lite",
+            "input_mode": "source_manifest" if has_manifest else ("url" if has_doc_url else "json"),
             "lite_cut_layout": "split_gap",
             "mock_media": mock_media,
             "ffmpeg_bin": ffmpeg_bin,
@@ -1699,6 +2306,16 @@ def run_review_document(
             "drafts_root": os.path.normcase(str(drafts_path)),
             "relink_tool_sha256": sha256_file(relink_path),
         }
+        if source_manifest is not None:
+            input_options.update(
+                {
+                    "source_manifest_sha256": source_manifest.canonical_sha256,
+                    "task_id": source_manifest.data["binding"]["task_id"],
+                    "run_id": source_manifest.data["binding"]["run_id"],
+                    "stage_id": source_manifest.data["binding"]["stage_id"],
+                    "config_version": source_manifest.data["binding"]["config_version"],
+                }
+            )
         cache_path = (
             Path(cache_root).expanduser().resolve(strict=False)
             if cache_root is not None
@@ -1707,6 +2324,13 @@ def run_review_document(
         cache = ArtifactCache(cache_path)
         inflight_root = cache_path / "inflight"
         item_ids: tuple[str, ...] = ()
+
+        def validate_manifest_package_path(draft_name: str, phase: str) -> None:
+            try:
+                _validate_manifest_package_path(requested_package_path, draft_name)
+            except SourceManifestError as exc:
+                failure_details[phase] = _json_safe(exc.public_data())
+                raise
 
         def run_preflight() -> PhaseOutcome:
             nonlocal runtime_integrity_receipt
@@ -1717,7 +2341,7 @@ def run_review_document(
             else:
                 runtime_integrity_receipt = None
             lark_version = ""
-            if has_doc_url:
+            if has_doc_url or has_manifest:
                 try:
                     lark_version = lark_cli_version(lark_cli=lark_cli, runner=lark_runner)
                     intake["lark_version"] = lark_version
@@ -1745,11 +2369,15 @@ def run_review_document(
                 "preflight",
                 artifacts=[],
                 data={
-                    "input_mode": "url" if has_doc_url else "json",
+                    "input_mode": (
+                        "source_manifest" if has_manifest else ("url" if has_doc_url else "json")
+                    ),
                     "runtime_integrity": _json_safe(
                         runtime_integrity_receipt or {"status": "skipped_mock_media"}
                     ),
-                    "lark_adapter_version": LARK_ADAPTER_VERSION if has_doc_url else "",
+                    "lark_adapter_version": (
+                        LARK_ADAPTER_VERSION if (has_doc_url or has_manifest) else ""
+                    ),
                     "lark_cli_version": lark_version,
                 },
                 result={"status": "pass"},
@@ -1787,6 +2415,37 @@ def run_review_document(
                     "revision": parsed["revision_id"],
                     "content_sha256": parsed["content_sha256"],
                     "asset_identity_sha256": parsed["asset_identity_sha256"],
+                }
+            elif has_manifest:
+                if source_manifest is None:
+                    raise RuntimeError("source manifest was not loaded")
+                try:
+                    materialized = materialize_manifest_sources(
+                        source_manifest,
+                        root,
+                        lark_runner,
+                        lark_cli=lark_cli,
+                    )
+                except SourceManifestError as exc:
+                    failure_details["source_manifest"] = _json_safe(exc.public_data())
+                    raise
+                intake["manifest_materialized"] = materialized
+                document = materialized.get("document") if isinstance(materialized, Mapping) else {}
+                data = {
+                    "document_identity_sha256": (
+                        str(document.get("document_identity_sha256") or "")
+                        if isinstance(document, Mapping)
+                        else ""
+                    ),
+                    "revision": (
+                        document.get("revision_id") if isinstance(document, Mapping) else None
+                    ),
+                    "content_sha256": (
+                        str(document.get("content_sha256") or "")
+                        if isinstance(document, Mapping)
+                        else ""
+                    ),
+                    "source_manifest_sha256": source_manifest.canonical_sha256,
                 }
             else:
                 snapshot = sanitize_document_snapshot(
@@ -1840,6 +2499,30 @@ def run_review_document(
                 cache_hit = bool(downloaded) and all(
                     bool(row.get("cache_hit")) for row in downloaded
                 )
+            elif has_manifest:
+                materialized = intake.get("manifest_materialized")
+                if not isinstance(materialized, Mapping):
+                    raise RuntimeError("manifest source materials were not materialized")
+                downloaded = [
+                    dict(row)
+                    for row in materialized.get("receipts") or []
+                    if isinstance(row, Mapping)
+                ]
+                intake["downloaded_assets"] = downloaded
+                rows = [
+                    {
+                        "asset_id": str(row.get("asset_id") or row.get("filename") or ""),
+                        "sha256": str(row.get("sha256") or ""),
+                        "byte_size": int(row.get("byte_size") or 0),
+                        "extension": str(row.get("extension") or ""),
+                        "role": "manifest_source",
+                    }
+                    for row in downloaded
+                ]
+                artifacts = [
+                    Path(str(row["path"])) for row in downloaded if str(row.get("path") or "")
+                ]
+                cache_hit = False
             else:
                 rows = _path_rows_from_snapshot(snapshot)
                 intake["downloaded_assets"] = []
@@ -1873,6 +2556,106 @@ def run_review_document(
                 raw_project = dict(compiled_inputs["project"])
                 intake["name_resolution"] = dict(compiled_inputs.get("name_resolution") or {})
                 atomic_write_json(paths["asset_manifest"], compiled_inputs["asset_manifest"])
+            elif has_manifest:
+                if source_manifest is None:
+                    raise RuntimeError("source manifest was not loaded")
+                materialized = intake.get("manifest_materialized")
+                if not isinstance(materialized, Mapping):
+                    raise RuntimeError("manifest source materials were not materialized")
+                videos = [
+                    dict(row)
+                    for row in materialized.get("videos") or []
+                    if isinstance(row, Mapping)
+                ]
+                audios = [
+                    dict(row)
+                    for row in materialized.get("audios") or []
+                    if isinstance(row, Mapping)
+                ]
+                audio_config = source_manifest.data["sources"]["audio"]
+                mode = str(audio_config.get("mode") or "video_original")
+                manifest_project = compile_manifest_project(
+                    videos,
+                    audios,
+                    mode,
+                    float(audio_config.get("duration_tolerance_seconds") or 3.0),
+                )
+                review_items = [
+                    dict(row)
+                    for row in materialized.get("review_items") or []
+                    if isinstance(row, Mapping)
+                ]
+                if not review_items:
+                    raise SourceManifestError(
+                        "review_source_empty",
+                        "configured review source contains no meaningful text",
+                    )
+                if not external_name:
+                    raise SourceManifestError(
+                        "artifact_name_missing",
+                        "manifest execution input did not provide an artifact name",
+                    )
+                name_resolution = resolve_artifact_name(
+                    external_name=external_name,
+                    fallback_name=f"AutoCutLite-{source_manifest.data['binding']['task_id'][:12]}",
+                )
+                validate_manifest_package_path(name_resolution.final_name, "input_compile")
+                intake["name_resolution"] = name_resolution.as_dict()
+                document_meta = (
+                    materialized.get("document")
+                    if isinstance(materialized.get("document"), Mapping)
+                    else {}
+                )
+                snapshot = {
+                    "document": {
+                        "document_identity_sha256": str(
+                            document_meta.get("document_identity_sha256") or ""
+                        ),
+                        "revision": document_meta.get("revision_id"),
+                        "content_sha256": str(document_meta.get("content_sha256") or ""),
+                        "title": "",
+                        "extraction_schema_version": 1,
+                    },
+                    "review_items": review_items,
+                }
+                first_video = videos[0]
+                first_audio = audios[0] if audios else None
+                raw_project = {
+                    "draft_name": name_resolution.final_name,
+                    "requested_name": name_resolution.requested_name,
+                    "final_name": name_resolution.final_name,
+                    "name_source": name_resolution.source,
+                    "name_sanitized": name_resolution.sanitized,
+                    "source_video": str(first_video.get("path") or ""),
+                    "source_audio": "",
+                    "replacement_audio": (
+                        str(first_audio.get("path") or "")
+                        if mode == "replace_original" and first_audio
+                        else ""
+                    ),
+                    "source_pairs": manifest_project["source_pairs"],
+                    "audio_mode": mode,
+                    "duration_tolerance_seconds": manifest_project["duration_tolerance_seconds"],
+                    "project_key": source_manifest.data["binding"]["task_id"],
+                    "workflow_mode": "lite",
+                    "lite_cut_layout": "split_gap",
+                }
+                asset_manifest = {
+                    "schema_version": 1,
+                    "source_manifest_sha256": source_manifest.canonical_sha256,
+                    "assets": [
+                        {
+                            "relative_path": str(row.get("filename") or ""),
+                            "sha256": str(row.get("sha256") or ""),
+                            "byte_size": int(row.get("byte_size") or 0),
+                            "mime": str(row.get("mime") or ""),
+                            "role": "source_video" if row in videos else "source_audio",
+                        }
+                        for row in [*videos, *audios]
+                    ],
+                }
+                atomic_write_json(paths["asset_manifest"], asset_manifest)
+                failure_details.pop("input_compile", None)
             if execution_input_payload is not None:
                 atomic_write_json(paths["execution_input"], execution_input_payload)
             else:
@@ -1895,7 +2678,7 @@ def run_review_document(
                 document_title = str(
                     snapshot.get("title") or snapshot.get("document_title") or ""
                 ).strip()
-            if not has_doc_url:
+            if not has_doc_url and not has_manifest:
                 fallback_identity = ""
                 if isinstance(document, Mapping):
                     fallback_identity = str(document.get("document_identity_sha256") or "")[:12]
@@ -1924,6 +2707,8 @@ def run_review_document(
             ).strip()
             if final_name:
                 desired_package_path = requested_package_path.with_name(f"{final_name}.zip")
+                if has_manifest:
+                    validate_manifest_package_path(final_name, "input_compile")
                 package_path = desired_package_path
                 package_path.parent.mkdir(parents=True, exist_ok=True)
             explicit_mode = str(raw_project.get("workflow_mode") or "").strip().casefold()
@@ -1937,17 +2722,49 @@ def run_review_document(
             lite_project["lite_cut_layout"] = "split_gap"
             atomic_write_json(paths["project_lite"], lite_project)
             expected_project_materials = {}
-            for field in ("source_video", "source_audio", "replacement_audio"):
-                raw_value = str(lite_project.get(field) or "").strip()
-                if not raw_value:
-                    continue
-                material_path = Path(raw_value).expanduser().resolve(strict=False)
-                expected_project_materials[field] = {
-                    "path": os.path.normcase(str(material_path)),
-                    "sha256": (
-                        sha256_file(material_path) if material_path.is_file() else "missing"
-                    ),
-                }
+            source_pairs_payload = lite_project.get("source_pairs")
+            if isinstance(source_pairs_payload, list) and source_pairs_payload:
+                expected_pairs: list[dict[str, Any]] = []
+                for pair_index, raw_pair in enumerate(source_pairs_payload):
+                    if not isinstance(raw_pair, Mapping):
+                        raise ValueError(f"source_pairs[{pair_index}] must be an object")
+                    pair_materials: dict[str, Any] = {
+                        "pair_index": raw_pair.get("pair_index", pair_index),
+                    }
+                    for field in ("video_path", "replacement_audio_path"):
+                        raw_value = str(raw_pair.get(field) or "").strip()
+                        if not raw_value:
+                            continue
+                        material_path = Path(raw_value).expanduser().resolve(strict=False)
+                        pair_materials[field] = {
+                            "path": os.path.normcase(str(material_path)),
+                            "sha256": (
+                                sha256_file(material_path) if material_path.is_file() else "missing"
+                            ),
+                        }
+                    expected_pairs.append(pair_materials)
+                expected_project_materials["source_pairs"] = expected_pairs
+                # Keep the scalar compatibility entries populated from the
+                # first ordered pair for legacy phase consumers.
+                first_pair = expected_pairs[0]
+                if "video_path" in first_pair:
+                    expected_project_materials["source_video"] = first_pair["video_path"]
+                if "replacement_audio_path" in first_pair:
+                    expected_project_materials["replacement_audio"] = first_pair[
+                        "replacement_audio_path"
+                    ]
+            else:
+                for field in ("source_video", "source_audio", "replacement_audio"):
+                    raw_value = str(lite_project.get(field) or "").strip()
+                    if not raw_value:
+                        continue
+                    material_path = Path(raw_value).expanduser().resolve(strict=False)
+                    expected_project_materials[field] = {
+                        "path": os.path.normcase(str(material_path)),
+                        "sha256": (
+                            sha256_file(material_path) if material_path.is_file() else "missing"
+                        ),
+                    }
             compiled = compile_review_job(
                 _read_json_object(paths["snapshot"], "job document snapshot"),
                 _read_json_object(paths["project_lite"], "Lite project"),
@@ -1974,7 +2791,7 @@ def run_review_document(
             ]
             if execution_input_payload is not None:
                 artifacts.append(paths["execution_input"])
-            if has_doc_url:
+            if has_doc_url or has_manifest:
                 artifacts.append(paths["asset_manifest"])
             return _phase_outcome(
                 root,
@@ -1991,6 +2808,336 @@ def run_review_document(
 
         def run_source_materials() -> PhaseOutcome:
             project = _read_json_object(paths["project_lite"], "Lite project")
+            source_pairs_payload = project.get("source_pairs")
+            if isinstance(source_pairs_payload, list) and source_pairs_payload:
+                # Manifest source pairs are authoritative. Resolve and hash
+                # every row before any ASR or draft work; retaining only the
+                # first row here would allow a later pair to drift unnoticed.
+                tolerance = float(project.get("duration_tolerance_seconds", 3.0) or 3.0)
+                if not math.isfinite(tolerance) or tolerance < 0.0:
+                    raise ValueError("Lite source-pair duration tolerance is invalid")
+                ffmpeg_info = _media_tool_identity(ffmpeg_bin, mock_media=mock_media)
+                ffprobe_info = _media_tool_identity(ffprobe_bin, mock_media=mock_media)
+                expected_pairs = expected_project_materials.get("source_pairs") or []
+                if not isinstance(expected_pairs, list) or len(expected_pairs) != len(
+                    source_pairs_payload
+                ):
+                    raise RuntimeError("Source pair identity snapshot is incomplete")
+                declared_total = float(project.get("media_duration_seconds") or 0.0)
+                pair_rows: list[dict[str, Any]] = []
+                artifacts: list[Path] = []
+                cursor = 0.0
+                for pair_index, raw_pair in enumerate(source_pairs_payload):
+                    if not isinstance(raw_pair, Mapping):
+                        raise ValueError(f"Source pair {pair_index} is invalid")
+                    raw_index = raw_pair.get("pair_index", pair_index)
+                    if (
+                        isinstance(raw_index, bool)
+                        or not isinstance(raw_index, int)
+                        or raw_index != pair_index
+                    ):
+                        raise ValueError("Source pairs must preserve contiguous manifest order")
+                    video_path = (
+                        Path(str(raw_pair.get("video_path") or ""))
+                        .expanduser()
+                        .resolve(strict=True)
+                    )
+                    if not video_path.is_file():
+                        raise FileNotFoundError(f"Source video pair {pair_index} is missing")
+                    video_sha256 = sha256_file(video_path)
+                    declared_video_sha256 = (
+                        str(raw_pair.get("video_sha256") or "").strip().casefold()
+                    )
+                    expected_video = (
+                        expected_pairs[pair_index].get("video_path")
+                        if isinstance(expected_pairs[pair_index], Mapping)
+                        else None
+                    )
+                    expected_video_sha256 = (
+                        str(expected_video.get("sha256") or "")
+                        if isinstance(expected_video, Mapping)
+                        else ""
+                    )
+                    if (
+                        not re.fullmatch(r"[0-9a-f]{64}", declared_video_sha256)
+                        or declared_video_sha256 != video_sha256
+                        or expected_video_sha256 != video_sha256
+                    ):
+                        raise RuntimeError(
+                            f"Source video pair {pair_index} changed after the job input identity was captured"
+                        )
+                    if mock_media:
+                        fallback = float(raw_pair.get("video_duration_seconds") or 0.0)
+                        if fallback <= 0.0:
+                            fallback = (
+                                declared_total / len(source_pairs_payload)
+                                if declared_total > 0
+                                else 30.0
+                            )
+                        duration = fallback
+                        has_audio = True
+                        has_video = True
+                    else:
+                        probe = probe_media(video_path, ffprobe_bin=ffprobe_bin)
+                        duration = float(probe.duration_seconds)
+                        has_audio = bool(probe.has_audio)
+                        has_video = bool(probe.has_video)
+                        if not has_video:
+                            raise ValueError(f"Source video pair {pair_index} has no video stream")
+                    if not math.isfinite(duration) or duration <= 0.0:
+                        raise ValueError(f"Source video pair {pair_index} has no positive duration")
+                    declared_video_duration = raw_pair.get("video_duration_seconds")
+                    if declared_video_duration is not None:
+                        declared_value = float(declared_video_duration)
+                        if abs(duration - declared_value) > tolerance:
+                            raise ValueError(
+                                f"Source video pair {pair_index} duration exceeds configured tolerance"
+                            )
+
+                    source_audio_path = ""
+                    source_audio_row: dict[str, Any] | None = None
+                    if has_audio:
+                        if mock_media:
+                            # Mock media has no real stream to extract; the
+                            # source video remains a deterministic placeholder.
+                            source_audio_path = str(video_path)
+                        else:
+                            editable_identity = CacheIdentity(
+                                "editable_source_audio_pair",
+                                inputs={
+                                    "source_sha256": video_sha256,
+                                    "parameters": _EDITABLE_AUDIO_EXTRACT_PARAMS,
+                                },
+                                versions={
+                                    "extractor": _EDITABLE_AUDIO_EXTRACTOR_VERSION,
+                                    "ffmpeg": ffmpeg_info,
+                                    "mock_media": mock_media,
+                                },
+                            )
+                            cached_audio, audio_hit = _cached_file(
+                                cache,
+                                editable_identity,
+                                build=lambda output, source=video_path: _extract_editable_source_audio(
+                                    source, output, ffmpeg_bin=ffmpeg_bin
+                                ),
+                                suffix=".m4a",
+                            )
+                            target_audio = (
+                                paths["materials_dir"] / f"source_pair_{pair_index:03d}.m4a"
+                            )
+                            _copy_cached_file(cached_audio, target_audio)
+                            source_audio_path = str(target_audio)
+                            artifacts.append(target_audio)
+                            _ = audio_hit
+                        source_audio_row = {
+                            "path": source_audio_path,
+                            "sha256": (
+                                sha256_file(Path(source_audio_path))
+                                if Path(source_audio_path).is_file()
+                                else video_sha256
+                            ),
+                            "role": "source_audio",
+                        }
+                    elif (
+                        str(
+                            raw_pair.get("audio_mode")
+                            or project.get("audio_mode")
+                            or "video_original"
+                        ).casefold()
+                        == "video_original"
+                    ):
+                        raise ValueError(
+                            f"Source video pair {pair_index} has no source audio stream"
+                        )
+
+                    mode = (
+                        str(
+                            raw_pair.get("audio_mode")
+                            or project.get("audio_mode")
+                            or "video_original"
+                        )
+                        .strip()
+                        .casefold()
+                    )
+                    replacement_row: dict[str, Any] | None = None
+                    if mode == "replace_original":
+                        replacement_path = (
+                            Path(str(raw_pair.get("replacement_audio_path") or ""))
+                            .expanduser()
+                            .resolve(strict=True)
+                        )
+                        if not replacement_path.is_file():
+                            raise FileNotFoundError(
+                                f"Replacement audio pair {pair_index} is missing"
+                            )
+                        replacement_sha256 = sha256_file(replacement_path)
+                        declared_replacement_sha256 = (
+                            str(raw_pair.get("replacement_audio_sha256") or "").strip().casefold()
+                        )
+                        expected_replacement = (
+                            expected_pairs[pair_index].get("replacement_audio_path")
+                            if isinstance(expected_pairs[pair_index], Mapping)
+                            else None
+                        )
+                        expected_replacement_sha256 = (
+                            str(expected_replacement.get("sha256") or "")
+                            if isinstance(expected_replacement, Mapping)
+                            else ""
+                        )
+                        if (
+                            not re.fullmatch(r"[0-9a-f]{64}", declared_replacement_sha256)
+                            or declared_replacement_sha256 != replacement_sha256
+                            or expected_replacement_sha256 != replacement_sha256
+                        ):
+                            raise RuntimeError(
+                                f"Replacement audio pair {pair_index} changed after the job input identity was captured"
+                            )
+                        if mock_media:
+                            replacement_duration = float(
+                                raw_pair.get("audio_duration_seconds") or duration
+                            )
+                        else:
+                            replacement_probe = probe_media(
+                                replacement_path, ffprobe_bin=ffprobe_bin
+                            )
+                            replacement_duration = float(replacement_probe.duration_seconds)
+                        if not math.isfinite(replacement_duration) or replacement_duration <= 0.0:
+                            raise ValueError(
+                                f"Replacement audio pair {pair_index} has no positive duration"
+                            )
+                        declared_audio_duration = raw_pair.get("audio_duration_seconds")
+                        if (
+                            declared_audio_duration is not None
+                            and abs(replacement_duration - float(declared_audio_duration))
+                            > tolerance
+                        ):
+                            raise ValueError(
+                                f"Replacement audio pair {pair_index} duration exceeds configured tolerance"
+                            )
+                        if abs(replacement_duration - duration) > tolerance:
+                            raise ValueError(
+                                f"Source pair {pair_index} video/audio duration exceeds configured tolerance"
+                            )
+                        replacement_row = {
+                            "path": str(replacement_path),
+                            "sha256": replacement_sha256,
+                            "duration_seconds": replacement_duration,
+                            "role": "replacement_audio",
+                        }
+                        artifacts.append(replacement_path)
+
+                    alignment_input = (
+                        str(replacement_row["path"])
+                        if replacement_row is not None
+                        else (source_audio_path or str(video_path))
+                    )
+                    alignment_sha256 = sha256_file(Path(alignment_input))
+                    video_row = {
+                        "path": str(video_path),
+                        "sha256": video_sha256,
+                        "duration_seconds": duration,
+                        "role": "source_video",
+                    }
+                    pair_row = {
+                        "pair_index": pair_index,
+                        "offset": cursor,
+                        "duration": duration,
+                        "audio_mode": mode,
+                        "source_video_original": video_row,
+                        "source_video_effective": dict(video_row),
+                        "source_audio_effective": source_audio_row,
+                        "replacement_audio": replacement_row,
+                        "alignment_source": {
+                            "path": alignment_input,
+                            "sha256": alignment_sha256,
+                            "role": (
+                                "replacement_audio"
+                                if replacement_row is not None
+                                else "source_audio"
+                            ),
+                        },
+                    }
+                    pair_rows.append(pair_row)
+                    artifacts.append(video_path)
+                    cursor += duration
+
+                if declared_total > 0.0 and abs(declared_total - cursor) > tolerance:
+                    raise ValueError(
+                        "Lite project.media_duration_seconds does not match ordered source-pair duration"
+                    )
+                first_pair = pair_rows[0]
+                first_video = first_pair["source_video_effective"]
+                first_source_audio = first_pair.get("source_audio_effective") or {}
+                first_replacement = first_pair.get("replacement_audio") or {}
+                effective_project = deepcopy(project)
+                effective_project.update(
+                    {
+                        "source_video": str(first_video.get("path") or ""),
+                        "source_audio": str(first_source_audio.get("path") or ""),
+                        "replacement_audio": str(first_replacement.get("path") or ""),
+                        "media_duration_seconds": cursor,
+                    }
+                )
+                for raw_pair, pair_row in zip(effective_project["source_pairs"], pair_rows):
+                    raw_pair["video_duration_seconds"] = pair_row["duration"]
+                    source_audio = pair_row.get("source_audio_effective")
+                    if source_audio:
+                        raw_pair["source_audio_path"] = source_audio["path"]
+                        raw_pair["source_audio_sha256"] = source_audio["sha256"]
+                    if pair_row.get("replacement_audio"):
+                        raw_pair["audio_duration_seconds"] = pair_row["replacement_audio"][
+                            "duration_seconds"
+                        ]
+                alignment_sources = [
+                    {
+                        "pair_index": row["pair_index"],
+                        "offset": row["offset"],
+                        "duration": row["duration"],
+                        **dict(row["alignment_source"]),
+                    }
+                    for row in pair_rows
+                ]
+                materials = {
+                    "schema_version": _SCHEMA_VERSION,
+                    "source_duration_seconds": round(cursor, 6),
+                    "has_audio": all(bool(row.get("source_audio_effective")) for row in pair_rows),
+                    "has_video": True,
+                    "normalized_webm": False,
+                    "normalization_identity_digest": "",
+                    "editable_audio_identity_digest": "",
+                    "ffmpeg_identity": ffmpeg_info,
+                    "ffprobe_identity": ffprobe_info,
+                    "source_pair_count": len(pair_rows),
+                    "source_pairs": pair_rows,
+                    "alignment_sources": alignment_sources,
+                    "materials": {
+                        "source_video_original": dict(first_pair["source_video_original"]),
+                        "source_video_effective": dict(first_pair["source_video_effective"]),
+                        "source_audio_effective": dict(first_source_audio),
+                        "replacement_audio": dict(first_replacement),
+                        "alignment_source": dict(alignment_sources[0]),
+                    },
+                }
+                atomic_write_json(paths["materials_ledger"], materials)
+                atomic_write_json(paths["effective_project"], effective_project)
+                artifacts.extend([paths["materials_ledger"], paths["effective_project"]])
+                return _phase_outcome(
+                    root,
+                    "source_hash",
+                    artifacts=list(dict.fromkeys(artifacts)),
+                    data={
+                        "source_pair_count": len(pair_rows),
+                        "source_duration_seconds": round(cursor, 6),
+                        "ffmpeg_identity": ffmpeg_info,
+                        "ffprobe_identity": ffprobe_info,
+                        "alignment_source_count": len(alignment_sources),
+                    },
+                    result={
+                        "source_materials": str(paths["materials_ledger"]),
+                        "effective_project": str(paths["effective_project"]),
+                    },
+                    cache_hit=False,
+                )
             source_video = (
                 Path(str(project.get("source_video") or "")).expanduser().resolve(strict=True)
             )
@@ -2256,74 +3403,117 @@ def run_review_document(
             artifacts = [paths["visual_index"], *visual_files]
             if needs_asr:
                 try:
-                    material_rows = materials.get("materials")
-                    if not isinstance(material_rows, Mapping):
-                        raise ValueError("Source material ledger is missing material identities")
-                    alignment_row = material_rows.get("alignment_source")
-                    if not isinstance(alignment_row, Mapping):
-                        raise ValueError("Source material ledger is missing alignment_source")
-                    alignment_source = Path(str(alignment_row.get("path") or "")).resolve(
-                        strict=True
-                    )
                     ffmpeg_info = materials.get("ffmpeg_identity")
                     if not isinstance(ffmpeg_info, Mapping):
                         raise ValueError("Source material ledger is missing FFmpeg identity")
-                    alignment_identity_payload = alignment_cache_identity(
-                        source_sha256=sha256_file(alignment_source), ffmpeg=ffmpeg_info
-                    )
-                    alignment_identity = CacheIdentity(
-                        "source_alignment_wav",
-                        inputs=alignment_identity_payload["inputs"],
-                        versions=alignment_identity_payload["versions"],
-                    )
-                    cached_alignment, alignment_hit = _cached_file(
-                        cache,
-                        alignment_identity,
-                        build=lambda output: extract_alignment_wav(
-                            alignment_source, output, ffmpeg_bin=ffmpeg_bin
-                        ),
-                        suffix=".wav",
-                    )
-                    cache_hits.append(alignment_hit)
-                    _copy_cached_file(cached_alignment, paths["alignment_wav"])
                     config = load_volc_asr_config()
-                    source_identity_payload = source_asr_cache_identity(
-                        alignment_audio_sha256=sha256_file(paths["alignment_wav"]), config=config
-                    )
-                    source_identity = CacheIdentity(
-                        "source_asr_words",
-                        inputs=source_identity_payload["inputs"],
-                        versions=source_identity_payload["versions"],
-                    )
-                    wait_started = time.monotonic()
-                    source_hit = False
-                    try:
-                        source_asr, source_hit = _cached_asr_json(
-                            cache,
-                            source_identity,
-                            audio_path=paths["alignment_wav"],
-                            config=config,
+                    alignment_sources = materials.get("alignment_sources")
+                    if isinstance(alignment_sources, list) and alignment_sources:
+                        (
+                            source_asr,
+                            ordered_source_index,
+                            ordered_artifacts,
+                            ordered_cache_hits,
+                        ) = _run_ordered_source_asr(
+                            alignment_sources,
+                            materials_dir=paths["materials_dir"],
+                            alignment_output=paths["alignment_wav"],
+                            source_asr_output=paths["source_asr"],
+                            cache=cache,
                             inflight_root=inflight_root,
-                            timeout_seconds=float(asr_timeout_seconds),
-                            poll_interval_seconds=float(asr_poll_interval_seconds),
-                            max_wait_seconds=float(asr_max_wait_seconds),
+                            ffmpeg_bin=ffmpeg_bin,
+                            ffmpeg_info=ffmpeg_info,
+                            config=config,
+                            asr_timeout_seconds=asr_timeout_seconds,
+                            asr_poll_interval_seconds=asr_poll_interval_seconds,
+                            asr_max_wait_seconds=asr_max_wait_seconds,
+                            store=store,
                         )
-                    finally:
-                        if not source_hit:
-                            store.add_wait_seconds(
-                                "source_asr",
-                                max(0.0, time.monotonic() - wait_started),
+                        source_index.update(ordered_source_index)
+                        artifacts.extend(ordered_artifacts)
+                        cache_hits.extend(ordered_cache_hits)
+                    else:
+                        material_rows = materials.get("materials")
+                        if not isinstance(material_rows, Mapping):
+                            raise ValueError(
+                                "Source material ledger is missing material identities"
                             )
-                    cache_hits.append(source_hit)
-                    input_sha256 = str(source_asr.get("input_sha256") or "")
-                    if input_sha256 and input_sha256 != sha256_file(paths["alignment_wav"]):
-                        raise ValueError(
-                            "Source ASR input identity does not match alignment WAV bytes"
+                        alignment_row = material_rows.get("alignment_source")
+                        if not isinstance(alignment_row, Mapping):
+                            raise ValueError("Source material ledger is missing alignment_source")
+                        alignment_source = Path(str(alignment_row.get("path") or "")).resolve(
+                            strict=True
                         )
-                    words = source_asr.get("words")
-                    if not isinstance(words, list) or not words:
-                        raise ValueError("Source ASR did not return real word-level timing rows")
-                    atomic_write_json(paths["source_asr"], source_asr)
+                        alignment_identity_payload = alignment_cache_identity(
+                            source_sha256=sha256_file(alignment_source), ffmpeg=ffmpeg_info
+                        )
+                        alignment_identity = CacheIdentity(
+                            "source_alignment_wav",
+                            inputs=alignment_identity_payload["inputs"],
+                            versions=alignment_identity_payload["versions"],
+                        )
+                        cached_alignment, alignment_hit = _cached_file(
+                            cache,
+                            alignment_identity,
+                            build=lambda output: extract_alignment_wav(
+                                alignment_source, output, ffmpeg_bin=ffmpeg_bin
+                            ),
+                            suffix=".wav",
+                        )
+                        cache_hits.append(alignment_hit)
+                        _copy_cached_file(cached_alignment, paths["alignment_wav"])
+                        source_identity_payload = source_asr_cache_identity(
+                            alignment_audio_sha256=sha256_file(paths["alignment_wav"]),
+                            config=config,
+                        )
+                        source_identity = CacheIdentity(
+                            "source_asr_words",
+                            inputs=source_identity_payload["inputs"],
+                            versions=source_identity_payload["versions"],
+                        )
+                        wait_started = time.monotonic()
+                        source_hit = False
+                        try:
+                            source_asr, source_hit = _cached_asr_json(
+                                cache,
+                                source_identity,
+                                audio_path=paths["alignment_wav"],
+                                config=config,
+                                inflight_root=inflight_root,
+                                timeout_seconds=float(asr_timeout_seconds),
+                                poll_interval_seconds=float(asr_poll_interval_seconds),
+                                max_wait_seconds=float(asr_max_wait_seconds),
+                            )
+                        finally:
+                            if not source_hit:
+                                store.add_wait_seconds(
+                                    "source_asr",
+                                    max(0.0, time.monotonic() - wait_started),
+                                )
+                        cache_hits.append(source_hit)
+                        input_sha256 = str(source_asr.get("input_sha256") or "")
+                        if input_sha256 and input_sha256 != sha256_file(paths["alignment_wav"]):
+                            raise ValueError(
+                                "Source ASR input identity does not match alignment WAV bytes"
+                            )
+                        words = source_asr.get("words")
+                        if not isinstance(words, list) or not words:
+                            raise ValueError(
+                                "Source ASR did not return real word-level timing rows"
+                            )
+                        atomic_write_json(paths["source_asr"], source_asr)
+                        source_index.update(
+                            {
+                                "asr_available": True,
+                                "asr_status": "verified",
+                                "alignment_audio_path": str(paths["alignment_wav"]),
+                                "alignment_audio_sha256": sha256_file(paths["alignment_wav"]),
+                                "alignment_cache_identity_digest": alignment_identity.digest(),
+                                "source_asr_path": str(paths["source_asr"]),
+                                "source_asr_sha256": sha256_file(paths["source_asr"]),
+                                "source_asr_cache_identity_digest": source_identity.digest(),
+                            }
+                        )
                     if not mock_media:
                         mark_asr_verified(
                             provider=str(source_asr.get("provider") or ""),
@@ -2333,20 +3523,15 @@ def run_review_document(
                             adapter_version=str(source_asr.get("adapter_version") or ""),
                             path=readiness_path,
                         )
-                    source_index.update(
-                        {
-                            "asr_available": True,
-                            "asr_status": "verified",
-                            "alignment_audio_path": str(paths["alignment_wav"]),
-                            "alignment_audio_sha256": sha256_file(paths["alignment_wav"]),
-                            "alignment_cache_identity_digest": alignment_identity.digest(),
-                            "source_asr_path": str(paths["source_asr"]),
-                            "source_asr_sha256": sha256_file(paths["source_asr"]),
-                            "source_asr_cache_identity_digest": source_identity.digest(),
-                        }
-                    )
                     failure_details.pop("source_asr", None)
                     artifacts.extend([paths["alignment_wav"], paths["source_asr"]])
+                except OrderedSourceAsrIntegrityError as exc:
+                    failure_details["source_asr"] = {
+                        "code": exc.code,
+                        "message": "Ordered source ASR evidence failed integrity validation",
+                        "details": {"error": safe_error_text(exc)},
+                    }
+                    raise
                 except Exception as exc:
                     public_failure = {
                         "code": "source_asr_unavailable",
@@ -2400,6 +3585,13 @@ def run_review_document(
                     "source_asr_cache_identity_digest": source_index.get(
                         "source_asr_cache_identity_digest", ""
                     ),
+                    "alignment_cache_identity_digests": source_index.get(
+                        "alignment_cache_identity_digests", []
+                    ),
+                    "source_asr_cache_identity_digests": source_index.get(
+                        "source_asr_cache_identity_digests", []
+                    ),
+                    "source_pair_count": source_index.get("source_pair_count", 0),
                 },
                 result={
                     "source_asr_index": str(paths["source_index"]),
@@ -2425,15 +3617,104 @@ def run_review_document(
             if not paths["alignment_wav"].is_file():
                 return False
             config = load_volc_asr_config()
-            identity_payload = source_asr_cache_identity(
-                alignment_audio_sha256=sha256_file(paths["alignment_wav"]), config=config
-            )
-            identity = CacheIdentity(
-                "source_asr_words",
-                inputs=identity_payload["inputs"],
-                versions=identity_payload["versions"],
-            )
-            valid = data.get("source_asr_cache_identity_digest") == identity.digest()
+            materials = _read_json_object(paths["materials_ledger"], "source materials")
+            alignment_sources = materials.get("alignment_sources")
+            if isinstance(alignment_sources, list) and alignment_sources:
+                source_index = _read_json_object(paths["source_index"], "source ASR index")
+                pair_receipts = source_index.get("alignment_sources")
+                expected_alignment_digests = data.get("alignment_cache_identity_digests")
+                expected_source_digests = data.get("source_asr_cache_identity_digests")
+                if (
+                    not isinstance(pair_receipts, list)
+                    or len(pair_receipts) != len(alignment_sources)
+                    or not isinstance(expected_alignment_digests, list)
+                    or not isinstance(expected_source_digests, list)
+                    or len(expected_alignment_digests) != len(alignment_sources)
+                    or len(expected_source_digests) != len(alignment_sources)
+                    or data.get("source_pair_count") != len(alignment_sources)
+                ):
+                    return False
+                ffmpeg_info = materials.get("ffmpeg_identity")
+                if not isinstance(ffmpeg_info, Mapping):
+                    return False
+                actual_alignment_digests: list[str] = []
+                actual_source_digests: list[str] = []
+                try:
+                    for pair_index, (raw_source, raw_receipt) in enumerate(
+                        zip(alignment_sources, pair_receipts)
+                    ):
+                        if not isinstance(raw_source, Mapping) or not isinstance(
+                            raw_receipt, Mapping
+                        ):
+                            return False
+                        if (
+                            raw_source.get("pair_index") != pair_index
+                            or raw_receipt.get("pair_index") != pair_index
+                        ):
+                            return False
+                        source = Path(str(raw_source.get("path") or "")).resolve(strict=True)
+                        source_sha256 = sha256_file(source)
+                        if source_sha256 != str(raw_source.get("sha256") or "").casefold():
+                            return False
+                        alignment_identity_payload = alignment_cache_identity(
+                            source_sha256=source_sha256,
+                            ffmpeg=ffmpeg_info,
+                        )
+                        alignment_identity = CacheIdentity(
+                            "source_alignment_wav_pair",
+                            inputs=alignment_identity_payload["inputs"],
+                            versions=alignment_identity_payload["versions"],
+                        )
+                        alignment_digest = alignment_identity.digest()
+                        pair_alignment = Path(
+                            str(raw_receipt.get("alignment_audio_path") or "")
+                        ).resolve(strict=True)
+                        alignment_sha256 = sha256_file(pair_alignment)
+                        if (
+                            alignment_sha256
+                            != str(raw_receipt.get("alignment_audio_sha256") or "").casefold()
+                        ):
+                            return False
+                        source_identity_payload = source_asr_cache_identity(
+                            alignment_audio_sha256=alignment_sha256,
+                            config=config,
+                        )
+                        source_identity = CacheIdentity(
+                            "source_asr_words_pair",
+                            inputs=source_identity_payload["inputs"],
+                            versions=source_identity_payload["versions"],
+                        )
+                        source_digest = source_identity.digest()
+                        if alignment_digest != str(
+                            raw_receipt.get("alignment_cache_identity_digest") or ""
+                        ) or source_digest != str(
+                            raw_receipt.get("source_asr_cache_identity_digest") or ""
+                        ):
+                            return False
+                        actual_alignment_digests.append(alignment_digest)
+                        actual_source_digests.append(source_digest)
+                except (OSError, TypeError, ValueError):
+                    return False
+                valid = (
+                    actual_alignment_digests == expected_alignment_digests
+                    and actual_source_digests == expected_source_digests
+                    and actual_alignment_digests
+                    == source_index.get("alignment_cache_identity_digests")
+                    and actual_source_digests
+                    == source_index.get("source_asr_cache_identity_digests")
+                    and data.get("source_asr_cache_identity_digest")
+                    == canonical_json_sha256(actual_source_digests)
+                )
+            else:
+                identity_payload = source_asr_cache_identity(
+                    alignment_audio_sha256=sha256_file(paths["alignment_wav"]), config=config
+                )
+                identity = CacheIdentity(
+                    "source_asr_words",
+                    inputs=identity_payload["inputs"],
+                    versions=identity_payload["versions"],
+                )
+                valid = data.get("source_asr_cache_identity_digest") == identity.digest()
             if valid and not mock_media:
                 source_asr = _read_json_object(paths["source_asr"], "source ASR")
                 if not isinstance(source_asr.get("words"), list) or not source_asr["words"]:
@@ -2530,15 +3811,23 @@ def run_review_document(
             cut_plan = _read_json_object(paths["cut_plan"], "audio cut plan")
             audio_rows = [row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)]
             source_audio: Path | None = None
+            ordered_pair_mode = False
             if audio_rows:
                 materials = _read_json_object(paths["materials_ledger"], "source materials")
-                material_rows = materials.get("materials")
-                if not isinstance(material_rows, Mapping):
-                    raise ValueError("Source material ledger is missing material identities")
-                source_audio_row = material_rows.get("source_audio_effective")
-                if not isinstance(source_audio_row, Mapping):
-                    raise ValueError("Source material ledger is missing editable source audio")
-                source_audio = Path(str(source_audio_row.get("path") or "")).resolve(strict=True)
+                source_pairs = materials.get("source_pairs")
+                ordered_pair_mode = isinstance(source_pairs, list) and bool(source_pairs)
+                if ordered_pair_mode:
+                    source_audio = paths["alignment_wav"].resolve(strict=True)
+                else:
+                    material_rows = materials.get("materials")
+                    if not isinstance(material_rows, Mapping):
+                        raise ValueError("Source material ledger is missing material identities")
+                    source_audio_row = material_rows.get("source_audio_effective")
+                    if not isinstance(source_audio_row, Mapping):
+                        raise ValueError("Source material ledger is missing editable source audio")
+                    source_audio = Path(str(source_audio_row.get("path") or "")).resolve(
+                        strict=True
+                    )
             audio_item_ids = {str(row.get("item_id") or "").casefold() for row in audio_rows}
             cache_hits: list[bool] = []
             artifacts: list[Path] = []
@@ -2557,6 +3846,7 @@ def run_review_document(
                 request = deepcopy(before_request)
                 ledger = deepcopy(before_ledger)
                 candidate = None
+                mapping_audio_plan: dict[str, Any] = {"mode": "legacy"}
                 executable_cuts = list(cut_plan.get("executable_cuts") or [])
                 if executable_cuts:
                     if not paths["alignment_wav"].is_file():
@@ -2583,10 +3873,13 @@ def run_review_document(
                     cache_hits.append(candidate_hit)
                     _copy_cached_file(cached_candidate, paths["candidate_wav"])
                     candidate = paths["candidate_wav"]
-                    audio_plan = build_lite_split_gap_audio_plan(
+                    mapping_audio_plan = build_lite_split_gap_audio_plan(
                         cut_plan,
                         source_audio_path=source_audio,
                         candidate_audio_path=candidate,
+                    )
+                    audio_plan = (
+                        {"mode": "legacy"} if ordered_pair_mode else deepcopy(mapping_audio_plan)
                     )
                 else:
                     audio_plan = {"mode": "legacy"}
@@ -2596,7 +3889,7 @@ def run_review_document(
                         request,
                         ledger,
                         cut_plan,
-                        audio_delivery_plan=audio_plan,
+                        audio_delivery_plan=mapping_audio_plan,
                         source_audio_path=source_audio,
                         candidate_audio_path=candidate,
                     )
@@ -2610,7 +3903,7 @@ def run_review_document(
                 else:
                     request["audio_delivery_plan"] = {"mode": "legacy"}
                 atomic_write_json(paths["processed_request"], request)
-                plan_digest = audio_delivery_plan_sha256(
+                mapping_plan_digest = audio_delivery_plan_sha256(
                     load_revision_request(str(paths["processed_request"]))
                 )
 
@@ -2668,7 +3961,7 @@ def run_review_document(
                     cut_plan,
                     candidate_asr,
                     candidate_audio_path=candidate,
-                    audio_delivery_plan_sha256=plan_digest,
+                    audio_delivery_plan_sha256=mapping_plan_digest,
                 )
                 unresolved_ids = [
                     str(value).strip()
@@ -2707,6 +4000,27 @@ def run_review_document(
                 artifacts.extend([candidate, paths["reverse_report"]])
                 break
 
+            if ordered_pair_mode:
+                request["audio_delivery_plan"] = deepcopy(audio_plan)
+                request_project = request.setdefault("project", {})
+                before_project = before_request.get("project")
+                if not isinstance(before_project, Mapping):
+                    raise ValueError("Classified revision request is missing project data")
+                for field in ("source_audio", "replacement_audio"):
+                    if field in before_project:
+                        request_project[field] = deepcopy(before_project[field])
+                    else:
+                        request_project.pop(field, None)
+                before_preserve = before_request.get("preserve")
+                request_preserve = request.get("preserve")
+                if isinstance(before_preserve, Mapping) and isinstance(request_preserve, dict):
+                    if "replacement_audio_material" in before_preserve:
+                        request_preserve["replacement_audio_material"] = deepcopy(
+                            before_preserve["replacement_audio_material"]
+                        )
+                    else:
+                        request_preserve.pop("replacement_audio_material", None)
+
             try:
                 _compile_explicit_lite_visuals(request, ledger)
             except LiteVisualAssetError as exc:
@@ -2721,6 +4035,9 @@ def run_review_document(
             _assert_source_text_fidelity(base_ledger, request, ledger)
             _assert_authoritative_starts(ledger)
             atomic_write_json(paths["processed_request"], request)
+            plan_digest = audio_delivery_plan_sha256(
+                load_revision_request(str(paths["processed_request"]))
+            )
             atomic_write_json(paths["processed_items"], ledger)
             atomic_write_json(paths["processed_cut_plan"], cut_plan)
             atomic_write_json(paths["audio_plan"], audio_plan)
@@ -2869,6 +4186,8 @@ def run_review_document(
                     "Saved revision draft_name does not match its directory: "
                     f"result={execution_draft_name!r} directory={draft_path.name!r}"
                 )
+            if source_manifest is not None:
+                validate_manifest_package_path(draft_path.name, "package_publish")
             package_path = requested_package_path.with_name(f"{draft_path.name}.zip")
             name_resolution = _name_resolution_for_actual_draft(
                 intake.get("name_resolution")
@@ -2907,6 +4226,34 @@ def run_review_document(
                 )
                 if package_result is None:
                     raise ValueError("Lite ZIP failed post-package hash, tree, or CRC validation")
+            if source_manifest is not None:
+                # Extend the package receipt with the immutable Taskboard
+                # binding after the existing ZIP/tree validation succeeds.
+                receipt_path = Path(str(package_result["receipt_path"])).resolve(strict=True)
+                receipt_payload = _read_json_object(receipt_path, "Lite package receipt")
+                receipt_payload.update(
+                    {
+                        "source_manifest_sha256": source_manifest.canonical_sha256,
+                        "binding": dict(source_manifest.data["binding"]),
+                        "source_pairs": list(
+                            _read_json_object(paths["project_lite"], "Lite project").get(
+                                "source_pairs"
+                            )
+                            or []
+                        ),
+                        "package_zip": str(package_path.resolve()),
+                        "archive_sha256": str(package_result["archive_sha256"]),
+                    }
+                )
+                atomic_write_json(receipt_path, receipt_payload)
+                package_result = dict(package_result)
+                package_result.update(
+                    {
+                        "source_manifest_sha256": source_manifest.canonical_sha256,
+                        "binding": dict(source_manifest.data["binding"]),
+                        "package_zip": str(package_path.resolve()),
+                    }
+                )
             final = {
                 "schema_version": _SCHEMA_VERSION,
                 "status": "pass",
@@ -3081,18 +4428,47 @@ def run_review_document(
                 str(phase_records[first].get("error") or f"phase did not complete: {first}")
             )
             result = public_result(ok=False, error=error)
+            if manifest_requested:
+                failed_code = None
+                detail = failure_details.get(first)
+                if isinstance(detail, Mapping):
+                    failed_code = str(detail.get("code") or "").strip() or None
+                write_terminal_result(
+                    status="blocked",
+                    result=result,
+                    error_code=failed_code,
+                )
             raise ReviewDocumentRunError(error, result)
         result = public_result(ok=True)
         delivery = result.get("delivery")
         if not isinstance(delivery, Mapping) or delivery.get("status") != "pass":
             error = "Final Lite delivery receipt is missing or invalid"
+            if manifest_requested:
+                write_terminal_result(status="blocked", result=result, error_code="package_invalid")
             raise ReviewDocumentRunError(error, public_result(ok=False, error=error))
+        if manifest_requested:
+            write_terminal_result(status="pass", result=result)
         return result
-    except ReviewDocumentRunError:
+    except ReviewDocumentRunError as exc:
+        if manifest_requested:
+            # The failed-phase branch normally writes before raising; this is
+            # also the recovery path for a malformed final delivery result.
+            if result_file_path is not None:
+                existing = None
+                try:
+                    existing = _read_json_object(result_file_path, "taskboard result")
+                except Exception:
+                    existing = None
+                if not isinstance(existing, Mapping) or existing.get("status") != "blocked":
+                    write_terminal_result(status="blocked", result=exc.result, error=exc)
         raise
     except Exception as exc:
         error = safe_error_text(exc)
-        raise ReviewDocumentRunError(error, public_result(ok=False, error=error)) from exc
+        result = public_result(ok=False, error=error)
+        if manifest_requested:
+            code = getattr(exc, "code", None)
+            write_terminal_result(status="blocked", result=result, error=exc, error_code=code)
+        raise ReviewDocumentRunError(error, result) from exc
 
 
 __all__ = [

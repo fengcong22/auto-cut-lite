@@ -305,3 +305,8 @@ def test_portable_capability_contract_requires_named_marketplace_and_split_runti
         "portable_delivery_and_relink",
         "named_marketplace_deployment",
     }
+
+    review_runtime = next(
+        row for row in payload["capabilities"] if row["id"] == "review_document_and_replacement_timebase"
+    )
+    assert "runtime/scripts/utils/source_manifest.py" in review_runtime["required_paths"]

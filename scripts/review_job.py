@@ -384,10 +384,12 @@ def cmd_review_document_run(
     job_root: str | os.PathLike[str],
     *,
     doc_url: str | None = None,
+    source_manifest_json: str | os.PathLike[str] | None = None,
     drafts_root: str | os.PathLike[str],
     package_zip: str | os.PathLike[str],
     relink_tool: str | os.PathLike[str] | None = None,
     execution_input_json: str | os.PathLike[str] | None = None,
+    result_path: str | os.PathLike[str] | None = None,
     mock_media: bool = False,
     asr_timeout_seconds: float = 60.0,
     asr_poll_interval_seconds: float = 2.0,
@@ -399,12 +401,17 @@ def cmd_review_document_run(
     """Run the public, Lite-only source-document workflow."""
 
     has_doc_url = bool(str(doc_url or "").strip())
+    has_manifest = bool(str(source_manifest_json or "").strip())
     has_snapshot = bool(str(snapshot_json or "").strip())
     has_project = bool(str(project_json or "").strip())
-    if has_doc_url:
-        if has_snapshot or has_project:
+    if sum(bool(value) for value in (has_doc_url, has_manifest, has_snapshot)) > 1:
+        raise UserInputError(
+            "--doc-url, --snapshot-json, and --source-manifest are mutually exclusive"
+        )
+    if has_doc_url or has_manifest:
+        if has_project:
             raise UserInputError(
-                "--doc-url is mutually exclusive with --snapshot-json and --project-json"
+                "document URL/manifest input is mutually exclusive with --project-json"
             )
     elif not (has_snapshot and has_project):
         raise UserInputError(
@@ -434,6 +441,10 @@ def cmd_review_document_run(
         )
         if execution_input_json is not None and str(execution_input_json).strip():
             runner_kwargs["execution_input_json"] = execution_input_json
+        if source_manifest_json is not None and str(source_manifest_json).strip():
+            runner_kwargs["source_manifest_json"] = source_manifest_json
+        if result_path is not None and str(result_path).strip():
+            runner_kwargs["result_path"] = result_path
         data = run_review_document(**runner_kwargs)
     except ReviewDocumentRunError as exc:
         return make_result(False, "review_document_failed", str(exc), exc.result)

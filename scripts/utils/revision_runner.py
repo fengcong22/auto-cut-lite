@@ -932,7 +932,16 @@ def _validate_revision_execution_preflight(
             "Semantic pause adjustments require segmented audio delivery compiled after "
             "pause alignment before opening or writing a JianYing draft."
         )
-    if source_spoken_edit and request.audio_delivery_plan.mode != "segmented":
+    ordered_pair_audio_delivery = bool(
+        request.workflow_mode == "lite"
+        and request.project.source_pairs
+        and request.audio_delivery_plan.mode == "legacy"
+    )
+    if (
+        source_spoken_edit
+        and request.audio_delivery_plan.mode != "segmented"
+        and not ordered_pair_audio_delivery
+    ):
         raise ValueError(
             "Spoken source-ledger revisions require segmented audio delivery before "
             "opening or writing a JianYing draft."

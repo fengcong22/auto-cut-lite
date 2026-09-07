@@ -789,6 +789,47 @@ def _normalize_project(project: dict[str, Any]) -> dict[str, Any]:
             normalized[field] = normalized[field].strip()
     if not normalized.get("draft_name"):
         raise ValueError("project.draft_name is required")
+    source_pairs = normalized.get("source_pairs")
+    if source_pairs is not None:
+        if not isinstance(source_pairs, list):
+            raise ValueError("project.source_pairs must be a list")
+        for index, pair in enumerate(source_pairs):
+            if not isinstance(pair, Mapping):
+                raise ValueError(f"project.source_pairs[{index}] must be an object")
+            video_path = str(pair.get("video_path") or "").strip()
+            video_sha256 = str(pair.get("video_sha256") or "").strip().casefold()
+            if not video_path or not re.fullmatch(r"[0-9a-f]{64}", video_sha256):
+                raise ValueError(f"project.source_pairs[{index}] has an invalid video identity")
+            pair["video_path"] = video_path
+            pair["video_sha256"] = video_sha256
+            pair.setdefault("pair_index", index)
+            source_audio_path = str(pair.get("source_audio_path") or "").strip()
+            source_audio_sha256 = str(pair.get("source_audio_sha256") or "").strip().casefold()
+            if bool(source_audio_path) != bool(source_audio_sha256) or (
+                source_audio_sha256
+                and not re.fullmatch(r"[0-9a-f]{64}", source_audio_sha256)
+            ):
+                raise ValueError(
+                    f"project.source_pairs[{index}] has an invalid source audio identity"
+                )
+            if source_audio_path:
+                pair["source_audio_path"] = source_audio_path
+                pair["source_audio_sha256"] = source_audio_sha256
+            mode = str(pair.get("audio_mode") or normalized.get("audio_mode") or "video_original").strip().lower()
+            if mode not in {"video_original", "replace_original"}:
+                raise ValueError(f"project.source_pairs[{index}].audio_mode is invalid")
+            pair["audio_mode"] = mode
+            if mode == "replace_original":
+                audio_path = str(pair.get("replacement_audio_path") or "").strip()
+                audio_sha256 = str(pair.get("replacement_audio_sha256") or "").strip().casefold()
+                if not audio_path or not re.fullmatch(r"[0-9a-f]{64}", audio_sha256):
+                    raise ValueError(f"project.source_pairs[{index}] has an invalid replacement audio identity")
+                pair["replacement_audio_path"] = audio_path
+                pair["replacement_audio_sha256"] = audio_sha256
+        if source_pairs and not normalized.get("source_video"):
+            normalized["source_video"] = str(source_pairs[0].get("video_path") or "").strip()
+        if source_pairs and not normalized.get("audio_mode"):
+            normalized["audio_mode"] = str(source_pairs[0].get("audio_mode") or "video_original").strip().lower()
     if not normalized.get("source_video"):
         raise ValueError("project.source_video is required")
     normalized.setdefault("source_audio", "")
@@ -802,6 +843,15 @@ def _normalize_project(project: dict[str, Any]) -> dict[str, Any]:
     if lite_cut_layout not in {"split_gap", "copy"}:
         raise ValueError("project.lite_cut_layout must be either 'split_gap' or 'copy'")
     normalized["lite_cut_layout"] = lite_cut_layout
+    if normalized.get("source_pairs"):
+        tolerance = normalized.get("duration_tolerance_seconds", 3.0)
+        try:
+            tolerance = float(tolerance)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("project.duration_tolerance_seconds is invalid") from exc
+        if not math.isfinite(tolerance) or tolerance < 0:
+            raise ValueError("project.duration_tolerance_seconds must be non-negative")
+        normalized["duration_tolerance_seconds"] = tolerance
     return normalized
 
 
@@ -849,6 +899,13 @@ def _request_model(
             source_audio=str(project.get("source_audio") or ""),
             replacement_audio=str(project.get("replacement_audio") or ""),
             project_key=str(project.get("project_key") or ""),
+            source_pairs=(
+                [copy.deepcopy(dict(row)) for row in project.get("source_pairs") or []]
+                if isinstance(project.get("source_pairs"), list)
+                else []
+            ),
+            audio_mode=str(project.get("audio_mode") or "video_original").strip().lower(),
+            duration_tolerance_seconds=float(project.get("duration_tolerance_seconds", 3.0) or 3.0),
         ),
         edits=[],
         markers=[],
