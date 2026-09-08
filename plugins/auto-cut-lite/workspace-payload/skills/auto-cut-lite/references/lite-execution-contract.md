@@ -5,6 +5,14 @@ workspace and also defines its label, timeline, audio-layout, and runtime-integr
 overrides conflicting instructions in every router, focused skill, checklist, example, or
 user-selected subskill whenever `workflow_mode=lite`.
 
+## Blocking User Actions
+
+When Lite cannot continue without a user decision or user-supplied evidence, report a structured
+`user_action_required` result and follow the shared [user-action-required contract](../../auto-cut/references/user-action-required.md).
+The notification is advisory only; the full blocking question and its resolution stay in the
+originating Codex task. Do not invent action codes or treat Feishu replies, reactions, or messages
+as approval or resolution.
+
 ## Classification Matrix
 
 | Review request | Lite behavior | `execution_required` | Acceptance |
