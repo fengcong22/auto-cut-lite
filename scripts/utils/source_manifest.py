@@ -31,6 +31,7 @@ _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _VIDEO_SUFFIXES = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
 _AUDIO_SUFFIXES = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
 _LARK_HOST_SUFFIXES = ("feishu.cn", "larksuite.com", "larkoffice.com")
+_ECMASCRIPT_TRIM_CHARS = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 
 
 class SourceManifestError(ValueError):
@@ -96,15 +97,91 @@ def _sanitize_public(value: Any) -> Any:
     return str(value)
 
 
+def _ecmascript_trim(value: str) -> str:
+    """Match String.prototype.trim for manifest normalization."""
+
+    return value.strip(_ECMASCRIPT_TRIM_CHARS)
+
+
+def _ecmascript_number(value: float) -> str:
+    """Render a finite float the same way JSON.stringify renders a number."""
+
+    if not math.isfinite(value):
+        raise ValueError("manifest contains invalid JSON values")
+    if value == 0:
+        return "0"
+    text = repr(value)
+    if "e" not in text:
+        return text[:-2] if text.endswith(".0") else text
+    mantissa, exponent_text = text.split("e", 1)
+    exponent = int(exponent_text)
+    if -6 <= exponent < 21:
+        sign = ""
+        if mantissa.startswith("-"):
+            sign, mantissa = "-", mantissa[1:]
+        decimal = mantissa.find(".")
+        digits = mantissa.replace(".", "")
+        point = (decimal if decimal >= 0 else len(mantissa)) + exponent
+        if point <= 0:
+            return f"{sign}0.{('0' * -point)}{digits}"
+        if point >= len(digits):
+            return f"{sign}{digits}{('0' * (point - len(digits)))}"
+        return f"{sign}{digits[:point]}.{digits[point:]}"
+    normalized_mantissa = mantissa[:-2] if mantissa.endswith(".0") else mantissa
+    return f"{normalized_mantissa}e{'+' if exponent > 0 else ''}{exponent}"
+
+
+def _ecmascript_string(value: str) -> str:
+    """Render strings with JSON.stringify-compatible surrogate escaping."""
+
+    text = json.dumps(value, ensure_ascii=False)
+    result: list[str] = []
+    index = 0
+    while index < len(text):
+        codepoint = ord(text[index])
+        if 0xD800 <= codepoint <= 0xDBFF and index + 1 < len(text):
+            next_codepoint = ord(text[index + 1])
+            if 0xDC00 <= next_codepoint <= 0xDFFF:
+                result.append(chr(0x10000 + ((codepoint - 0xD800) << 10) + next_codepoint - 0xDC00))
+                index += 2
+                continue
+        if 0xD800 <= codepoint <= 0xDFFF:
+            result.append(f"\\u{codepoint:04x}")
+        else:
+            result.append(text[index])
+        index += 1
+    return "".join(result)
+
+
+def _canonical_json_text(value: Any) -> str:
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if isinstance(value, str):
+        return _ecmascript_string(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return _ecmascript_number(value)
+    if isinstance(value, (list, tuple)):
+        return f"[{','.join(_canonical_json_text(item) for item in value)}]"
+    if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("manifest object keys must be strings")
+        items = (
+            f"{_ecmascript_string(key)}:{_canonical_json_text(value[key])}"
+            for key in sorted(value)
+        )
+        return f"{{{','.join(items)}}}"
+    raise TypeError("manifest contains unsupported JSON values")
+
+
 def _canonical_json(value: Any) -> bytes:
     try:
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
+        return _canonical_json_text(value).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise SourceManifestError("source_manifest_invalid", "manifest contains invalid JSON values") from exc
 
@@ -133,7 +210,7 @@ def _allowed(value: Mapping[str, Any], allowed: set[str], name: str) -> None:
 def _text(value: Any, name: str, *, max_length: int = 4096) -> str:
     if not isinstance(value, str):
         raise SourceManifestError("source_manifest_invalid", f"{name} is invalid")
-    result = value.strip()
+    result = _ecmascript_trim(value)
     if not result or "\x00" in result or len(result) > max_length:
         raise SourceManifestError("source_manifest_invalid", f"{name} is invalid")
     return result

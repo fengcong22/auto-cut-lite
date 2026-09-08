@@ -98,6 +98,98 @@ def test_source_manifest_rejects_binding_or_digest_changes(tmp_path, monkeypatch
     assert canonical_sha256(changed) != loaded.canonical_sha256
 
 
+def test_source_manifest_matches_taskboard_hash_for_small_tolerance(tmp_path, monkeypatch):
+    payload = valid_manifest()
+    payload["sources"]["audio"] = {
+        "mode": "replace_original",
+        "duration_tolerance_seconds": 1e-7,
+        "source": {"kind": "docx_section", "anchor_text": "配音"},
+    }
+    manifest_path = write_manifest(tmp_path, payload)
+    monkeypatch.setenv("CODEX_AUTOCUT_TASK_ID", "task-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_RUN_ID", "run-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_SUBJECT_KEY", "bas_demo:tbl_math")
+    monkeypatch.setenv("CODEX_AUTOCUT_CONFIG_VERSION", "7")
+    monkeypatch.setenv("CODEX_AUTOCUT_STAGE_ID", "initial")
+    monkeypatch.setenv("CODEX_AUTOCUT_EVENT_ID", "evt-1")
+    # SHA-256 from Taskboard's canonicalSourceManifestJson for this payload.
+    monkeypatch.setenv(
+        "CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256",
+        "bfd2e0f93e83d761dc6963e469bf4da23549f42ec4a81fcc3957ea083f2fc57d",
+    )
+
+    loaded = load_source_manifest(manifest_path)
+
+    assert loaded.canonical_sha256 == "bfd2e0f93e83d761dc6963e469bf4da23549f42ec4a81fcc3957ea083f2fc57d"
+
+
+def test_source_manifest_matches_taskboard_hash_for_lone_utf16_surrogate(tmp_path, monkeypatch):
+    payload = valid_manifest()
+    payload["sources"]["video"]["anchor_text"] = "\ud800"
+    manifest_path = tmp_path / "source-manifest.json"
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+    monkeypatch.setenv("CODEX_AUTOCUT_TASK_ID", "task-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_RUN_ID", "run-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_SUBJECT_KEY", "bas_demo:tbl_math")
+    monkeypatch.setenv("CODEX_AUTOCUT_CONFIG_VERSION", "7")
+    monkeypatch.setenv("CODEX_AUTOCUT_STAGE_ID", "initial")
+    monkeypatch.setenv("CODEX_AUTOCUT_EVENT_ID", "evt-1")
+    # SHA-256 from Taskboard's JSON.stringify-compatible canonical output.
+    monkeypatch.setenv(
+        "CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256",
+        "438332534498c096b428667688a5ef04b66abc6d3eab0561b10ec55e446c388b",
+    )
+
+    loaded = load_source_manifest(manifest_path)
+
+    assert loaded.data["sources"]["video"]["anchor_text"] == "\ud800"
+    assert loaded.canonical_sha256 == "438332534498c096b428667688a5ef04b66abc6d3eab0561b10ec55e446c388b"
+
+
+def test_source_manifest_uses_taskboard_trim_semantics(tmp_path, monkeypatch):
+    payload = valid_manifest()
+    payload["sources"]["video"]["anchor_text"] = "录屏\x1f"
+    manifest_path = write_manifest(tmp_path, payload)
+    monkeypatch.setenv("CODEX_AUTOCUT_TASK_ID", "task-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_RUN_ID", "run-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_SUBJECT_KEY", "bas_demo:tbl_math")
+    monkeypatch.setenv("CODEX_AUTOCUT_CONFIG_VERSION", "7")
+    monkeypatch.setenv("CODEX_AUTOCUT_STAGE_ID", "initial")
+    monkeypatch.setenv("CODEX_AUTOCUT_EVENT_ID", "evt-1")
+    # SHA-256 from Taskboard, where String.prototype.trim() preserves U+001F.
+    monkeypatch.setenv(
+        "CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256",
+        "8b413fc9a9346eda75eb04e4414f7b0783c6e98ca0044f2424398a294930281f",
+    )
+
+    loaded = load_source_manifest(manifest_path)
+
+    assert loaded.data["sources"]["video"]["anchor_text"] == "录屏\x1f"
+    assert loaded.canonical_sha256 == "8b413fc9a9346eda75eb04e4414f7b0783c6e98ca0044f2424398a294930281f"
+
+
+def test_source_manifest_strips_taskboard_bom_whitespace(tmp_path, monkeypatch):
+    payload = valid_manifest()
+    payload["sources"]["video"]["anchor_text"] = "\ufeff录屏"
+    manifest_path = write_manifest(tmp_path, payload)
+    monkeypatch.setenv("CODEX_AUTOCUT_TASK_ID", "task-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_RUN_ID", "run-1")
+    monkeypatch.setenv("CODEX_AUTOCUT_SUBJECT_KEY", "bas_demo:tbl_math")
+    monkeypatch.setenv("CODEX_AUTOCUT_CONFIG_VERSION", "7")
+    monkeypatch.setenv("CODEX_AUTOCUT_STAGE_ID", "initial")
+    monkeypatch.setenv("CODEX_AUTOCUT_EVENT_ID", "evt-1")
+    # Taskboard's String.prototype.trim() removes a leading U+FEFF.
+    monkeypatch.setenv(
+        "CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256",
+        "e95e8c2fdd2ee9836751d246232260047458bbbdd04711868fbc30f2b40bba55",
+    )
+
+    loaded = load_source_manifest(manifest_path)
+
+    assert loaded.data["sources"]["video"]["anchor_text"] == "录屏"
+    assert loaded.canonical_sha256 == "e95e8c2fdd2ee9836751d246232260047458bbbdd04711868fbc30f2b40bba55"
+
+
 def test_source_manifest_accepts_feishu_wiki_document_url(tmp_path, monkeypatch):
     payload = valid_manifest()
     payload["document"]["url"] = "https://guanghe.feishu.cn/wiki/opaque-wiki-token"
