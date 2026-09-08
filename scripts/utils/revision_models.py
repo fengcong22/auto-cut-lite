@@ -14,6 +14,12 @@ class RevisionProject:
     replacement_audio: str = ""
     project_key: str = ""
     media_duration_seconds: float = 0.0
+    # Manifest-mode jobs retain the ordered source sequence.  The legacy
+    # scalar fields above remain populated with the first pair for callers
+    # that predate phased handoff.
+    source_pairs: List[Dict[str, Any]] = field(default_factory=list)
+    audio_mode: str = "video_original"
+    duration_tolerance_seconds: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -1208,6 +1214,82 @@ def load_review_items_json(path: str) -> List[RevisionReviewItem]:
     return _parse_review_items_payload(items_payload, "doc_items")
 
 
+def _parse_source_pairs_payload(payload: Any) -> List[Dict[str, Any]]:
+    """Validate the ordered manifest source-pair projection."""
+
+    if payload is None:
+        return []
+    if not isinstance(payload, list):
+        raise ValueError("project.source_pairs must be a list.")
+    pairs: List[Dict[str, Any]] = []
+    seen_indexes: set[int] = set()
+    for index, raw in enumerate(payload):
+        if not isinstance(raw, dict):
+            raise ValueError(f"project.source_pairs[{index}] must be an object.")
+        video_path = str(raw.get("video_path") or "").strip()
+        video_sha256 = str(raw.get("video_sha256") or "").strip().casefold()
+        if not video_path or not re.fullmatch(r"[0-9a-f]{64}", video_sha256):
+            raise ValueError(f"project.source_pairs[{index}] has an invalid video identity.")
+        pair_index = raw.get("pair_index", index)
+        if isinstance(pair_index, bool) or not isinstance(pair_index, int) or pair_index < 0:
+            raise ValueError(f"project.source_pairs[{index}].pair_index is invalid.")
+        if pair_index in seen_indexes:
+            raise ValueError("project.source_pairs pair_index values must be unique.")
+        seen_indexes.add(pair_index)
+        audio_mode = str(raw.get("audio_mode") or "video_original").strip().casefold()
+        if audio_mode not in {"video_original", "replace_original"}:
+            raise ValueError(f"project.source_pairs[{index}].audio_mode is invalid.")
+        row: Dict[str, Any] = {
+            "pair_index": pair_index,
+            "video_path": video_path,
+            "video_sha256": video_sha256,
+            "audio_mode": audio_mode,
+        }
+        source_audio_path = str(raw.get("source_audio_path") or "").strip()
+        source_audio_sha256 = str(raw.get("source_audio_sha256") or "").strip().casefold()
+        if bool(source_audio_path) != bool(source_audio_sha256) or (
+            source_audio_sha256 and not re.fullmatch(r"[0-9a-f]{64}", source_audio_sha256)
+        ):
+            raise ValueError(
+                f"project.source_pairs[{index}] has an invalid source audio identity."
+            )
+        if source_audio_path:
+            row.update(
+                {
+                    "source_audio_path": source_audio_path,
+                    "source_audio_sha256": source_audio_sha256,
+                }
+            )
+        if raw.get("video_duration_seconds") is not None:
+            row["video_duration_seconds"] = _as_finite_float(
+                raw.get("video_duration_seconds"),
+                f"project.source_pairs[{index}].video_duration_seconds",
+            )
+        if audio_mode == "replace_original":
+            audio_path = str(raw.get("replacement_audio_path") or "").strip()
+            audio_sha256 = str(raw.get("replacement_audio_sha256") or "").strip().casefold()
+            if not audio_path or not re.fullmatch(r"[0-9a-f]{64}", audio_sha256):
+                raise ValueError(f"project.source_pairs[{index}] has an invalid replacement audio identity.")
+            row.update(
+                {
+                    "replacement_audio_path": audio_path,
+                    "replacement_audio_sha256": audio_sha256,
+                }
+            )
+            if raw.get("audio_duration_seconds") is not None:
+                row["audio_duration_seconds"] = _as_finite_float(
+                    raw.get("audio_duration_seconds"),
+                    f"project.source_pairs[{index}].audio_duration_seconds",
+                )
+        pairs.append(row)
+    # Source order is authoritative.  Do not sort by any media property; the
+    # manifest compiler already emits the document order.  Pair indexes, when
+    # present, must be contiguous so a missing row cannot be silently skipped.
+    if pairs and {row["pair_index"] for row in pairs} != set(range(len(pairs))):
+        raise ValueError("project.source_pairs pair_index values must be contiguous")
+    return pairs
+
+
 def load_revision_request(path: str) -> RevisionRequest:
     payload = _load_json(path)
     audio_delivery_plan = _parse_audio_delivery_plan(payload.get("audio_delivery_plan"))
@@ -1215,14 +1297,20 @@ def load_revision_request(path: str) -> RevisionRequest:
     project_payload = payload.get("project") or {}
     if not isinstance(project_payload, dict):
         raise ValueError("project must be an object.")
+    source_pairs = _parse_source_pairs_payload(project_payload.get("source_pairs"))
     draft_name = str(project_payload.get("draft_name") or "").strip()
     source_video = str(project_payload.get("source_video") or "").strip()
+    if not source_video and source_pairs:
+        source_video = str(source_pairs[0].get("video_path") or "").strip()
     if not draft_name:
         raise ValueError("project.draft_name is required.")
     if not source_video:
         raise ValueError("project.source_video is required.")
 
     replacement_audio = str(project_payload.get("replacement_audio") or "").strip()
+    if not replacement_audio and source_pairs:
+        first_pair = source_pairs[0]
+        replacement_audio = str(first_pair.get("replacement_audio_path") or "").strip()
     if not replacement_audio and audio_delivery_plan.mode != "segmented":
         replacement_audio = _extract_processed_audio_path(payload)
 
@@ -1240,7 +1328,21 @@ def load_revision_request(path: str) -> RevisionRequest:
         replacement_audio=replacement_audio,
         project_key=str(project_payload.get("project_key") or "").strip(),
         media_duration_seconds=media_duration_seconds,
+        source_pairs=source_pairs,
+        audio_mode=str(project_payload.get("audio_mode") or (source_pairs[0].get("audio_mode") if source_pairs else "video_original")).strip().casefold(),
+        duration_tolerance_seconds=_as_finite_float(
+            project_payload.get("duration_tolerance_seconds", 3.0),
+            "project.duration_tolerance_seconds",
+        ),
     )
+    if project.duration_tolerance_seconds < 0:
+        raise ValueError("project.duration_tolerance_seconds must be non-negative.")
+    if project.audio_mode not in {"video_original", "replace_original"}:
+        raise ValueError("project.audio_mode must be video_original or replace_original.")
+    if source_pairs:
+        pair_modes = {str(row.get("audio_mode") or project.audio_mode).casefold() for row in source_pairs}
+        if pair_modes != {project.audio_mode}:
+            raise ValueError("project.source_pairs audio modes must match project.audio_mode.")
 
     edits_payload = payload.get("edits") or []
     if not isinstance(edits_payload, list):

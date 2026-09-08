@@ -1,15 +1,6 @@
 # Auto-Cut | AI 全自动用你的剪映替你剪辑
 ![封面图](assets/cover.png)
 
-## Auto-Cut Lite（精简版）
-
-普通用户请从 GitHub Releases 下载 Lite 安装包，不要下载 GitHub 自动生成的
-`Source code (zip)`：
-
-- [下载 Lite 最新安装包](https://github.com/fengcong22/auto-cut-lite/releases/latest)
-- [查看 Lite 更新记录](https://github.com/fengcong22/auto-cut-lite/blob/feature/auto-cut-lite/plugins/auto-cut-lite/更新说明.md)
-- [查看 Lite 源码分支](https://github.com/fengcong22/auto-cut-lite/tree/feature/auto-cut-lite)
-
 ## Full Windows Install (v1.7.0)
 
 On Windows 10/11 x64, install 64-bit Python 3.10-3.12 for the main runtime.
@@ -93,6 +84,21 @@ computer, configure `lark-cli config default-as user` and `lark-cli config stric
 complete the one-time user login and fetch with `lark-cli docs +fetch --as user`. This prevents
 application/bot fallback and keeps optional notification authentication separate from document
 access. The user token remains local to that computer and is never bundled or shared.
+
+### Taskboard-bound Feishu source handoff
+
+Taskboard stage runs invoke `review-document-run` with an exact, run-bound
+`--source-manifest`, `--execution-input`, `--job-root`, `--drafts-root`,
+`--package-zip`, and `--result-path`. The runner accepts the manifest only when
+its task, run, subject, configuration, stage, event, and canonical SHA-256 match
+the execution context injected for that run. Free-form task text does not create
+this binding.
+
+The manifest selects explicit Docx ranges or one configured Base attachment
+field. Auto-Cut does not search the rest of the document for likely media and
+does not scan an output directory for the newest ZIP. Ordered media, blocking
+conditions, audio modes, and the Taskboard/package receipt contracts are
+documented in [`docs/source-manifest.md`](docs/source-manifest.md).
 
 The portable package preserves the editable draft contract: source video,
 separated audio, replacement media, visible cut boundaries, one traceable review

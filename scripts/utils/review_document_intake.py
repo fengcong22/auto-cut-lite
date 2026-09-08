@@ -827,7 +827,11 @@ def _top_level_index(root: ET.Element) -> dict[int, int]:
     return indexes
 
 
-def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
+def parse_lark_document(
+    fetch: Mapping[str, Any],
+    *,
+    require_review_items: bool = True,
+) -> dict[str, Any]:
     content = str(fetch.get("content") or "")
     raw_document_id = str(fetch.get("document_id") or "").strip()
     if not raw_document_id:
@@ -870,7 +874,7 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
         review_rows.append(row)
         checkbox_positions.append((top_indexes.get(id(checkbox), -1), len(review_rows) - 1))
 
-    if not review_rows:
+    if not review_rows and require_review_items:
         raise ReviewDocumentIntakeError(
             "review_items_missing", "The Feishu/Lark document contains no review checkbox items"
         )
@@ -943,8 +947,107 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
                 "pointer_hint": pointer_hint,
                 "recommended": recommended_hint,
                 "associated_item_index": associated_item_index,
+                # The source-manifest reader uses these transient positions to
+                # select an exact heading range.  They are deliberately kept
+                # separate from the legacy whole-document asset ranking fields.
+                "document_position": asset_index,
+                "block_index": top_index,
             }
         )
+
+    # Preserve a lightweight, ordered block projection for phased manifest
+    # intake.  Legacy callers continue to consume review_items/assets; the
+    # additional metadata lets the manifest path select only the configured
+    # heading/label range instead of ranking every document attachment.
+    blocks: list[dict[str, Any]] = []
+    assets_by_top: dict[int, list[dict[str, Any]]] = {}
+    for asset in assets:
+        try:
+            top_index = int(asset.get("block_index"))
+        except (TypeError, ValueError):
+            top_index = -1
+        assets_by_top.setdefault(top_index, []).append(asset)
+
+    def _heading_level(element: ET.Element) -> int | None:
+        raw = (
+            element.get("level")
+            or element.get("heading-level")
+            or element.get("heading_level")
+            or element.get("outline-level")
+        )
+        if raw is not None and str(raw).strip().isdigit():
+            level = int(str(raw).strip())
+            if level > 0:
+                return level
+        match = re.fullmatch(r"h([1-6])", str(element.tag or "").casefold())
+        if match:
+            return int(match.group(1))
+        tag = str(element.tag or "").casefold()
+        if tag in {"heading", "header"}:
+            return 2
+        return None
+
+    for top_index, top in enumerate(top_nodes):
+        # Flatten explicitly marked headings/checkboxes inside a top-level
+        # paragraph while retaining the provider's block order.
+        recognized = [
+            node
+            for node in top.iter()
+            if str(node.tag or "").casefold() in {"heading", "header", "title", "checkbox"}
+            or re.fullmatch(r"h[1-6]", str(node.tag or "").casefold())
+        ]
+        if recognized:
+            for node in recognized:
+                text = "".join(node.itertext()).strip()
+                kind = str(node.tag or "").casefold()
+                if not text and kind != "checkbox":
+                    continue
+                block: dict[str, Any] = {
+                    "kind": "heading" if kind in {"heading", "header", "title"} or re.fullmatch(r"h[1-6]", kind) else kind,
+                    "text": text,
+                    "source_text": text,
+                    "block_index": top_index,
+                }
+                level = _heading_level(node)
+                if level is not None:
+                    block["level"] = level
+                if node.get("id"):
+                    block["id"] = str(node.get("id"))
+                blocks.append(block)
+        else:
+            # A plain/bold label is represented as one text block.  Attachment
+            # descendants are omitted from its text but remain separate rows.
+            text_parts: list[str] = []
+            for node in top.iter():
+                if str(node.tag or "").casefold() in {"img", "source"}:
+                    continue
+                if node.text:
+                    text_parts.append(node.text)
+            text = "".join(text_parts).strip()
+            if text:
+                blocks.append(
+                    {
+                        "kind": "text",
+                        "text": text,
+                        "source_text": text,
+                        "block_index": top_index,
+                        "standalone": True,
+                    }
+                )
+        for asset in assets_by_top.get(top_index, []):
+            blocks.append(
+                {
+                    "kind": "attachment",
+                    "filename": asset.get("name") or "",
+                    "name": asset.get("name") or "",
+                    "mime": asset.get("mime") or "",
+                    "extension": asset.get("extension") or "",
+                    "token": asset.get("token") or "",
+                    "asset_id": asset.get("asset_id") or "",
+                    "block_index": top_index,
+                    "document_position": asset.get("document_position"),
+                }
+            )
 
     safe_asset_identity = [
         {
@@ -968,6 +1071,7 @@ def parse_lark_document(fetch: Mapping[str, Any]) -> dict[str, Any]:
         "review_items": review_rows,
         "assets": assets,
         "safe_asset_identity": safe_asset_identity,
+        "blocks": blocks,
     }
 
 

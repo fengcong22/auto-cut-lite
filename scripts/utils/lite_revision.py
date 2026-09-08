@@ -167,6 +167,12 @@ def _localize_lite_request_materials(
     add_path(request.project.source_video)
     add_path(request.project.source_audio)
     add_path(request.project.replacement_audio)
+    for pair in request.project.source_pairs:
+        if not isinstance(pair, dict):
+            continue
+        add_path(str(pair.get("video_path") or ""))
+        add_path(str(pair.get("source_audio_path") or ""))
+        add_path(str(pair.get("replacement_audio_path") or ""))
     for edit in request.edits:
         add_path(edit.audio_path)
         for path in edit.asset_paths:
@@ -217,6 +223,20 @@ def _localize_lite_request_materials(
         source_video=mapped(request.project.source_video),
         source_audio=mapped(request.project.source_audio),
         replacement_audio=mapped(request.project.replacement_audio),
+        source_pairs=[
+            {
+                **dict(pair),
+                "video_path": mapped(str(pair.get("video_path") or "")),
+                "source_audio_path": mapped(
+                    str(pair.get("source_audio_path") or "")
+                ),
+                "replacement_audio_path": mapped(
+                    str(pair.get("replacement_audio_path") or "")
+                ),
+            }
+            for pair in request.project.source_pairs
+            if isinstance(pair, dict)
+        ],
     )
     edits = [
         replace(
@@ -492,6 +512,29 @@ class _LiteDeleteWindow:
     item_id: str
     start: float
     end: float
+
+
+@dataclass
+class _LiteSourcePair:
+    """One ordered source pair and its resolved local timeline interval."""
+
+    pair_index: int
+    video_path: str
+    video_sha256: str
+    audio_mode: str
+    source_audio_path: str = ""
+    source_audio_sha256: str = ""
+    replacement_audio_path: str = ""
+    replacement_audio_sha256: str = ""
+    declared_video_duration: Optional[float] = None
+    declared_audio_duration: Optional[float] = None
+    offset: float = 0.0
+    duration: float = 0.0
+    video_stream_duration: float = 0.0
+    source_audio_duration: float = 0.0
+    video_material: Any = None
+    source_audio_material: Any = None
+    replacement_audio_material: Any = None
 
 
 def _lite_pause_offset_before(
@@ -1309,6 +1352,137 @@ def _source_video_duration_seconds(material: Any, source_path: str, fallback: fl
     return max(material_duration, container_duration, fallback)
 
 
+def _finite_optional(value: Any, field_name: str) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be a finite non-negative number.") from exc
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{field_name} must be a finite positive number.")
+    return number
+
+
+def _manifest_source_pairs(request: RevisionRequest) -> List[_LiteSourcePair]:
+    """Normalize the ordered pair projection without sorting or guessing."""
+
+    rows = request.project.source_pairs
+    if not rows:
+        return []
+    pairs: List[_LiteSourcePair] = []
+    for index, raw in enumerate(rows):
+        if not isinstance(raw, dict):
+            raise ValueError(f"project.source_pairs[{index}] must be an object.")
+        pair_index = raw.get("pair_index", index)
+        if isinstance(pair_index, bool) or not isinstance(pair_index, int) or pair_index != index:
+            raise ValueError("project.source_pairs must preserve contiguous document order.")
+        video_path = str(raw.get("video_path") or "").strip()
+        video_sha256 = str(raw.get("video_sha256") or "").strip().casefold()
+        if not video_path or not _is_sha256(video_sha256):
+            raise ValueError(f"project.source_pairs[{index}] has an invalid video identity.")
+        mode = str(raw.get("audio_mode") or request.project.audio_mode or "video_original").strip().casefold()
+        if mode not in {"video_original", "replace_original"}:
+            raise ValueError(f"project.source_pairs[{index}].audio_mode is invalid.")
+        source_audio_path = str(raw.get("source_audio_path") or "").strip()
+        source_audio_sha256 = str(raw.get("source_audio_sha256") or "").strip().casefold()
+        if bool(source_audio_path) != bool(source_audio_sha256) or (
+            source_audio_sha256 and not _is_sha256(source_audio_sha256)
+        ):
+            raise ValueError(
+                f"project.source_pairs[{index}] has an invalid source audio identity."
+            )
+        replacement_path = str(raw.get("replacement_audio_path") or "").strip()
+        replacement_sha256 = str(raw.get("replacement_audio_sha256") or "").strip().casefold()
+        if mode == "replace_original" and (
+            not replacement_path or not _is_sha256(replacement_sha256)
+        ):
+            raise ValueError(f"project.source_pairs[{index}] requires replacement audio identity.")
+        pairs.append(
+            _LiteSourcePair(
+                pair_index=index,
+                video_path=video_path,
+                video_sha256=video_sha256,
+                audio_mode=mode,
+                source_audio_path=source_audio_path,
+                source_audio_sha256=source_audio_sha256,
+                replacement_audio_path=replacement_path,
+                replacement_audio_sha256=replacement_sha256,
+                declared_video_duration=_finite_optional(
+                    raw.get("video_duration_seconds"),
+                    f"project.source_pairs[{index}].video_duration_seconds",
+                ),
+                declared_audio_duration=_finite_optional(
+                    raw.get("audio_duration_seconds"),
+                    f"project.source_pairs[{index}].audio_duration_seconds",
+                ),
+            )
+        )
+    if not pairs:
+        raise ValueError("project.source_pairs must contain at least one pair.")
+    return pairs
+
+
+def _pair_intersections(
+    pairs: List[_LiteSourcePair],
+    start: float,
+    end: float,
+    *,
+    duration_field: str = "duration",
+) -> Iterable[Tuple[_LiteSourcePair, float, float, float]]:
+    """Yield (pair, local_start, local_end, global_start) in source order."""
+
+    for pair in pairs:
+        pair_duration = float(getattr(pair, duration_field))
+        overlap_start = max(float(start), pair.offset)
+        overlap_end = min(float(end), pair.offset + pair_duration)
+        if overlap_end - overlap_start <= 1e-6:
+            continue
+        yield (
+            pair,
+            overlap_start - pair.offset,
+            overlap_end - pair.offset,
+            overlap_start,
+        )
+
+
+def _source_pair_result_rows(pairs: List[_LiteSourcePair]) -> List[Dict[str, Any]]:
+    return [
+        {
+            "pair_index": pair.pair_index,
+            "video_path": pair.video_path,
+            "video_sha256": pair.video_sha256,
+            "video_duration_seconds": pair.duration,
+            "timeline_start": pair.offset,
+            "timeline_end": pair.offset + pair.duration,
+            "audio_mode": pair.audio_mode,
+            **(
+                {
+                    "source_audio_path": pair.source_audio_path,
+                    "source_audio_sha256": pair.source_audio_sha256,
+                }
+                if pair.source_audio_path
+                else {}
+            ),
+            **(
+                {
+                    "replacement_audio_path": pair.replacement_audio_path,
+                    "replacement_audio_sha256": pair.replacement_audio_sha256,
+                    "audio_duration_seconds": pair.declared_audio_duration,
+                }
+                if pair.audio_mode == "replace_original"
+                else {}
+            ),
+            "video_material_id": str(getattr(pair.video_material, "material_id", "")),
+            "source_audio_material_id": str(getattr(pair.source_audio_material, "material_id", "")),
+            "replacement_audio_material_id": str(
+                getattr(pair.replacement_audio_material, "material_id", "")
+            ),
+        }
+        for pair in pairs
+    ]
+
+
 def _make_video_material(draft: Any, mock_video: Any, path: str, duration: float, mock: bool):
     if mock:
         return mock_video(
@@ -1787,6 +1961,12 @@ def _validate_lite_content(
     segment_receipts: Optional[List[Dict[str, Any]]] = None,
     source_video_material_id: str = "",
     source_video_path: str = "",
+    source_video_material_ids: Optional[Iterable[str]] = None,
+    source_video_paths: Optional[Iterable[str]] = None,
+    source_audio_material_ids: Optional[Iterable[str]] = None,
+    source_pair_offsets: Optional[Iterable[float]] = None,
+    source_pair_video_durations: Optional[Iterable[float]] = None,
+    source_pair_audio_durations: Optional[Iterable[float]] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
@@ -1848,7 +2028,28 @@ def _validate_lite_content(
         errors.append("Lite split-gap draft must save maintrack_adsorb=false.")
 
     expected_source_material_id = str(source_video_material_id or "").strip()
-    if not expected_source_material_id:
+    expected_source_material_ids = [
+        str(value or "").strip()
+        for value in (source_video_material_ids or [])
+        if str(value or "").strip()
+    ]
+    expected_source_paths = [
+        str(value or "").strip()
+        for value in (source_video_paths or [])
+        if str(value or "").strip()
+    ]
+    expected_source_audio_ids = [
+        str(value or "").strip()
+        for value in (source_audio_material_ids or [])
+        if str(value or "").strip()
+    ]
+    multi_source = bool(expected_source_material_ids)
+    if multi_source:
+        if len(expected_source_material_ids) != len(expected_source_paths):
+            errors.append("Lite ordered source video material/path counts do not match.")
+        if len(expected_source_material_ids) != len(expected_source_audio_ids):
+            errors.append("Lite ordered source video/audio material counts do not match.")
+    elif not expected_source_material_id:
         errors.append("Lite validation requires the source video material ID.")
     else:
         video_materials = [
@@ -1896,6 +2097,88 @@ def _validate_lite_content(
                     + ", ".join(mismatched)
                 )
 
+    material_offset_by_id: Dict[str, float] = {}
+    pair_offsets = [float(value) for value in (source_pair_offsets or [])]
+    pair_video_durations = [
+        float(value) for value in (source_pair_video_durations or [])
+    ]
+    pair_audio_durations = [
+        float(value) for value in (source_pair_audio_durations or [])
+    ]
+    if multi_source:
+        if len(pair_offsets) != len(expected_source_material_ids):
+            errors.append("Lite ordered source pair offsets do not match material count.")
+        if len(pair_video_durations) != len(expected_source_material_ids):
+            errors.append("Lite ordered source video durations do not match material count.")
+        if len(pair_audio_durations) != len(expected_source_audio_ids):
+            errors.append("Lite ordered source audio durations do not match material count.")
+        for index, material_id in enumerate(expected_source_material_ids):
+            path = expected_source_paths[index] if index < len(expected_source_paths) else ""
+            materials = [
+                material
+                for material in (content.get("materials") or {}).get("videos", []) or []
+                if isinstance(material, dict)
+                and str(material.get("id") or material.get("material_id") or "").strip()
+                == material_id
+            ]
+            if len(materials) != 1:
+                errors.append(f"Lite ordered source video material is missing or duplicated: {material_id}.")
+            elif path:
+                saved_path = str(
+                    materials[0].get("path")
+                    or materials[0].get("media_path")
+                    or materials[0].get("file_path")
+                    or ""
+                ).strip()
+                if os.path.normcase(os.path.abspath(saved_path)) != os.path.normcase(os.path.abspath(path)):
+                    errors.append(f"Lite ordered source video material path does not match pair {index}.")
+            if index < len(pair_offsets):
+                material_offset_by_id[material_id] = pair_offsets[index]
+        for index, material_id in enumerate(expected_source_audio_ids):
+            if index < len(pair_offsets):
+                material_offset_by_id[material_id] = pair_offsets[index]
+        allowed_ids = set(expected_source_material_ids)
+        for track_name in (LITE_TRACKS["original_video"], LITE_TRACKS["cut_segments"]):
+            track = by_name.get(track_name)
+            if track is None:
+                continue
+            mismatched = [
+                str(segment.get("id") or index + 1)
+                for index, segment in enumerate(track.get("segments") or [])
+                if str(segment.get("material_id") or "").strip() not in allowed_ids
+            ]
+            if mismatched:
+                errors.append(
+                    f"Lite {track_name} contains non-source video material: "
+                    + ", ".join(mismatched)
+                )
+
+    def _expand_expected_pair_windows(
+        rows: List[Tuple[float, float, float]],
+        pair_durations: List[float],
+    ) -> List[Tuple[float, float, float]]:
+        """Split global expected windows at ordered pair boundaries."""
+
+        if not multi_source:
+            return rows
+        if not pair_offsets:
+            return rows
+        pair_ends = [
+            pair_offsets[index] + pair_durations[index]
+            for index in range(min(len(pair_offsets), len(pair_durations)))
+        ]
+        expanded: List[Tuple[float, float, float]] = []
+        for row_start, row_end, _row_source_start in rows:
+            for pair_start, pair_end in zip(pair_offsets, pair_ends):
+                overlap_start = max(float(row_start), pair_start)
+                overlap_end = min(float(row_end), pair_end)
+                if overlap_end - overlap_start <= 1e-6:
+                    continue
+                expanded.append((overlap_start, overlap_end, overlap_start))
+        return expanded
+
+    segment_material_ids: Dict[str, str] = {}
+
     def _track_windows(
         track_name: str,
         *,
@@ -1914,6 +2197,11 @@ def _validate_lite_content(
             target_start = int(target.get("start", 0) or 0) / 1_000_000.0
             duration = int(target.get("duration", 0) or 0) / 1_000_000.0
             source_start = int(source.get("start", 0) or 0) / 1_000_000.0
+            if multi_source:
+                material_id = str(segment.get("material_id") or "").strip()
+                # Keep this side map separate from the public tuple shape so
+                # legacy validator callers remain source-compatible.
+                segment_material_ids[segment_id] = material_id
             windows.append(
                 (target_start, target_start + duration, source_start, duration, segment_id)
             )
@@ -1938,6 +2226,11 @@ def _validate_lite_content(
             expected_source_start = (
                 expected_row[2] if len(expected_row) >= 3 else expected_start
             )
+            if multi_source:
+                source_start = source_start + material_offset_by_id.get(
+                    segment_material_ids.get(_segment_id, ""),
+                    0.0,
+                )
             if (
                 abs(saved_start - expected_start) > 0.01
                 or abs(saved_end - expected_end) > 0.01
@@ -1963,15 +2256,47 @@ def _validate_lite_content(
         rows: Iterable[Tuple[float, float, float, float, str]],
     ) -> List[Tuple[float, float]]:
         return _merge_windows(
-            (source_start, source_start + duration)
+            (
+                source_start
+                + (
+                    material_offset_by_id.get(segment_material_ids.get(_segment_id, ""), 0.0)
+                    if multi_source
+                    else 0.0
+                ),
+                source_start
+                + (
+                    material_offset_by_id.get(segment_material_ids.get(_segment_id, ""), 0.0)
+                    if multi_source
+                    else 0.0
+                )
+                + duration,
+            )
             for _target_start, _target_end, source_start, duration, _segment_id in rows
         )
 
     def _coverage_matches(
         rows: Iterable[Tuple[float, float, float, float, str]],
         expected_duration: float,
+        pair_durations: Optional[List[float]] = None,
     ) -> bool:
         coverage = _source_coverage(rows)
+        if multi_source and pair_durations is not None:
+            expected = _merge_windows(
+                (
+                    offset,
+                    offset + duration,
+                )
+                for offset, duration in zip(pair_offsets, pair_durations)
+                if duration > 0
+            )
+            return len(coverage) == len(expected) and all(
+                abs(actual_start - expected_start) <= 0.001
+                and abs(actual_end - expected_end) <= 0.001
+                for (actual_start, actual_end), (expected_start, expected_end) in zip(
+                    coverage,
+                    expected,
+                )
+            )
         return bool(
             len(coverage) == 1
             and abs(coverage[0][0]) <= 0.001
@@ -1983,8 +2308,18 @@ def _validate_lite_content(
         right: List[Tuple[float, float, float, float, str]],
     ) -> bool:
         return any(
-            min(left_source + left_duration, right_source + right_duration)
-            - max(left_source, right_source)
+            min(
+                left_source
+                + material_offset_by_id.get(segment_material_ids.get(_li, ""), 0.0)
+                + left_duration,
+                right_source
+                + material_offset_by_id.get(segment_material_ids.get(_ri, ""), 0.0)
+                + right_duration,
+            )
+            - max(
+                left_source + material_offset_by_id.get(segment_material_ids.get(_li, ""), 0.0),
+                right_source + material_offset_by_id.get(segment_material_ids.get(_ri, ""), 0.0),
+            )
             > 1e-6
             for _lt, _le, left_source, left_duration, _li in left
             for _rt, _re, right_source, right_duration, _ri in right
@@ -2019,12 +2354,16 @@ def _validate_lite_content(
         if original is not None:
             _expect_windows(
                 LITE_TRACKS["original_video"],
-                keep_video,
+                _expand_expected_pair_windows(keep_video, pair_video_durations),
                 "V1",
             )
         cut_track = by_name.get(LITE_TRACKS["cut_segments"])
         if cut_track is not None:
-            _expect_windows(LITE_TRACKS["cut_segments"], mapped_deletes, "V2")
+            _expect_windows(
+                LITE_TRACKS["cut_segments"],
+                _expand_expected_pair_windows(mapped_deletes, pair_video_durations),
+                "V2",
+            )
         audio_total = min(total_duration, float(audio_duration or total_duration))
         audio_delete_rows = [
             _LiteDeleteWindow(window.item_id, window.start, min(window.end, audio_total))
@@ -2046,9 +2385,17 @@ def _validate_lite_content(
             )
             for window in audio_delete_rows
         ]
-        _expect_windows(LITE_TRACKS["source_audio"], keep_audio, "A1")
+        _expect_windows(
+            LITE_TRACKS["source_audio"],
+            _expand_expected_pair_windows(keep_audio, pair_audio_durations),
+            "A1",
+        )
         if audio_deletes:
-            _expect_windows(LITE_TRACKS["reused_audio"], audio_deletes, "A2")
+            _expect_windows(
+                LITE_TRACKS["reused_audio"],
+                _expand_expected_pair_windows(audio_deletes, pair_audio_durations),
+                "A2",
+            )
         if by_name.get(LITE_TRACKS["reused_audio"]) is not None:
             a2 = by_name.get(LITE_TRACKS["reused_audio"])
             if a2 is not None:
@@ -2074,9 +2421,17 @@ def _validate_lite_content(
             errors.append("V1 and V2 source ranges must not overlap.")
         if _has_source_overlap(a1_windows, a2_windows):
             errors.append("A1 and A2 source ranges must not overlap.")
-        if not _coverage_matches([*v1_windows, *v2_windows], video_total):
+        if not _coverage_matches(
+            [*v1_windows, *v2_windows],
+            video_total,
+            pair_video_durations if multi_source else None,
+        ):
             errors.append("V1 and V2 must cover the complete source video stream exactly once.")
-        if not _coverage_matches([*a1_windows, *a2_windows], audio_total):
+        if not _coverage_matches(
+            [*a1_windows, *a2_windows],
+            audio_total,
+            pair_audio_durations if multi_source else None,
+        ):
             errors.append("A1 and A2 must cover the complete source audio exactly once.")
 
     elif original is not None:
@@ -2231,20 +2586,131 @@ def execute_lite_revision_request(
     _disable_maintrack_adsorb(project)
     validated = False
     localized_materials: List[Dict[str, Any]] = []
+    source_pairs: List[_LiteSourcePair] = _manifest_source_pairs(request)
+    pair_mode = bool(source_pairs)
+    pair_tolerance = float(
+        request.project.duration_tolerance_seconds
+        if request.project.duration_tolerance_seconds is not None
+        else 3.0
+    )
+    if pair_mode and pair_tolerance < 0:
+        raise ValueError("project.duration_tolerance_seconds must be non-negative.")
     try:
         if localize_materials and not mock_media:
             request, localized_materials = _localize_lite_request_materials(
                 request, project.draft_dir
             )
+            source_pairs = _manifest_source_pairs(request)
         if request.pause_adjustments:
             raise RuntimeError(
                 "Lite execution policy error: material localization restored pause_adjustments."
             )
         declared_duration = float(request.project.media_duration_seconds or 0.0)
         total_duration = declared_duration
-        if mock_media and total_duration <= 0:
+        pair_runtime_rows: List[_LiteSourcePair] = []
+        if pair_mode:
+            # Resolve every manifest pair independently.  The manifest order is
+            # authoritative; offsets are cumulative and never sorted by name,
+            # size, or modification time.
+            pair_cursor = 0.0
+            for pair in source_pairs:
+                fallback_duration = pair.declared_video_duration or 0.0
+                if mock_media and fallback_duration <= 0:
+                    fallback_duration = declared_duration / len(source_pairs) if declared_duration > 0 else 30.0
+                pair.video_material = _make_video_material(
+                    draft,
+                    mock_video,
+                    pair.video_path,
+                    fallback_duration,
+                    mock_media,
+                )
+                video_stream_duration = _material_duration_seconds(
+                    pair.video_material,
+                    fallback_duration,
+                )
+                if mock_media:
+                    detected_video_duration = max(
+                        video_stream_duration,
+                        fallback_duration,
+                    )
+                else:
+                    detected_video_duration = _source_video_duration_seconds(
+                        pair.video_material,
+                        pair.video_path,
+                        fallback_duration,
+                    )
+                if detected_video_duration <= 0:
+                    raise ValueError(
+                        f"Lite source pair {pair.pair_index} has no positive video duration."
+                    )
+                if (
+                    pair.declared_video_duration is not None
+                    and abs(detected_video_duration - pair.declared_video_duration) > pair_tolerance
+                ):
+                    raise ValueError(
+                        f"Lite source pair {pair.pair_index} video duration exceeds configured tolerance."
+                    )
+                pair.offset = pair_cursor
+                pair.duration = float(detected_video_duration)
+                pair.video_stream_duration = min(
+                    pair.duration,
+                    float(video_stream_duration),
+                )
+                pair.source_audio_material = _make_audio_material(
+                    draft,
+                    mock_audio,
+                    pair.source_audio_path or pair.video_path,
+                    pair.duration,
+                    mock_media,
+                )
+                pair.source_audio_duration = min(
+                    pair.duration,
+                    _material_duration_seconds(
+                        pair.source_audio_material,
+                        pair.duration,
+                    ),
+                )
+                if pair.audio_mode == "replace_original":
+                    pair.replacement_audio_material = _make_audio_material(
+                        draft,
+                        mock_audio,
+                        pair.replacement_audio_path,
+                        pair.declared_audio_duration or pair.duration,
+                        mock_media,
+                    )
+                    if mock_media:
+                        detected_audio_duration = _material_duration_seconds(
+                            pair.replacement_audio_material,
+                            pair.declared_audio_duration or pair.duration,
+                        )
+                    else:
+                        detected_audio_duration = _material_duration_seconds(
+                            pair.replacement_audio_material,
+                            pair.declared_audio_duration or pair.duration,
+                        )
+                    if detected_audio_duration <= 0:
+                        raise ValueError(
+                            f"Lite source pair {pair.pair_index} has no positive replacement audio duration."
+                        )
+                    if abs(detected_audio_duration - pair.duration) > pair_tolerance:
+                        raise ValueError(
+                            f"Lite source pair {pair.pair_index} video/audio duration exceeds configured tolerance."
+                        )
+                    pair.declared_audio_duration = detected_audio_duration
+                pair_runtime_rows.append(pair)
+                pair_cursor += pair.duration
+            source_pairs = pair_runtime_rows
+            total_duration = pair_cursor
+            if (
+                declared_duration > 0
+                and abs(declared_duration - total_duration) > pair_tolerance
+            ):
+                raise ValueError(
+                    "Lite project.media_duration_seconds does not match ordered source-pair duration."
+                )
+        elif mock_media and total_duration <= 0:
             total_duration = 30.0
-        if not mock_media:
+        elif not mock_media:
             source_probe = draft.VideoMaterial(request.project.source_video)
             detected_duration = _source_video_duration_seconds(
                 source_probe,
@@ -2278,6 +2744,11 @@ def execute_lite_revision_request(
         )
         timeline_duration = _lite_timeline_duration(total_duration, request.pause_adjustments)
         segmented_audio_delivery = request.audio_delivery_plan.mode == "segmented"
+        if pair_mode and segmented_audio_delivery:
+            raise ValueError(
+                "Lite ordered source pairs cannot use a precompiled segmented audio plan; "
+                "provide one replacement audio source per pair instead."
+            )
         segment_receipts: List[Dict[str, Any]] = []
         pause_receipts: List[Dict[str, Any]] = []
         visual_material_cache: Dict[str, Any] = {}
@@ -2300,6 +2771,8 @@ def execute_lite_revision_request(
         ]
         if not segmented_audio_delivery:
             fixed_tracks.append((LITE_TRACKS["source_audio"], draft.TrackType.audio))
+            if pair_mode and any(pair.audio_mode == "replace_original" for pair in source_pairs):
+                fixed_tracks.append(("Replacement Audio", draft.TrackType.audio))
         for track_name, track_type in fixed_tracks:
             absolute_index = video_render_indexes.get(track_name)
             if absolute_index is None:
@@ -2311,17 +2784,23 @@ def execute_lite_revision_request(
                     absolute_index=absolute_index,
                 )
 
-        video_material = _make_video_material(
-            draft,
-            mock_video,
-            request.project.source_video,
-            total_duration,
-            mock_media,
-        )
-        source_video_duration = min(
-            total_duration,
-            _material_duration_seconds(video_material, total_duration),
-        )
+        if pair_mode:
+            video_material = source_pairs[0].video_material
+            source_video_duration = max(
+                pair.offset + pair.video_stream_duration for pair in source_pairs
+            )
+        else:
+            video_material = _make_video_material(
+                draft,
+                mock_video,
+                request.project.source_video,
+                total_duration,
+                mock_media,
+            )
+            source_video_duration = min(
+                total_duration,
+                _material_duration_seconds(video_material, total_duration),
+            )
         if source_video_duration <= 0:
             raise ValueError("Lite mode requires a positive source video-stream duration.")
         video_delete_window_items = [
@@ -2341,57 +2820,231 @@ def execute_lite_revision_request(
             _complement_windows(video_delete_windows, source_video_duration),
             request.pause_adjustments,
         )
-        for keep_start, keep_end in keep_video_windows:
-            _add_video_segment(
-                project,
-                draft,
-                video_material,
-                track_name=LITE_TRACKS["original_video"],
-                timeline_start=_map_lite_source_time(
+        if pair_mode:
+            for keep_start, keep_end in keep_video_windows:
+                for pair, local_start, local_end, global_start in _pair_intersections(
+                    source_pairs,
                     keep_start,
+                    keep_end,
+                    duration_field="video_stream_duration",
+                ):
+                    _add_video_segment(
+                        project,
+                        draft,
+                        pair.video_material,
+                        track_name=LITE_TRACKS["original_video"],
+                        timeline_start=_map_lite_source_time(
+                            global_start,
+                            request.pause_adjustments,
+                            include_at_point=True,
+                        ),
+                        source_start=local_start,
+                        duration=local_end - local_start,
+                        volume=0.0,
+                    )
+            for window in video_delete_window_items:
+                for pair, local_start, local_end, global_start in _pair_intersections(
+                    source_pairs,
+                    window.start,
+                    window.end,
+                    duration_field="video_stream_duration",
+                ):
+                    target_start = _map_lite_source_time(
+                        global_start,
+                        request.pause_adjustments,
+                        include_at_point=True,
+                    )
+                    cut_segment = _add_video_segment(
+                        project,
+                        draft,
+                        pair.video_material,
+                        track_name=LITE_TRACKS["cut_segments"],
+                        timeline_start=target_start,
+                        source_start=local_start,
+                        duration=local_end - local_start,
+                        volume=0.0,
+                    )
+                    segment_receipts.append(
+                        {
+                            "item_id": window.item_id,
+                            "kind": "cut",
+                            "track_name": LITE_TRACKS["cut_segments"],
+                            "segment_id": str(getattr(cut_segment, "segment_id", "")),
+                            "material_id": str(getattr(cut_segment, "material_id", "")),
+                            "source_start": global_start,
+                            "pair_index": pair.pair_index,
+                            "local_source_start": local_start,
+                            "timeline_start": target_start,
+                            "duration": local_end - local_start,
+                            "reuse_audio": True,
+                        }
+                    )
+        else:
+            for keep_start, keep_end in keep_video_windows:
+                _add_video_segment(
+                    project,
+                    draft,
+                    video_material,
+                    track_name=LITE_TRACKS["original_video"],
+                    timeline_start=_map_lite_source_time(
+                        keep_start,
+                        request.pause_adjustments,
+                        include_at_point=True,
+                    ),
+                    source_start=keep_start,
+                    duration=keep_end - keep_start,
+                    volume=0.0,
+                )
+
+            for window in video_delete_window_items:
+                target_start = _map_lite_source_time(
+                    window.start,
                     request.pause_adjustments,
                     include_at_point=True,
-                ),
-                source_start=keep_start,
-                duration=keep_end - keep_start,
-                volume=0.0,
-            )
-
-        for window in video_delete_window_items:
-            target_start = _map_lite_source_time(
-                window.start,
-                request.pause_adjustments,
-                include_at_point=True,
-            )
-            cut_segment = _add_video_segment(
-                project,
-                draft,
-                video_material,
-                track_name=LITE_TRACKS["cut_segments"],
-                timeline_start=target_start,
-                source_start=window.start,
-                duration=window.end - window.start,
-                volume=0.0,
-            )
-            segment_receipts.append(
-                {
-                    "item_id": window.item_id,
-                    "kind": "cut",
-                    "track_name": LITE_TRACKS["cut_segments"],
-                    "segment_id": str(getattr(cut_segment, "segment_id", "")),
-                    "material_id": str(getattr(cut_segment, "material_id", "")),
-                    "source_start": window.start,
-                    "timeline_start": target_start,
-                    "duration": window.end - window.start,
-                    "reuse_audio": True,
-                }
-            )
+                )
+                cut_segment = _add_video_segment(
+                    project,
+                    draft,
+                    video_material,
+                    track_name=LITE_TRACKS["cut_segments"],
+                    timeline_start=target_start,
+                    source_start=window.start,
+                    duration=window.end - window.start,
+                    volume=0.0,
+                )
+                segment_receipts.append(
+                    {
+                        "item_id": window.item_id,
+                        "kind": "cut",
+                        "track_name": LITE_TRACKS["cut_segments"],
+                        "segment_id": str(getattr(cut_segment, "segment_id", "")),
+                        "material_id": str(getattr(cut_segment, "material_id", "")),
+                        "source_start": window.start,
+                        "timeline_start": target_start,
+                        "duration": window.end - window.start,
+                        "reuse_audio": True,
+                    }
+                )
 
         audio_path = request.project.source_audio or request.project.source_video
         audio_material = None
         audio_duration = total_duration
         source_audio_duration = total_duration
-        if segmented_audio_delivery:
+        if pair_mode:
+            # Each pair owns its own source audio material.  Kept A1 clips and
+            # deleted A2 reference clips use local source clocks, while their
+            # target positions remain on the cumulative timeline.
+            audio_delete_items = [
+                _LiteDeleteWindow(
+                    window.item_id,
+                    window.start,
+                    min(window.end, total_duration),
+                )
+                for window in delete_window_items
+                if window.start < total_duration
+                and min(window.end, total_duration) - window.start > 1e-6
+            ]
+            audio_delete_windows = [
+                (window.start, window.end) for window in audio_delete_items
+            ]
+            keep_audio_windows = _split_lite_source_windows(
+                _complement_windows(audio_delete_windows, total_duration),
+                request.pause_adjustments,
+            )
+            for keep_start, keep_end in keep_audio_windows:
+                for pair, local_start, local_end, global_start in _pair_intersections(
+                    source_pairs,
+                    keep_start,
+                    keep_end,
+                    duration_field="source_audio_duration",
+                ):
+                    _add_audio_segment(
+                        project,
+                        draft,
+                        pair.source_audio_material,
+                        track_name=LITE_TRACKS["source_audio"],
+                        timeline_start=_map_lite_source_time(
+                            global_start,
+                            request.pause_adjustments,
+                            include_at_point=True,
+                        ),
+                        source_start=local_start,
+                        duration=local_end - local_start,
+                        volume=0.0 if pair.audio_mode == "replace_original" else 1.0,
+                    )
+            if audio_delete_items:
+                project.script.add_track(draft.TrackType.audio, LITE_TRACKS["reused_audio"])
+                for window in audio_delete_items:
+                    for pair, local_start, local_end, global_start in _pair_intersections(
+                        source_pairs,
+                        window.start,
+                        window.end,
+                        duration_field="source_audio_duration",
+                    ):
+                        target_start = _map_lite_source_time(
+                            global_start,
+                            request.pause_adjustments,
+                            include_at_point=True,
+                        )
+                        audio_segment = _add_audio_segment(
+                            project,
+                            draft,
+                            pair.source_audio_material,
+                            track_name=LITE_TRACKS["reused_audio"],
+                            timeline_start=target_start,
+                            source_start=local_start,
+                            duration=local_end - local_start,
+                        )
+                        segment_receipts.append(
+                            {
+                                "item_id": window.item_id,
+                                "kind": "reused_audio",
+                                "track_name": LITE_TRACKS["reused_audio"],
+                                "segment_id": str(getattr(audio_segment, "segment_id", "")),
+                                "material_id": str(getattr(audio_segment, "material_id", "")),
+                                "source_start": global_start,
+                                "pair_index": pair.pair_index,
+                                "local_source_start": local_start,
+                                "timeline_start": target_start,
+                                "duration": local_end - local_start,
+                                "volume": 1.0,
+                            }
+                        )
+                reused_audio_expected = True
+            else:
+                reused_audio_expected = False
+            if any(pair.audio_mode == "replace_original" for pair in source_pairs):
+                for pair in source_pairs:
+                    replacement_segment = _add_audio_segment(
+                        project,
+                        draft,
+                        pair.replacement_audio_material,
+                        track_name="Replacement Audio",
+                        timeline_start=pair.offset,
+                        source_start=0.0,
+                        duration=pair.duration,
+                        volume=1.0,
+                    )
+                    segment_receipts.append(
+                        {
+                            "item_id": f"source_pair_{pair.pair_index}",
+                            "kind": "replacement_audio",
+                            "track_name": "Replacement Audio",
+                            "segment_id": str(getattr(replacement_segment, "segment_id", "")),
+                            "material_id": str(getattr(replacement_segment, "material_id", "")),
+                            "pair_index": pair.pair_index,
+                            "source_start": 0.0,
+                            "timeline_start": pair.offset,
+                            "duration": pair.duration,
+                            "volume": 1.0,
+                        }
+                    )
+            audio_material = source_pairs[0].source_audio_material
+            audio_duration = total_duration
+            source_audio_duration = max(
+                pair.offset + pair.source_audio_duration for pair in source_pairs
+            )
+        elif segmented_audio_delivery:
             from utils.revision_runner import _write_segmented_audio_delivery
 
             _audio_track_names, audio_delivery_receipts = _write_segmented_audio_delivery(
@@ -2761,11 +3414,47 @@ def execute_lite_revision_request(
                 pause_adjustments=request.pause_adjustments,
                 pause_receipts=pause_receipts,
                 segment_receipts=segment_receipts,
-                source_video_material_id=str(
-                    getattr(video_material, "material_id", "")
-                ),
-                source_video_path=request.project.source_video,
-            )
+                    source_video_material_id=str(
+                        getattr(video_material, "material_id", "")
+                    ),
+                    source_video_path=request.project.source_video,
+                    source_video_material_ids=(
+                        [
+                            str(getattr(pair.video_material, "material_id", ""))
+                            for pair in source_pairs
+                        ]
+                        if pair_mode
+                        else None
+                    ),
+                    source_video_paths=(
+                        [pair.video_path for pair in source_pairs]
+                        if pair_mode
+                        else None
+                    ),
+                    source_audio_material_ids=(
+                        [
+                            str(getattr(pair.source_audio_material, "material_id", ""))
+                            for pair in source_pairs
+                        ]
+                        if pair_mode
+                        else None
+                    ),
+                    source_pair_offsets=(
+                        [pair.offset for pair in source_pairs]
+                        if pair_mode
+                        else None
+                    ),
+                    source_pair_video_durations=(
+                        [pair.video_stream_duration for pair in source_pairs]
+                        if pair_mode
+                        else None
+                    ),
+                    source_pair_audio_durations=(
+                        [pair.source_audio_duration for pair in source_pairs]
+                        if pair_mode
+                        else None
+                    ),
+                )
             validations.append((variant_name, variant_validation))
         primary_name, primary_validation = validations[0]
         validation = {
@@ -2889,6 +3578,9 @@ def execute_lite_revision_request(
             "label_only_unresolved_item_ids": unresolved_label_only_item_ids,
             "label_only_pause_item_ids": pause_label_only_item_ids,
             "localized_materials": localized_materials,
+            "source_pairs": (
+                _source_pair_result_rows(source_pairs) if pair_mode else []
+            ),
             "visual_overlay_results": visual_results,
             "review_marker_count": len(marker_receipt_dicts),
             "review_marker_receipts": marker_receipt_dicts,

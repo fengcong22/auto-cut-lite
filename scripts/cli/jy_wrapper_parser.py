@@ -282,6 +282,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Existing document snapshot JSON for the compatibility input mode",
     )
+    review_document_inputs.add_argument(
+        "--source-manifest",
+        dest="source_manifest_json",
+        default=None,
+        help="Taskboard-bound Feishu source manifest for a phased Auto-Cut run",
+    )
     p_review_document_run.add_argument(
         "--project-json",
         default=None,
@@ -317,6 +323,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="execution_input_json",
         default=None,
         help="Optional structured JSON containing artifact_name for this execution",
+    )
+    p_review_document_run.add_argument(
+        "--result-path",
+        dest="result_path",
+        default=None,
+        help="Optional server-owned path for the terminal Taskboard result receipt",
     )
     p_review_document_run.add_argument(
         "--mock-media",

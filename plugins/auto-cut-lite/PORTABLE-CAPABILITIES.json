@@ -67,7 +67,8 @@
         "runtime/scripts/utils/review_document_intake.py",
         "runtime/scripts/utils/review_document_runner.py",
         "runtime/scripts/utils/review_job_compiler.py",
-        "runtime/scripts/utils/review_job_pipeline.py"
+        "runtime/scripts/utils/review_job_pipeline.py",
+        "runtime/scripts/utils/source_manifest.py"
       ]
     },
     {
