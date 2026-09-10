@@ -6,8 +6,10 @@ import sys
 from pathlib import Path
 
 
-EXPECTED_ROOT = Path(r"E:\codex\Auto-cut-高中历史\worktrees\auto-cut-lite")
-EXPECTED_BRANCH = "feature/auto-cut-lite"
+PRIMARY_BRANCH = "main"
+RETIRED_BRANCHES = frozenset({"feature/auto-cut-lite"})
+PLUGIN_MANIFEST = Path("plugins/auto-cut-lite/.codex-plugin/plugin.json")
+CAPABILITY_MANIFEST = Path("plugins/auto-cut-lite/PORTABLE-CAPABILITIES.json")
 
 
 def _git(repo_root: Path, *args: str) -> str:
@@ -24,6 +26,33 @@ def _git(repo_root: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
+def _json_object(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _has_lite_repository_identity(repo_root: Path) -> bool:
+    plugin_path = repo_root / PLUGIN_MANIFEST
+    capability_path = repo_root / CAPABILITY_MANIFEST
+    if (
+        not plugin_path.is_file()
+        or plugin_path.is_symlink()
+        or not capability_path.is_file()
+        or capability_path.is_symlink()
+    ):
+        return False
+    plugin = _json_object(plugin_path)
+    capabilities = _json_object(capability_path)
+    return (
+        plugin.get("name") == "auto-cut-lite"
+        and capabilities.get("plugin_name") == "auto-cut-lite"
+        and capabilities.get("plugin_version") == plugin.get("version")
+    )
+
+
 def inspect_workspace(script_path: Path | None = None) -> dict[str, object]:
     source = (script_path or Path(__file__)).resolve()
     repo_root = source.parents[1]
@@ -37,10 +66,12 @@ def inspect_workspace(script_path: Path | None = None) -> dict[str, object]:
         problems.append("script_not_in_git_root")
     if working_directory != repo_root:
         problems.append("unexpected_working_directory")
-    if repo_root != EXPECTED_ROOT.resolve():
-        problems.append("unexpected_repository_root")
-    if branch != EXPECTED_BRANCH:
-        problems.append("unexpected_branch")
+    if not _has_lite_repository_identity(repo_root):
+        problems.append("unexpected_repository_identity")
+    if not branch:
+        problems.append("detached_head")
+    elif branch in RETIRED_BRANCHES:
+        problems.append("retired_legacy_branch")
 
     return {
         "ok": not problems,
@@ -48,6 +79,8 @@ def inspect_workspace(script_path: Path | None = None) -> dict[str, object]:
         "repository_root": str(repo_root),
         "working_directory": str(working_directory),
         "branch": branch,
+        "primary_branch": PRIMARY_BRANCH,
+        "branch_role": "primary" if branch == PRIMARY_BRANCH else "development",
         "workflow_mode": "lite",
         "git_status": status,
         "problems": problems,

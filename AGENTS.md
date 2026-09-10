@@ -1,5 +1,24 @@
 # Repository Instructions
 
+## Standalone Lite Repository Identity
+
+- This repository is the standalone `auto-cut-lite` source checkout. Its long-lived primary
+  branch is `main`; create ordinary `feature/*`, `fix/*`, or `codex/*` branches from `main` for
+  development and merge them back after review.
+- Before reading task inputs, compiling a review document, running an Auto-Cut command, or writing
+  task output for a Lite job, make the first repository command from the Git root:
+  ```powershell
+  python scripts/assert_lite_workspace.py
+  ```
+- Require exit code zero and JSON fields `ok=true`, `repository=auto-cut-lite`,
+  `primary_branch=main`, and `workflow_mode=lite`. Report the actual `branch`; both `main` and a
+  non-detached development branch are valid.
+- Repository identity comes from the checked-in Lite plugin and capability manifests, not an
+  absolute local path or directory-name similarity. The retired long-lived branch
+  `feature/auto-cut-lite` is rejected in this standalone checkout.
+- If identity validation fails, stop before task execution. Never search for or fall back to an
+  Auto-Cut 1.7.0 checkout, and never reuse intermediates from one.
+
 ## First-use Skill Installation
 
 - Before first using this package on a machine or after cloning/updating the repository, install the bundled repository skills locally:

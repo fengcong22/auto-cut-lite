@@ -17,15 +17,15 @@ SPEC.loader.exec_module(MODULE)
 
 
 class LiteWorkspaceIdentityTests(unittest.TestCase):
-    def test_current_lite_checkout_passes(self) -> None:
+    def test_current_standalone_lite_checkout_passes(self) -> None:
         result = MODULE.inspect_workspace()
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["repository"], "auto-cut-lite")
-        self.assertEqual(result["branch"], "feature/auto-cut-lite")
+        self.assertEqual(result["primary_branch"], "main")
         self.assertEqual(result["workflow_mode"], "lite")
 
-    def test_wrong_branch_fails_closed(self) -> None:
+    def test_main_is_the_primary_branch(self) -> None:
         real_git = MODULE._git
 
         def fake_git(repo_root: Path, *args: str) -> str:
@@ -36,8 +36,57 @@ class LiteWorkspaceIdentityTests(unittest.TestCase):
         with mock.patch.object(MODULE, "_git", side_effect=fake_git):
             result = MODULE.inspect_workspace()
 
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["branch_role"], "primary")
+
+    def test_development_branch_passes(self) -> None:
+        real_git = MODULE._git
+
+        def fake_git(repo_root: Path, *args: str) -> str:
+            if args == ("branch", "--show-current"):
+                return "codex/example-change"
+            return real_git(repo_root, *args)
+
+        with mock.patch.object(MODULE, "_git", side_effect=fake_git):
+            result = MODULE.inspect_workspace()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["branch_role"], "development")
+
+    def test_retired_legacy_branch_fails_closed(self) -> None:
+        real_git = MODULE._git
+
+        def fake_git(repo_root: Path, *args: str) -> str:
+            if args == ("branch", "--show-current"):
+                return "feature/auto-cut-lite"
+            return real_git(repo_root, *args)
+
+        with mock.patch.object(MODULE, "_git", side_effect=fake_git):
+            result = MODULE.inspect_workspace()
+
         self.assertFalse(result["ok"])
-        self.assertIn("unexpected_branch", result["problems"])
+        self.assertIn("retired_legacy_branch", result["problems"])
+
+    def test_detached_head_fails_closed(self) -> None:
+        real_git = MODULE._git
+
+        def fake_git(repo_root: Path, *args: str) -> str:
+            if args == ("branch", "--show-current"):
+                return ""
+            return real_git(repo_root, *args)
+
+        with mock.patch.object(MODULE, "_git", side_effect=fake_git):
+            result = MODULE.inspect_workspace()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("detached_head", result["problems"])
+
+    def test_wrong_repository_identity_fails_closed(self) -> None:
+        with mock.patch.object(MODULE, "_has_lite_repository_identity", return_value=False):
+            result = MODULE.inspect_workspace()
+
+        self.assertFalse(result["ok"])
+        self.assertIn("unexpected_repository_identity", result["problems"])
 
     def test_wrong_working_directory_fails_closed(self) -> None:
         with mock.patch.object(MODULE.Path, "cwd", return_value=ROOT.parent):
