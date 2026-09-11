@@ -32,6 +32,20 @@ _VIDEO_SUFFIXES = frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm"})
 _AUDIO_SUFFIXES = frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".wav"})
 _LARK_HOST_SUFFIXES = ("feishu.cn", "larksuite.com", "larkoffice.com")
 _ECMASCRIPT_TRIM_CHARS = "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_DOCX_CHINESE_NUMBER_CHARS = "零〇一二三四五六七八九十百千万两"
+# A hierarchical marker needs a visible separator after its final component.
+# This keeps text such as ``2.0时代`` from being treated as an auto-numbered
+# form of ``时代`` while still accepting normal headings such as ``3.1 标题``.
+_DOCX_LEADING_NUMBER_RE = re.compile(
+    rf"^(?:"
+    rf"\((?:[0-9]+|[{_DOCX_CHINESE_NUMBER_CHARS}]+)\)"
+    rf"|（(?:[0-9]+|[{_DOCX_CHINESE_NUMBER_CHARS}]+)）"
+    rf"|[{_DOCX_CHINESE_NUMBER_CHARS}]+[、.．]"
+    rf"|[0-9]+[、．]"
+    rf"|[0-9]+\.(?![0-9])"
+    rf"|[0-9]+(?:\.[0-9]+)+(?:[、:：.．)）]\s*|\s+)"
+    rf")\s*"
+)
 
 
 class SourceManifestError(ValueError):
@@ -454,6 +468,29 @@ def _is_attachment(block: Mapping[str, Any]) -> bool:
     return kind in {"attachment", "asset", "image", "video", "audio", "source", "img"} or bool(block.get("filename") or block.get("file_name")) and bool(block.get("mime") or block.get("content_type") or block.get("token"))
 
 
+def _strip_one_docx_leading_number(value: str) -> tuple[str, bool]:
+    text = str(value or "").strip()
+    match = _DOCX_LEADING_NUMBER_RE.match(text)
+    if match is None:
+        return text, False
+    return text[match.end() :].strip(), True
+
+
+def _docx_anchor_equivalent(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if left_text == right_text:
+        return True
+    left_body, left_stripped = _strip_one_docx_leading_number(left_text)
+    right_body, right_stripped = _strip_one_docx_leading_number(right_text)
+    return bool(
+        left_body
+        and right_body
+        and (left_stripped or right_stripped)
+        and left_body == right_body
+    )
+
+
 def _normalized_blocks(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw_blocks = document.get("blocks")
     if not isinstance(raw_blocks, list):
@@ -489,7 +526,7 @@ def select_docx_section(
     anchor_text: str,
     configured_anchors: Sequence[str] | set[str],
 ) -> DocxSectionSelection:
-    """Select one exact anchor range and preserve its document order."""
+    """Select one strict anchor range and preserve its document order."""
 
     anchor = str(anchor_text or "").strip()
     if not anchor:
@@ -499,7 +536,18 @@ def select_docx_section(
     blocks = _normalized_blocks(document)
     if not blocks:
         raise SourceManifestError("docx_anchor_missing", "the fetched document has no selectable blocks")
-    matches = [index for index, block in enumerate(blocks) if _block_text(block).strip() == anchor and not _is_attachment(block)]
+    selectable = [
+        (index, _block_text(block).strip())
+        for index, block in enumerate(blocks)
+        if not _is_attachment(block)
+    ]
+    matches = [index for index, text in selectable if text == anchor]
+    if not matches:
+        matches = [
+            index
+            for index, text in selectable
+            if _docx_anchor_equivalent(text, anchor)
+        ]
     if not matches:
         raise SourceManifestError("docx_anchor_missing", f"Docx anchor {anchor!r} was not found")
     if len(matches) > 1:
@@ -519,7 +567,10 @@ def select_docx_section(
     for index in range(start + 1, len(blocks)):
         candidate = blocks[index]
         text = _block_text(candidate).strip()
-        if text and text in anchors and not _is_attachment(candidate):
+        if text and not _is_attachment(candidate) and any(
+            _docx_anchor_equivalent(text, configured_anchor)
+            for configured_anchor in anchors
+        ):
             boundary = index
             break
         if _is_heading(candidate):

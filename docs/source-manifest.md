@@ -126,13 +126,25 @@ default. There is no bot/application fallback.
 ### Docx sections
 
 A `docx_section` descriptor contains one manually configured `anchor_text`.
-Matching is exact after trimming leading and trailing whitespace. The anchor
-must occur exactly once.
+Matching first uses the complete, case-sensitive text after trimming leading
+and trailing whitespace. A unique exact match always wins. If there is no exact
+match, the selector may remove at most one controlled leading section number
+from each side and then compare the complete remaining text. Supported forms
+include Chinese enumeration (`二、`), Arabic enumeration (`2.`), parenthesized
+enumeration (`（二）`, `(2)`), and hierarchical numbering (`3.1`). The fallback
+does not use substring, case folding, transliteration, edit distance, or other
+fuzzy matching. Zero fallback matches raise `docx_anchor_missing`; multiple
+fallback matches raise `docx_anchor_ambiguous`. The configured `anchor_text`
+remains unchanged in the manifest and selection receipt.
+
+Hierarchical numbers use whitespace or an enumeration separator before the
+title body. An unseparated version-like title such as `2.0时代` is ordinary
+title text and is not stripped as an automatic section number.
 
 The selected range begins after the anchor. Nested headings and their content
 remain in the range. Selection stops at the first of:
 
-- another configured anchor;
+- another configured anchor under the same exact/one-number fallback rule;
 - the next heading at the same or a higher level than an anchor heading; or
 - for a plain-text anchor, the next heading that closes its containing heading.
 
