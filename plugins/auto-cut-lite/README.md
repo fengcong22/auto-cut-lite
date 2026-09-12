@@ -26,6 +26,21 @@ ASR 按严格内容身份去重，中断后只恢复仍有效的阶段，缺失�
 透明度和图像尺寸等安全特征评分。同名素材也按同一规则自动复用；无可用候选时才降级为原文标签并继续，
 不会因常规多候选要求人工选择。
 
+## 版本身份
+
+Lite 插件与其内嵌核心是两种不同制品，版本独立演进：
+
+- `plugin_version` 是 Auto-Cut Lite 的发布、升级和 tag 身份；
+- `embedded_runtime` 明确记录包内复用的 `auto-cut` 核心版本；当前为 `1.7.0`；
+- `version_relationship=independent_embedded_core` 表示两者版本号不要求相同，升级排序只看
+  `plugin_version`。
+
+`.codex-plugin/plugin.json` 保存 Lite 插件身份；`PORTABLE-CAPABILITIES.json`、
+`PACKAGE-MANIFEST.json` 和构建回执保存内嵌核心映射，并与插件身份交叉校验。离线验包器与部署器
+还会核对 `runtime/VERSION`、
+`runtime/pyproject.toml` 的项目名/版本及 runtime capability schema；声明或文件不一致时直接拒绝
+安装。这里的 `1.7.0` 是内嵌核心来源身份，不等于 Lite 插件版本，也不会把 Lite 升级成另一个产品。
+
 本版采用“合并工作区 + 独立运行时”模式：
 
 - 新手只需“全部解压”，再双击 `一键安装或升级-Auto-Cut-Lite.cmd`；默认使用国内镜像。

@@ -536,16 +536,16 @@ def select_docx_section(
     blocks = _normalized_blocks(document)
     if not blocks:
         raise SourceManifestError("docx_anchor_missing", "the fetched document has no selectable blocks")
-    selectable = [
+    selectable_headings = [
         (index, _block_text(block).strip())
         for index, block in enumerate(blocks)
-        if not _is_attachment(block)
+        if _is_heading(block)
     ]
-    matches = [index for index, text in selectable if text == anchor]
+    matches = [index for index, text in selectable_headings if text == anchor]
     if not matches:
         matches = [
             index
-            for index, text in selectable
+            for index, text in selectable_headings
             if _docx_anchor_equivalent(text, anchor)
         ]
     if not matches:
@@ -554,36 +554,30 @@ def select_docx_section(
         raise SourceManifestError("docx_anchor_ambiguous", f"Docx anchor {anchor!r} matched more than once")
     start = matches[0]
     start_block = blocks[start]
-    start_level = _block_level(start_block) if _is_heading(start_block) else None
-    # For a plain label, discover its containing heading.  A subsequent heading
-    # at that level or above closes the range.
-    containing_level: int | None = None
-    if start_level is None:
-        for previous in reversed(blocks[:start]):
-            if _is_heading(previous):
-                containing_level = _block_level(previous)
-                break
+    start_level = _block_level(start_block)
     boundary = len(blocks)
     for index in range(start + 1, len(blocks)):
         candidate = blocks[index]
+        if not _is_heading(candidate):
+            continue
+        level = _block_level(candidate)
+        # A configured anchor nested below the selected heading remains part
+        # of that section.  Text equivalence must not override the structural
+        # same-or-higher heading boundary.
+        if start_level is not None and level is not None and level > start_level:
+            continue
         text = _block_text(candidate).strip()
-        if text and not _is_attachment(candidate) and any(
+        if text and any(
             _docx_anchor_equivalent(text, configured_anchor)
             for configured_anchor in anchors
         ):
             boundary = index
             break
-        if _is_heading(candidate):
-            level = _block_level(candidate)
-            if start_level is not None and level is not None and level <= start_level:
-                boundary = index
-                break
-            if start_level is None and containing_level is not None and level is not None and level <= containing_level:
-                boundary = index
-                break
-            if start_level is None and containing_level is None:
-                boundary = index
-                break
+        # Unknown levels cannot prove nesting, so stop at that structural
+        # heading instead of leaking material into a later section.
+        if start_level is None or level is None or level <= start_level:
+            boundary = index
+            break
     selected = blocks[start + 1 : boundary]
     text_rows: list[dict[str, Any]] = []
     attachments: list[dict[str, Any]] = []

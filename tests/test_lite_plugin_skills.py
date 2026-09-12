@@ -262,6 +262,11 @@ def test_portable_capability_contract_requires_named_marketplace_and_split_runti
         (PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
     )
     assert payload["plugin_version"] == manifest["version"]
+    assert payload["embedded_runtime"] == {
+        "name": "auto-cut",
+        "version": "1.7.0",
+        "version_relationship": "independent_embedded_core",
+    }
     assert payload["marketplace"] == {
         "name": "auto-cut-lite-marketplace",
         "display_name": "Auto-Cut Lite",

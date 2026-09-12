@@ -39,6 +39,29 @@ def _stage_package(
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
     )
 
+    runtime = root / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    (runtime / "VERSION").write_text(
+        build_lite_plugin.EMBEDDED_RUNTIME_VERSION + "\n", encoding="utf-8"
+    )
+    (runtime / "pyproject.toml").write_text(
+        f'[project]\nname = "{build_lite_plugin.EMBEDDED_RUNTIME_NAME}"\n'
+        f'version = "{build_lite_plugin.EMBEDDED_RUNTIME_VERSION}"\n',
+        encoding="utf-8",
+    )
+    schema_path = runtime / "schemas" / "capability-manifest.schema.json"
+    schema_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(
+        schema_path,
+        {
+            "properties": {
+                "release_version": {
+                    "const": build_lite_plugin.EMBEDDED_RUNTIME_VERSION
+                }
+            }
+        },
+    )
+
     portable_path = root / "PORTABLE-CAPABILITIES.json"
     portable = json.loads(portable_path.read_text(encoding="utf-8"))
     for capability in portable["capabilities"]:
@@ -63,6 +86,11 @@ def _stage_package(
         {
             "name": build_lite_plugin.PLUGIN_NAME,
             "version": build_lite_plugin.PLUGIN_VERSION,
+            "embedded_runtime": {
+                "name": build_lite_plugin.EMBEDDED_RUNTIME_NAME,
+                "version": build_lite_plugin.EMBEDDED_RUNTIME_VERSION,
+                "version_relationship": build_lite_plugin.VERSION_RELATIONSHIP,
+            },
             "files": inventory,
         },
     )
@@ -82,6 +110,11 @@ def _stage_package(
             "archive_root": build_lite_plugin.WORKSPACE_NAME,
             "archive_sha256": _sha256(archive_path),
             "plugin_version": build_lite_plugin.PLUGIN_VERSION,
+            "embedded_runtime": {
+                "name": build_lite_plugin.EMBEDDED_RUNTIME_NAME,
+                "version": build_lite_plugin.EMBEDDED_RUNTIME_VERSION,
+                "version_relationship": build_lite_plugin.VERSION_RELATIONSHIP,
+            },
         },
     )
     return archive_path, receipt_path
@@ -102,6 +135,11 @@ def test_offline_validator_proves_workspace_skill_and_review_runtime_contract(
     result = validate(archive, receipt, tmp_path / "extract")
 
     assert result["status"] == "pass"
+    assert result["embedded_runtime"] == {
+        "name": "auto-cut",
+        "version": "1.7.0",
+        "version_relationship": "independent_embedded_core",
+    }
     assert result["portable_capability_closure"] == "pass"
     assert result["workspace_skill_count"] == 17
     assert result["workspace_skill_scope"] == "repo"
@@ -180,6 +218,43 @@ def _remove_review_runtime_declaration(root: Path) -> None:
     _mutate_json(root, "PORTABLE-CAPABILITIES.json", update)
 
 
+def _change_runtime_version_file(root: Path) -> None:
+    (root / "runtime" / "VERSION").write_text("9.9.9\n", encoding="utf-8")
+
+
+def _change_runtime_pyproject_version(root: Path) -> None:
+    (root / "runtime" / "pyproject.toml").write_text(
+        '[project]\nname = "auto-cut"\nversion = "9.9.9"\n',
+        encoding="utf-8",
+    )
+
+
+def _change_runtime_schema_version(root: Path) -> None:
+    _mutate_json(
+        root,
+        "runtime/schemas/capability-manifest.schema.json",
+        lambda payload: payload["properties"]["release_version"].__setitem__(
+            "const", "9.9.9"
+        ),
+    )
+
+
+def _change_declared_embedded_runtime(root: Path) -> None:
+    def update(payload: dict[str, object]) -> None:
+        runtime = payload["embedded_runtime"]
+        assert isinstance(runtime, dict)
+        runtime["version"] = "9.9.9"
+
+    _mutate_json(root, "PORTABLE-CAPABILITIES.json", update)
+
+
+def _change_runtime_project_name(root: Path) -> None:
+    (root / "runtime" / "pyproject.toml").write_text(
+        '[project]\nname = "auto-cut-lite"\nversion = "1.7.0"\n',
+        encoding="utf-8",
+    )
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -191,6 +266,11 @@ def _remove_review_runtime_declaration(root: Path) -> None:
         (_change_workspace_scope, "workspace installation contract is invalid"),
         (_change_workspace_label, "workspace installation contract is invalid"),
         (_remove_review_runtime_declaration, "omits required runtime paths"),
+        (_change_runtime_version_file, "runtime identity does not match"),
+        (_change_runtime_pyproject_version, "runtime identity does not match"),
+        (_change_runtime_schema_version, "runtime identity does not match"),
+        (_change_runtime_project_name, "runtime identity does not match"),
+        (_change_declared_embedded_runtime, "embedded-runtime identity is invalid"),
     ],
 )
 def test_offline_validator_rejects_self_consistent_but_invalid_deployment_contracts(
@@ -202,3 +282,15 @@ def test_offline_validator_rejects_self_consistent_but_invalid_deployment_contra
 
     with pytest.raises(ValueError, match=message):
         validate(archive, receipt, tmp_path / "extract")
+
+
+def test_offline_validator_rejects_package_receipt_embedded_runtime_mismatch(
+    tmp_path: Path,
+) -> None:
+    archive, receipt_path = _stage_package(tmp_path)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["embedded_runtime"]["version"] = "9.9.9"
+    _write_json(receipt_path, receipt)
+
+    with pytest.raises(ValueError, match="embedded-runtime identities do not match"):
+        validate(archive, receipt_path, tmp_path / "extract")

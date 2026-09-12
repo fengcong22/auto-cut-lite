@@ -228,12 +228,12 @@ def test_source_manifest_rejects_noncanonical_document_route(tmp_path, url):
         load_source_manifest(write_manifest(tmp_path, payload))
 
 
-def test_heading_anchor_stops_before_the_next_configured_label():
+def test_heading_anchor_stops_before_the_next_configured_heading():
     document = {
         "blocks": [
             {"kind": "heading", "level": 2, "text": "录屏"},
             {"kind": "attachment", "filename": "video.mp4", "mime": "video/mp4"},
-            {"kind": "text", "text": "录音"},
+            {"kind": "heading", "level": 2, "text": "录音"},
             {"kind": "attachment", "filename": "voice.wav", "mime": "audio/wav"},
         ]
     }

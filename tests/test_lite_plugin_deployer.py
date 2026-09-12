@@ -423,6 +423,11 @@ def test_deployer_preserves_the_previous_committed_report_after_complete_rollbac
     assert "workspaceReceipt.installed_package_sha256.'PACKAGE-MANIFEST.json'" in deployer
     assert "runtime/scripts/utils/runtime_integrity.py" in deployer
     assert "'.runtime-venv\\Scripts\\python.exe'" in deployer
+    assert "runtime/VERSION" in deployer
+    assert "runtime/pyproject.toml" in deployer
+    assert "runtime/schemas/capability-manifest.schema.json" in deployer
+    assert "function Test-ExactJsonString" in deployer
+    assert "function Test-LegacyVersionWithoutRuntimeIdentity" in deployer
     capture_index = deployer.index("$previousInstalledReport = Get-PreservableDeploymentReport")
     mutation_index = deployer.index("Copy-InventoriedPackage", capture_index)
     failed_index = deployer.index("$report.deployment_status = 'failed'", mutation_index)
@@ -469,6 +474,28 @@ def test_deployer_requires_a_verified_baseline_for_in_place_redeployment() -> No
     assert "requires a verified previous installed report" in deployer[
         guard_index:package_validation_index
     ]
+
+
+def test_deployer_bounds_runtime_pyproject_identity_to_the_project_table() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    assert "foreach ($line in ($runtimePyproject -split '\\r?\\n'))" in deployer
+    assert "if ($line -match '^[ \\t]*\\[')" in deployer
+    assert "(?ms)^\\[project\\]\\s.*?^version" not in deployer
+
+
+def test_deployer_requires_identity_files_in_the_package_inventory() -> None:
+    deployer = DEPLOYER_PATH.read_text(encoding="utf-8")
+
+    required_start = deployer.index("foreach ($required in @(")
+    required_end = deployer.index("    ))", required_start)
+    required_block = deployer[required_start:required_end]
+    for relative in (
+        "runtime/VERSION",
+        "runtime/pyproject.toml",
+        "runtime/schemas/capability-manifest.schema.json",
+    ):
+        assert relative in required_block
 
 
 def test_deployer_removes_all_verified_owned_backups_after_success_report() -> None:
@@ -1048,6 +1075,13 @@ def test_in_place_redeploy_retries_first_installed_report_failure_after_commit(
     ).lstrip()
 
     portable_contract = {
+        "plugin_name": "auto-cut-lite",
+        "plugin_version": "1.6.0-test",
+        "embedded_runtime": {
+            "name": "auto-cut",
+            "version": "1.7.0",
+            "version_relationship": "independent_embedded_core",
+        },
         "workspace_installation": {
             "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
             "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
@@ -1073,6 +1107,11 @@ def test_in_place_redeploy_retries_first_installed_report_failure_after_commit(
         "installer/uninstall_auto_cut_lite.ps1": b"# fixture\n",
         "runtime/requirements.txt": b"fixture==1.0\n",
         "runtime/requirements-audio.lock": b"audio-fixture==1.0\n",
+        "runtime/VERSION": b"1.7.0\n",
+        "runtime/pyproject.toml": b'[project]\nname = "auto-cut"\nversion = "1.7.0"\n',
+        "runtime/schemas/capability-manifest.schema.json": json.dumps(
+            {"properties": {"release_version": {"const": "1.7.0"}}}
+        ).encode(),
         "runtime/scripts/utils/runtime_integrity.py": b"# integrity anchor\n",
         "runtime/scripts/jy_wrapper.py": b"# runtime entry anchor\n",
     }
@@ -1098,7 +1137,12 @@ def test_in_place_redeploy_retries_first_installed_report_failure_after_commit(
     package_manifest_path = target_root / "PACKAGE-MANIFEST.json"
     package_manifest_path.write_text(
         json.dumps(
-            {"name": "auto-cut-lite", "version": "1.6.0-test", "files": manifest_rows}
+            {
+                "name": "auto-cut-lite",
+                "version": "1.6.0-test",
+                "embedded_runtime": portable_contract["embedded_runtime"],
+                "files": manifest_rows,
+            }
         ),
         encoding="utf-8",
     )
@@ -1415,6 +1459,13 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         "AGENTS.md": b"# Portable workspace rules\n",
         "PORTABLE-CAPABILITIES.json": json.dumps(
             {
+                "plugin_name": "auto-cut-lite",
+                "plugin_version": "1.3.0",
+                "embedded_runtime": {
+                    "name": "auto-cut",
+                    "version": "1.7.0",
+                    "version_relationship": "independent_embedded_core",
+                },
                 "workspace_installation": {
                     "beginner_guide": "Auto-Cut-Lite新手部署说明.md",
                     "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
@@ -1434,6 +1485,11 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         "installer/uninstall_auto_cut_lite.ps1": b"# validation fixture\n",
         "runtime/requirements.txt": b"# validation fixture\n",
         "runtime/requirements-audio.lock": b"# validation fixture\n",
+        "runtime/VERSION": b"1.7.0\n",
+        "runtime/pyproject.toml": b'[project]\nname = "auto-cut"\nversion = "1.7.0"\n',
+        "runtime/schemas/capability-manifest.schema.json": json.dumps(
+            {"properties": {"release_version": {"const": "1.7.0"}}}
+        ).encode(),
     }
     for skill_name in sorted(build_lite_plugin.EXPECTED_SKILLS):
         files[f"workspace-payload/skills/{skill_name}/SKILL.md"] = (
@@ -1456,7 +1512,18 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
         for relative, data in sorted(files.items())
     ]
     (package / "PACKAGE-MANIFEST.json").write_text(
-        json.dumps({"name": "auto-cut-lite", "version": "1.3.0", "files": manifest_rows}),
+        json.dumps(
+            {
+                "name": "auto-cut-lite",
+                "version": "1.3.0",
+                "embedded_runtime": {
+                    "name": "auto-cut",
+                    "version": "1.7.0",
+                    "version_relationship": "independent_embedded_core",
+                },
+                "files": manifest_rows,
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -1494,6 +1561,9 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert "package_validation=pass" in result.stdout
     assert "environment_validation=pass" in result.stdout
     assert "plugin_version=1.3.0" in result.stdout
+    assert "embedded_runtime_name=auto-cut" in result.stdout
+    assert "embedded_runtime_version=1.7.0" in result.stdout
+    assert "version_relationship=independent_embedded_core" in result.stdout
     assert "python_version=3.11." in result.stdout
     assert "python_bits=64" in result.stdout
     assert "audio_runtime=required_separate" in result.stdout
@@ -1565,6 +1635,73 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     else:
         assert "workspace_root_source=existing_receipt" in fallback.stdout
 
+    manifest_path = package / "PACKAGE-MANIFEST.json"
+    original_manifest = manifest_path.read_bytes()
+
+    manifest = json.loads(original_manifest.decode())
+    manifest["files"] = [
+        row for row in manifest["files"] if row["path"] != "runtime/VERSION"
+    ]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    missing_identity_inventory = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-ValidateOnly",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=process_environment,
+        check=False,
+    )
+    assert missing_identity_inventory.returncode != 0
+    assert "runtime/VERSION" in (
+        missing_identity_inventory.stdout + missing_identity_inventory.stderr
+    )
+
+    manifest_path.write_bytes(original_manifest)
+    malformed_pyproject = package / "runtime" / "pyproject.toml"
+    malformed_pyproject.write_text(
+        '[project]\ndescription = "missing identity fields"\n'
+        '[tool.fake]\nname = "auto-cut"\nversion = "1.7.0"\n',
+        encoding="utf-8",
+    )
+    manifest = json.loads(original_manifest.decode())
+    pyproject_row = next(
+        row for row in manifest["files"] if row["path"] == "runtime/pyproject.toml"
+    )
+    pyproject_bytes = malformed_pyproject.read_bytes()
+    pyproject_row["size"] = len(pyproject_bytes)
+    pyproject_row["sha256"] = hashlib.sha256(pyproject_bytes).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    cross_table_identity = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(deployer),
+            "-ValidateOnly",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=process_environment,
+        check=False,
+    )
+    assert cross_table_identity.returncode != 0
+    assert "runtime pyproject identity is missing" in (
+        cross_table_identity.stdout + cross_table_identity.stderr
+    )
+
 
 def test_plugin_and_builder_versions_match() -> None:
     plugin_manifest = json.loads(
@@ -1582,6 +1719,11 @@ def test_plugin_and_builder_versions_match() -> None:
     )
     assert f'PLUGIN_VERSION = "{plugin_manifest["version"]}"' in builder
     assert capabilities["plugin_version"] == plugin_manifest["version"]
+    assert capabilities["embedded_runtime"] == {
+        "name": "auto-cut",
+        "version": "1.7.0",
+        "version_relationship": "independent_embedded_core",
+    }
 
 
 def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> None:
@@ -1590,6 +1732,11 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
     receipt = build_lite_plugin.build(REPO_ROOT, output, require_clean=False)
 
     assert receipt["archive_root"] == "Auto-cut-lite"
+    assert receipt["embedded_runtime"] == {
+        "name": "auto-cut",
+        "version": "1.7.0",
+        "version_relationship": "independent_embedded_core",
+    }
     assert receipt["workspace_mode"] == "combined_package_workspace"
     assert receipt["workspace_root_default"] == "extracted_package_root"
     assert receipt["workspace_root_precedence"] == (
@@ -1606,6 +1753,16 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
     assert isinstance(receipt["source_git_clean"], bool)
     with zipfile.ZipFile(output) as archive:
         names = archive.namelist()
+        packaged_runtime_version = archive.read("Auto-cut-lite/runtime/VERSION").decode().strip()
+        packaged_pyproject = archive.read("Auto-cut-lite/runtime/pyproject.toml").decode()
+        packaged_schema = json.loads(
+            archive.read(
+                "Auto-cut-lite/runtime/schemas/capability-manifest.schema.json"
+            ).decode()
+        )
+        packaged_manifest = json.loads(
+            archive.read("Auto-cut-lite/PACKAGE-MANIFEST.json").decode()
+        )
     assert names
     assert {name.split("/", 1)[0] for name in names} == {"Auto-cut-lite"}
     assert "Auto-cut-lite/Auto-Cut-Lite新手部署说明.md" in names
@@ -1617,6 +1774,13 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
     assert "Auto-cut-lite/CODEX_NEXT_STEPS.md" not in names
     assert "Auto-cut-lite/installer/one_click_deploy.ps1" in names
     assert "Auto-cut-lite/PACKAGE-MANIFEST.json" in names
+    assert packaged_runtime_version == build_lite_plugin.EMBEDDED_RUNTIME_VERSION
+    assert f'version = "{build_lite_plugin.EMBEDDED_RUNTIME_VERSION}"' in packaged_pyproject
+    assert (
+        packaged_schema["properties"]["release_version"]["const"]
+        == build_lite_plugin.EMBEDDED_RUNTIME_VERSION
+    )
+    assert packaged_manifest["embedded_runtime"] == receipt["embedded_runtime"]
     assert not any(name.startswith("auto-cut-lite/") for name in names)
 
 

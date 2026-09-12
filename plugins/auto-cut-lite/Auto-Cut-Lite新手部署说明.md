@@ -88,6 +88,12 @@ Auto-Cut 的 `Personal` 重复项。
 `readiness=pending_user_configuration` 通常不代表部署失败，只表示剪映、FFmpeg、飞书用户授权或
 ASR 本机凭据还需要在新线程中配置。
 
+部署器还会分别输出 `plugin_version`、`embedded_runtime_name`、`embedded_runtime_version` 和
+`version_relationship`。Lite 升级版本以 `plugin_version` 为准；当前内嵌核心声明为
+`auto-cut 1.7.0`，两条版本线独立演进。安装前会同时核对包清单、便携能力清单、
+`runtime/VERSION`、`runtime/pyproject.toml` 和 runtime capability schema。声明与实际文件不一致
+会停止部署，不会覆盖已安装版本。
+
 部署成功并确认 Codex 能打开稳定工作区后，如果最初是在另一个位置临时解压，那个临时解压目录、
 下载的 ZIP 和 `.zip.receipt.json` 都可以删除。不要删除 `workspace_root`，也不要删除
 `%LOCALAPPDATA%\Auto-Cut\auto-cut-lite`。

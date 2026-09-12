@@ -15,7 +15,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from scripts.release.build_lite_plugin import (
+    EMBEDDED_RUNTIME_NAME,
+    EMBEDDED_RUNTIME_VERSION,
     PLUGIN_NAME,
+    VERSION_RELATIONSHIP,
     WORKSPACE_NAME,
     _privacy_scan,
     _validate_portable_capabilities,
@@ -147,6 +150,15 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
         raise ValueError("package and plugin versions do not match")
     if receipt.get("plugin_version") != manifest.get("version"):
         raise ValueError("receipt and package versions do not match")
+    expected_runtime = {
+        "name": EMBEDDED_RUNTIME_NAME,
+        "version": EMBEDDED_RUNTIME_VERSION,
+        "version_relationship": VERSION_RELATIONSHIP,
+    }
+    if manifest.get("embedded_runtime") != expected_runtime:
+        raise ValueError("package embedded-runtime identity is invalid")
+    if receipt.get("embedded_runtime") != manifest.get("embedded_runtime"):
+        raise ValueError("receipt and package embedded-runtime identities do not match")
 
     rows = manifest.get("files")
     if not isinstance(rows, list) or not rows:
@@ -183,6 +195,7 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
         "status": "pass",
         "plugin_name": PLUGIN_NAME,
         "plugin_version": manifest["version"],
+        "embedded_runtime": manifest["embedded_runtime"],
         "archive_sha256": archive_sha256,
         "archive_entry_count": len(names),
         "manifest_file_count": len(inventory),

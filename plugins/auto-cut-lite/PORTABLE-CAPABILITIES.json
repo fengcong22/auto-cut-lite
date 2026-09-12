@@ -1,7 +1,12 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.8+codex.20260911132555",
+  "plugin_version": "1.6.8+codex.20260913021152",
+  "embedded_runtime": {
+    "name": "auto-cut",
+    "version": "1.7.0",
+    "version_relationship": "independent_embedded_core"
+  },
   "marketplace": {
     "name": "auto-cut-lite-marketplace",
     "display_name": "Auto-Cut Lite"

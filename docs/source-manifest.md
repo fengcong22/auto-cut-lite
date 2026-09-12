@@ -126,16 +126,19 @@ default. There is no bot/application fallback.
 ### Docx sections
 
 A `docx_section` descriptor contains one manually configured `anchor_text`.
-Matching first uses the complete, case-sensitive text after trimming leading
-and trailing whitespace. A unique exact match always wins. If there is no exact
-match, the selector may remove at most one controlled leading section number
-from each side and then compare the complete remaining text. Supported forms
-include Chinese enumeration (`二、`), Arabic enumeration (`2.`), parenthesized
-enumeration (`（二）`, `(2)`), and hierarchical numbering (`3.1`). The fallback
-does not use substring, case folding, transliteration, edit distance, or other
-fuzzy matching. Zero fallback matches raise `docx_anchor_missing`; multiple
-fallback matches raise `docx_anchor_ambiguous`. The configured `anchor_text`
-remains unchanged in the manifest and selection receipt.
+Only structural heading blocks are eligible anchors; paragraph text, checkbox
+content, attachment captions, and other body blocks are ignored even when their
+text is identical. Matching first uses the complete, case-sensitive heading
+text after trimming leading and trailing whitespace. A unique exact match
+always wins. If there is no exact match, the selector may remove at most one
+controlled leading section number from each side and then compare the complete
+remaining text. Supported forms include Chinese enumeration (`二、`), Arabic
+enumeration (`2.`), parenthesized enumeration (`（二）`, `(2)`), and hierarchical
+numbering (`3.1`). The fallback does not use substring, case folding,
+transliteration, edit distance, or other fuzzy matching. Zero fallback matches
+raise `docx_anchor_missing`; multiple fallback matches raise
+`docx_anchor_ambiguous`. The configured `anchor_text` remains unchanged in the
+manifest and selection receipt.
 
 Hierarchical numbers use whitespace or an enumeration separator before the
 title body. An unseparated version-like title such as `2.0时代` is ordinary
@@ -144,9 +147,16 @@ title text and is not stripped as an automatic section number.
 The selected range begins after the anchor. Nested headings and their content
 remain in the range. Selection stops at the first of:
 
-- another configured anchor under the same exact/one-number fallback rule;
-- the next heading at the same or a higher level than an anchor heading; or
-- for a plain-text anchor, the next heading that closes its containing heading.
+- another configured structural heading under the same exact/one-number
+  fallback rule, when it is at the same or a higher level; or
+- the next structural heading at the same or a higher level, whether or not its
+  text is a configured anchor.
+
+A configured heading nested below the selected heading does not close the
+section. Body text and checkboxes never close a section merely because they
+equal a configured anchor. If structural heading metadata omits a usable level,
+the next structural heading closes the range rather than allowing the range to
+leak into a later section.
 
 Every attachment in a selected media range is downloaded in document order.
 Original filenames are retained; a local collision receives `_2`, `_3`, and so

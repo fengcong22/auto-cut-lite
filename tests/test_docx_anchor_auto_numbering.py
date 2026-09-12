@@ -187,6 +187,116 @@ def test_manifest_and_selection_preserve_the_original_numbered_anchor(tmp_path, 
     assert selected.anchor_text == original_anchor
 
 
+@pytest.mark.parametrize("kind", ["text", "checkbox"])
+@pytest.mark.parametrize(
+    ("anchor", "body_text"),
+    [
+        ("视频", "视频"),
+        ("二、视频", "视频"),
+    ],
+)
+def test_non_heading_blocks_never_satisfy_a_start_anchor(kind, anchor, body_text):
+    document = {
+        "blocks": [
+            {"kind": "heading", "level": 1, "text": "说明"},
+            {"kind": kind, "text": body_text},
+            {
+                "kind": "attachment",
+                "filename": "wrong.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 1, "text": "下一章"},
+        ]
+    }
+
+    with pytest.raises(SourceManifestError) as raised:
+        select_docx_section(document, anchor, {anchor})
+
+    assert raised.value.code == "docx_anchor_missing"
+
+
+@pytest.mark.parametrize(
+    ("kind", "anchor", "body_text", "heading_text"),
+    [
+        ("text", "视频", "视频", "视频"),
+        ("checkbox", "二、视频", "二、视频", "视频"),
+    ],
+)
+def test_real_heading_wins_over_same_text_in_an_earlier_body_block(
+    kind,
+    anchor,
+    body_text,
+    heading_text,
+):
+    document = {
+        "blocks": [
+            {"kind": "heading", "level": 1, "text": "说明"},
+            {"kind": kind, "text": body_text},
+            {
+                "kind": "attachment",
+                "filename": "wrong.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 1, "text": "课程素材"},
+            {"kind": "heading", "level": 2, "text": heading_text},
+            {
+                "kind": "attachment",
+                "filename": "right.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 2, "text": "下一节"},
+        ]
+    }
+
+    selected = select_docx_section(document, anchor, {anchor})
+
+    assert [row["filename"] for row in selected.attachments] == ["right.mp4"]
+
+
+@pytest.mark.parametrize("kind", ["text", "checkbox"])
+@pytest.mark.parametrize(
+    ("next_anchor", "body_text"),
+    [
+        ("剪辑意见", "剪辑意见"),
+        ("(2) 剪辑意见", "剪辑意见"),
+    ],
+)
+def test_non_heading_blocks_never_close_a_section_as_configured_anchors(
+    kind,
+    next_anchor,
+    body_text,
+):
+    document = {
+        "blocks": [
+            {"kind": "heading", "level": 2, "text": "视频"},
+            {
+                "kind": "attachment",
+                "filename": "first.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": kind, "text": body_text},
+            {
+                "kind": "attachment",
+                "filename": "second.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 2, "text": "下一节"},
+            {
+                "kind": "attachment",
+                "filename": "outside.mp4",
+                "mime": "video/mp4",
+            },
+        ]
+    }
+
+    selected = select_docx_section(document, "视频", {"视频", next_anchor})
+
+    assert [row["filename"] for row in selected.attachments] == [
+        "first.mp4",
+        "second.mp4",
+    ]
+
+
 @pytest.mark.parametrize(
     ("role", "anchor", "next_anchor", "start_text", "next_text"),
     [
@@ -195,7 +305,7 @@ def test_manifest_and_selection_preserve_the_original_numbered_anchor(tmp_path, 
         ("docx_audio", "3.1 配音", "二、视频", "配音", "视频"),
     ],
 )
-def test_number_equivalent_configured_anchor_closes_each_plain_label_section(
+def test_number_equivalent_configured_heading_closes_each_section(
     role,
     anchor,
     next_anchor,
@@ -204,9 +314,9 @@ def test_number_equivalent_configured_anchor_closes_each_plain_label_section(
 ):
     document = {
         "blocks": [
-            {"kind": "text", "text": start_text},
+            {"kind": "heading", "level": 2, "text": start_text},
             {"kind": "text", "text": f"inside-{role}"},
-            {"kind": "text", "text": next_text},
+            {"kind": "heading", "level": 2, "text": next_text},
             {"kind": "text", "text": f"outside-{role}"},
         ]
     }
@@ -216,6 +326,72 @@ def test_number_equivalent_configured_anchor_closes_each_plain_label_section(
     assert [row["text"] for row in selected.text_blocks] == [f"inside-{role}"]
 
 
+@pytest.mark.parametrize("boundary_level", [1, 2])
+def test_same_or_higher_heading_level_closes_the_section(boundary_level):
+    document = {
+        "blocks": [
+            {"kind": "heading", "level": 2, "text": "视频"},
+            {
+                "kind": "attachment",
+                "filename": "inside.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": boundary_level, "text": "其他章节"},
+            {
+                "kind": "attachment",
+                "filename": "outside.mp4",
+                "mime": "video/mp4",
+            },
+        ]
+    }
+
+    selected = select_docx_section(document, "视频", {"视频"})
+
+    assert [row["filename"] for row in selected.attachments] == ["inside.mp4"]
+
+
+@pytest.mark.parametrize(
+    ("next_anchor", "nested_heading"),
+    [
+        ("剪辑意见", "剪辑意见"),
+        ("(2) 剪辑意见", "剪辑意见"),
+    ],
+)
+def test_deeper_configured_heading_does_not_close_the_parent_section(
+    next_anchor,
+    nested_heading,
+):
+    document = {
+        "blocks": [
+            {"kind": "heading", "level": 2, "text": "视频"},
+            {
+                "kind": "attachment",
+                "filename": "parent.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 3, "text": nested_heading},
+            {
+                "kind": "attachment",
+                "filename": "nested.mp4",
+                "mime": "video/mp4",
+            },
+            {"kind": "heading", "level": 2, "text": "下一节"},
+            {
+                "kind": "attachment",
+                "filename": "outside.mp4",
+                "mime": "video/mp4",
+            },
+        ]
+    }
+
+    selected = select_docx_section(document, "视频", {"视频", next_anchor})
+
+    assert [row["filename"] for row in selected.attachments] == [
+        "parent.mp4",
+        "nested.mp4",
+    ]
+
+
 @pytest.mark.parametrize("stage_id", ["initial", "first_review", "final_review"])
 def test_materialization_applies_numbered_ranges_to_video_review_and_docx_audio(
     tmp_path,
@@ -223,17 +399,33 @@ def test_materialization_applies_numbered_ranges_to_video_review_and_docx_audio(
 ):
     content = "".join(
         [
+            '<h1 id="notes">使用说明</h1>',
+            "<p>二、视频</p>",
+            '<checkbox id="review-anchor-decoy">(2) 剪辑意见</checkbox>',
+            "<p>3.1 配音</p>",
+            '<figure><source token="start-decoy" name="start-decoy.mp4" '
+            'mime="video/mp4"/></figure>',
             '<h1 id="materials">课程素材</h1>',
             '<h2 seq-marker="二、">视频</h2>',
             '<figure><source token="video-good" name="video-good.mp4" '
+            'mime="video/mp4"/></figure>',
+            "<p>剪辑意见</p>",
+            '<checkbox id="video-boundary-decoy">(2) 剪辑意见</checkbox>',
+            '<figure><source token="video-second" name="video-second.mp4" '
             'mime="video/mp4"/></figure>',
             '<h2 seq-marker="(2)">剪辑意见</h2>',
             '<checkbox id="review-good">00:01 校对视频</checkbox>',
             '<figure><source token="video-decoy" name="video-decoy.mp4" '
             'mime="video/mp4"/></figure>',
+            "<p>3.1 配音</p>",
+            '<checkbox id="review-boundary-decoy">配音</checkbox>',
+            '<checkbox id="review-second">00:02 继续校对视频</checkbox>',
             '<h2 seq-marker="3.1">配音</h2>',
-            '<checkbox id="review-decoy">00:02 不应进入剪辑意见</checkbox>',
             '<figure><source token="audio-good" name="audio-good.wav" '
+            'mime="audio/wav"/></figure>',
+            "<p>二、视频</p>",
+            '<checkbox id="audio-boundary-decoy">视频</checkbox>',
+            '<figure><source token="audio-second" name="audio-second.wav" '
             'mime="audio/wav"/></figure>',
             '<h1 id="next">下一章</h1>',
             '<figure><source token="audio-decoy" name="audio-decoy.wav" '
@@ -279,7 +471,22 @@ def test_materialization_applies_numbered_ranges_to_video_review_and_docx_audio(
         lark_cli=sys.executable,
     )
 
-    assert downloaded_tokens == ["video-good", "audio-good"]
-    assert [row["filename"] for row in result["videos"]] == ["video-good.mp4"]
-    assert [row["source_text"] for row in result["review_items"]] == ["00:01 校对视频"]
-    assert [row["filename"] for row in result["audios"]] == ["audio-good.wav"]
+    assert downloaded_tokens == [
+        "video-good",
+        "video-second",
+        "audio-good",
+        "audio-second",
+    ]
+    assert [row["filename"] for row in result["videos"]] == [
+        "video-good.mp4",
+        "video-second.mp4",
+    ]
+    assert [row["source_text"] for row in result["review_items"]] == [
+        "00:01 校对视频",
+        "配音",
+        "00:02 继续校对视频",
+    ]
+    assert [row["filename"] for row in result["audios"]] == [
+        "audio-good.wav",
+        "audio-second.wav",
+    ]

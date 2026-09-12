@@ -18,7 +18,10 @@ from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.6.8+codex.20260911132555"
+PLUGIN_VERSION = "1.6.8+codex.20260913021152"
+EMBEDDED_RUNTIME_NAME = "auto-cut"
+EMBEDDED_RUNTIME_VERSION = "1.7.0"
+VERSION_RELATIONSHIP = "independent_embedded_core"
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -248,6 +251,88 @@ def _write_target_setup(stage: Path) -> None:
     )
 
 
+def _runtime_identity(stage: Path) -> dict[str, str]:
+    runtime = stage / "runtime"
+    version = (runtime / "VERSION").read_text(encoding="utf-8-sig").strip()
+
+    pyproject_name = ""
+    pyproject_version = ""
+    in_project = False
+    for line in (runtime / "pyproject.toml").read_text(encoding="utf-8-sig").splitlines():
+        stripped = line.strip()
+        if stripped == "[project]":
+            in_project = True
+            continue
+        if in_project and stripped.startswith("["):
+            break
+        if in_project and stripped.startswith("name") and "=" in stripped:
+            pyproject_name = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+        if in_project and stripped.startswith("version") and "=" in stripped:
+            pyproject_version = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+
+    schema = json.loads(
+        (runtime / "schemas" / "capability-manifest.schema.json").read_text(
+            encoding="utf-8-sig"
+        )
+    )
+    try:
+        schema_version = str(schema["properties"]["release_version"]["const"])
+    except (KeyError, TypeError) as exc:
+        raise ValueError("runtime capability schema identity is invalid") from exc
+
+    values = {
+        "runtime/pyproject.toml project.name": pyproject_name,
+        "runtime/VERSION": version,
+        "runtime/pyproject.toml": pyproject_version,
+        "runtime/schemas/capability-manifest.schema.json": schema_version,
+    }
+    mismatches = [
+        path
+        for path, value in values.items()
+        if value
+        != (
+            EMBEDDED_RUNTIME_NAME
+            if path == "runtime/pyproject.toml project.name"
+            else EMBEDDED_RUNTIME_VERSION
+        )
+    ]
+    if mismatches:
+        raise ValueError(
+            "embedded runtime identity does not match its declared core release: "
+            + ", ".join(mismatches)
+        )
+    return values
+
+
+def _embedded_runtime_contract() -> dict[str, str]:
+    return {
+        "name": EMBEDDED_RUNTIME_NAME,
+        "version": EMBEDDED_RUNTIME_VERSION,
+        "version_relationship": VERSION_RELATIONSHIP,
+    }
+
+
+def _validate_package_identity(stage: Path, manifest: dict[str, object]) -> None:
+    plugin_manifest = json.loads(
+        (stage / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
+    )
+    portable = json.loads(
+        (stage / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8-sig")
+    )
+    if manifest.get("name") != PLUGIN_NAME or manifest.get("version") != PLUGIN_VERSION:
+        raise ValueError("package manifest plugin identity is invalid")
+    if plugin_manifest.get("name") != PLUGIN_NAME or plugin_manifest.get("version") != PLUGIN_VERSION:
+        raise ValueError("plugin manifest identity does not match the package")
+    if portable.get("plugin_name") != PLUGIN_NAME or portable.get("plugin_version") != PLUGIN_VERSION:
+        raise ValueError("portable plugin identity does not match the package")
+    expected_runtime = _embedded_runtime_contract()
+    if manifest.get("embedded_runtime") != expected_runtime:
+        raise ValueError("package embedded-runtime declaration is invalid")
+    if portable.get("embedded_runtime") != expected_runtime:
+        raise ValueError("portable embedded-runtime declaration is invalid")
+    _runtime_identity(stage)
+
+
 def _copy_runtime(repo: Path, stage: Path) -> None:
     runtime = stage / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -296,6 +381,9 @@ def _validate_portable_capabilities(stage: Path) -> dict[str, int | str]:
         raise ValueError("portable capability contract root must be an object")
     if payload.get("plugin_name") != PLUGIN_NAME or payload.get("plugin_version") != PLUGIN_VERSION:
         raise ValueError("portable capability contract identity does not match the plugin")
+    if payload.get("embedded_runtime") != _embedded_runtime_contract():
+        raise ValueError("portable embedded-runtime identity is invalid")
+    _runtime_identity(stage)
     plugin_manifest = json.loads(
         (stage / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
     )
@@ -476,15 +564,22 @@ def build(
         if findings:
             raise ValueError("plugin privacy scan failed: " + "; ".join(findings[:20]))
         inventory = _tree_inventory(stage)
+        package_manifest: dict[str, object] = {
+            "name": PLUGIN_NAME,
+            "version": PLUGIN_VERSION,
+            "embedded_runtime": _embedded_runtime_contract(),
+            "files": inventory,
+        }
         _write_text(
             stage / "PACKAGE-MANIFEST.json",
             json.dumps(
-                {"name": PLUGIN_NAME, "version": PLUGIN_VERSION, "files": inventory},
+                package_manifest,
                 ensure_ascii=False,
                 indent=2,
             )
             + "\n",
         )
+        _validate_package_identity(stage, package_manifest)
         # Recompute after the manifest itself is part of the package.
         inventory = _tree_inventory(stage)
         zip_sha256, entry_count = _make_zip(parent, output)
@@ -499,6 +594,7 @@ def build(
             "status": "pass",
             "plugin_name": PLUGIN_NAME,
             "plugin_version": PLUGIN_VERSION,
+            "embedded_runtime": _embedded_runtime_contract(),
             "archive_file": output.name,
             "archive_sha256": zip_sha256,
             "archive_byte_size": output.stat().st_size,

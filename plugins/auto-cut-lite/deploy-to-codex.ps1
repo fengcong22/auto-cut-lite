@@ -19,6 +19,9 @@ $env:PYTHONUTF8 = '1'
 $env:PYTHONIOENCODING = 'utf-8'
 
 $pluginName = 'auto-cut-lite'
+$embeddedRuntimeName = 'auto-cut'
+$embeddedRuntimeVersion = '1.7.0'
+$versionRelationship = 'independent_embedded_core'
 $marketplaceName = 'auto-cut-lite-marketplace'
 $marketplaceDisplayName = 'Auto-Cut Lite'
 $workspaceLabel = 'Auto-cut-lite'
@@ -88,6 +91,9 @@ $report = [ordered]@{
     schema_version = 2
     plugin_name = $pluginName
     plugin_version = $null
+    embedded_runtime_name = $null
+    embedded_runtime_version = $null
+    version_relationship = $null
     deployment_status = 'failed'
     readiness = 'not_evaluated'
     started_at_utc = $startedAt
@@ -239,12 +245,64 @@ function Test-EquivalentDeploymentPath {
     }
 }
 
+function Test-ExactJsonString {
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory)][string]$Expected
+    )
+    return $Value -is [string] -and [string]::Equals(
+        [string]$Value,
+        $Expected,
+        [StringComparison]::Ordinal
+    )
+}
+
+function Test-LegacyVersionWithoutRuntimeIdentity {
+    param([Parameter(Mandatory)][string]$PluginVersion)
+    $match = [regex]::Match(
+        $PluginVersion,
+        '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:[-+].*)?$'
+    )
+    if (-not $match.Success) {
+        return $false
+    }
+    $major = [int]$match.Groups[1].Value
+    $minor = [int]$match.Groups[2].Value
+    $patch = [int]$match.Groups[3].Value
+    return $major -lt 1 -or
+        ($major -eq 1 -and $minor -lt 6) -or
+        ($major -eq 1 -and $minor -eq 6 -and $patch -lt 8)
+}
+
 function Test-PreservableDeploymentAnchors {
     param(
         [Parameter(Mandatory)]$Payload,
         [Parameter(Mandatory)][string]$PluginVersion
     )
     try {
+        $runtimeIdentityProperties = @(
+            'embedded_runtime_name',
+            'embedded_runtime_version',
+            'version_relationship'
+        )
+        $runtimeIdentityPropertyCount = @($runtimeIdentityProperties | Where-Object {
+            @($Payload.PSObject.Properties.Name) -ccontains $_
+        }).Count
+        $hasRuntimeIdentity = $runtimeIdentityPropertyCount -eq $runtimeIdentityProperties.Count
+        if ($runtimeIdentityPropertyCount -notin @(0, $runtimeIdentityProperties.Count)) {
+            return $false
+        }
+        if ($hasRuntimeIdentity) {
+            if (-not (Test-ExactJsonString -Value $Payload.embedded_runtime_name -Expected $embeddedRuntimeName) -or
+                -not (Test-ExactJsonString -Value $Payload.embedded_runtime_version -Expected $embeddedRuntimeVersion) -or
+                -not (Test-ExactJsonString -Value $Payload.version_relationship -Expected $versionRelationship)) {
+                return $false
+            }
+        }
+        elseif (-not (Test-LegacyVersionWithoutRuntimeIdentity -PluginVersion $PluginVersion)) {
+            return $false
+        }
+
         $packageManifestPath = Join-Path $targetRoot 'PACKAGE-MANIFEST.json'
         $runtimeIntegrityPath = Join-Path $runtimeRoot 'scripts\utils\runtime_integrity.py'
         $runtimeEntryPath = Join-Path $runtimeRoot 'scripts\jy_wrapper.py'
@@ -285,16 +343,33 @@ function Test-PreservableDeploymentAnchors {
         $packageManifest = $strictUtf8.GetString(
             [System.IO.File]::ReadAllBytes($packageManifestPath)
         ) | ConvertFrom-Json
-        if ([string]$packageManifest.name -ne $pluginName -or
-            [string]$packageManifest.version -ne $PluginVersion -or
+        if (-not (Test-ExactJsonString -Value $packageManifest.name -Expected $pluginName) -or
+            -not (Test-ExactJsonString -Value $packageManifest.version -Expected $PluginVersion) -or
             @($packageManifest.files).Count -eq 0) {
             return $false
         }
-        foreach ($requiredRelative in @(
+        if ($hasRuntimeIdentity) {
+            $packageRuntime = $packageManifest.embedded_runtime
+            if ($packageRuntime -isnot [pscustomobject] -or
+                -not (Test-ExactJsonString -Value $packageRuntime.name -Expected $embeddedRuntimeName) -or
+                -not (Test-ExactJsonString -Value $packageRuntime.version -Expected $embeddedRuntimeVersion) -or
+                -not (Test-ExactJsonString -Value $packageRuntime.version_relationship -Expected $versionRelationship)) {
+                return $false
+            }
+        }
+        $requiredInstalledPaths = @(
             '.codex-plugin/plugin.json',
             'runtime/scripts/utils/runtime_integrity.py',
             'runtime/scripts/jy_wrapper.py'
-        )) {
+        )
+        if ($hasRuntimeIdentity) {
+            $requiredInstalledPaths += @(
+                'runtime/VERSION',
+                'runtime/pyproject.toml',
+                'runtime/schemas/capability-manifest.schema.json'
+            )
+        }
+        foreach ($requiredRelative in $requiredInstalledPaths) {
             $rows = @($packageManifest.files | Where-Object {
                 [string]$_.path -ieq $requiredRelative
             })
@@ -513,8 +588,17 @@ function Read-AndValidatePackageManifest {
     catch {
         throw "PACKAGE-MANIFEST.json is invalid: $($_.Exception.Message)"
     }
-    if ($manifest.name -ne $pluginName -or [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
+    if (-not (Test-ExactJsonString -Value $manifest.name -Expected $pluginName) -or
+        $manifest.version -isnot [string] -or
+        [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
         throw 'Package identity is invalid.'
+    }
+    $manifestRuntime = $manifest.embedded_runtime
+    if ($manifestRuntime -isnot [pscustomobject] -or
+        -not (Test-ExactJsonString -Value $manifestRuntime.name -Expected $embeddedRuntimeName) -or
+        -not (Test-ExactJsonString -Value $manifestRuntime.version -Expected $embeddedRuntimeVersion) -or
+        -not (Test-ExactJsonString -Value $manifestRuntime.version_relationship -Expected $versionRelationship)) {
+        throw 'Packaged embedded-runtime identity is invalid.'
     }
     if ($null -eq $manifest.files -or @($manifest.files).Count -eq 0) {
         throw 'Package manifest has no file inventory.'
@@ -548,6 +632,76 @@ function Read-AndValidatePackageManifest {
         throw 'PORTABLE-CAPABILITIES.json is missing.'
     }
     $portableContract = Get-Content -LiteralPath $portableContractPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    $portableRuntime = $portableContract.embedded_runtime
+    if (-not (Test-ExactJsonString -Value $portableContract.plugin_name -Expected $pluginName) -or
+        -not (Test-ExactJsonString -Value $portableContract.plugin_version -Expected $manifest.version) -or
+        $portableRuntime -isnot [pscustomobject] -or
+        -not (Test-ExactJsonString -Value $portableRuntime.name -Expected $embeddedRuntimeName) -or
+        -not (Test-ExactJsonString -Value $portableRuntime.version -Expected $embeddedRuntimeVersion) -or
+        -not (Test-ExactJsonString -Value $portableRuntime.version_relationship -Expected $versionRelationship)) {
+        throw 'Portable plugin/embedded-runtime identity does not match the package manifest.'
+    }
+    $runtimeVersionPath = Join-Path $packageRoot 'runtime\VERSION'
+    $runtimePyprojectPath = Join-Path $packageRoot 'runtime\pyproject.toml'
+    $runtimeSchemaPath = Join-Path $packageRoot 'runtime\schemas\capability-manifest.schema.json'
+    foreach ($requiredIdentityPath in @($runtimeVersionPath, $runtimePyprojectPath, $runtimeSchemaPath)) {
+        if (-not (Test-Path -LiteralPath $requiredIdentityPath -PathType Leaf)) {
+            throw "Packaged runtime identity file is missing: $requiredIdentityPath"
+        }
+    }
+    $runtimeVersion = (Get-Content -LiteralPath $runtimeVersionPath -Raw -Encoding UTF8).Trim()
+    $runtimePyproject = Get-Content -LiteralPath $runtimePyprojectPath -Raw -Encoding UTF8
+    $runtimeProjectName = $null
+    $runtimeProjectVersion = $null
+    $insideRuntimeProject = $false
+    foreach ($line in ($runtimePyproject -split '\r?\n')) {
+        if (-not $insideRuntimeProject) {
+            if ($line -match '^[ \t]*\[project\][ \t]*(?:#.*)?$') {
+                $insideRuntimeProject = $true
+            }
+            continue
+        }
+        if ($line -match '^[ \t]*\[') {
+            break
+        }
+        $runtimeProjectNameMatch = [regex]::Match(
+            $line,
+            '^[ \t]*name[ \t]*=[ \t]*["'']([^"'']+)["''][ \t]*(?:#.*)?$'
+        )
+        if ($runtimeProjectNameMatch.Success) {
+            if ($null -ne $runtimeProjectName) {
+                throw 'Packaged runtime pyproject identity is duplicated.'
+            }
+            $runtimeProjectName = $runtimeProjectNameMatch.Groups[1].Value
+        }
+        $runtimeProjectVersionMatch = [regex]::Match(
+            $line,
+            '^[ \t]*version[ \t]*=[ \t]*["'']([^"'']+)["''][ \t]*(?:#.*)?$'
+        )
+        if ($runtimeProjectVersionMatch.Success) {
+            if ($null -ne $runtimeProjectVersion) {
+                throw 'Packaged runtime pyproject identity is duplicated.'
+            }
+            $runtimeProjectVersion = $runtimeProjectVersionMatch.Groups[1].Value
+        }
+    }
+    if ($runtimeProjectName -isnot [string] -or $runtimeProjectVersion -isnot [string]) {
+        throw 'Packaged runtime pyproject identity is missing.'
+    }
+    $runtimeSchema = Get-Content -LiteralPath $runtimeSchemaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($runtimeSchema -isnot [pscustomobject] -or
+        $runtimeSchema.properties -isnot [pscustomobject] -or
+        $runtimeSchema.properties.release_version -isnot [pscustomobject] -or
+        $runtimeSchema.properties.release_version.const -isnot [string]) {
+        throw 'Packaged runtime capability schema identity is invalid.'
+    }
+    $runtimeSchemaVersion = [string]$runtimeSchema.properties.release_version.const
+    if ($runtimeVersion -ne $embeddedRuntimeVersion -or
+        $runtimeProjectName -ne $embeddedRuntimeName -or
+        $runtimeProjectVersion -ne $embeddedRuntimeVersion -or
+        $runtimeSchemaVersion -ne $embeddedRuntimeVersion) {
+        throw 'Packaged runtime identity files do not match the declared embedded core release.'
+    }
     $workspaceContract = $portableContract.workspace_installation
     foreach ($required in @(
         '.codex-plugin/plugin.json',
@@ -565,7 +719,10 @@ function Read-AndValidatePackageManifest {
         'installer/uninstall_auto_cut_lite.ps1',
         'workspace-payload/skills/auto-cut/SKILL.md',
         'runtime/requirements.txt',
-        'runtime/requirements-audio.lock'
+        'runtime/requirements-audio.lock',
+        'runtime/VERSION',
+        'runtime/pyproject.toml',
+        'runtime/schemas/capability-manifest.schema.json'
     )) {
         if (-not $seen.ContainsKey($required.ToLowerInvariant())) {
             throw "Required package file is not inventoried: $required"
@@ -1037,6 +1194,9 @@ try {
     }
     $packageManifest = Read-AndValidatePackageManifest
     $report.plugin_version = [string]$packageManifest.version
+    $report.embedded_runtime_name = $embeddedRuntimeName
+    $report.embedded_runtime_version = $embeddedRuntimeVersion
+    $report.version_relationship = $versionRelationship
 
     $pluginManifestPath = Join-Path $packageRoot '.codex-plugin\plugin.json'
     $pluginManifest = Get-Content -LiteralPath $pluginManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -1097,6 +1257,9 @@ try {
         Write-Output "environment_validation=pass"
         Write-Output "plugin_name=$pluginName"
         Write-Output "plugin_version=$($packageManifest.version)"
+        Write-Output "embedded_runtime_name=$embeddedRuntimeName"
+        Write-Output "embedded_runtime_version=$embeddedRuntimeVersion"
+        Write-Output "version_relationship=$versionRelationship"
         Write-Output "python_version=$pythonVersion"
         Write-Output "python_bits=$pythonBits"
         Write-Output "audio_runtime=$(if ($audioRequested) { 'required_separate' } else { 'skipped_by_request' })"
@@ -1398,6 +1561,9 @@ try {
     Write-Host ''
     Write-Host "Auto-Cut Lite $($report.plugin_version) has been installed in Codex."
     Write-Host "deployment_status=$($report.deployment_status)"
+    Write-Host "embedded_runtime_name=$($report.embedded_runtime_name)"
+    Write-Host "embedded_runtime_version=$($report.embedded_runtime_version)"
+    Write-Host "version_relationship=$($report.version_relationship)"
     Write-Host "readiness=$($report.readiness)"
     Write-Host "workspace_root=$resolvedWorkspaceRoot"
     Write-Host "workspace_root_source=$workspaceRootSource"
