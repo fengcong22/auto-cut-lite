@@ -73,6 +73,7 @@ RELEASE_TEST_FILES = {
     "tests/test_capability_manifest.py",
     "tests/test_full_distribution_docs.py",
     "tests/test_install_repo_skills.py",
+    "tests/test_lite_revision.py",
     "tests/test_no_git_release_contracts.py",
     "tests/test_offline_bundle.py",
     "tests/test_private_subject_assets_release.py",
@@ -536,6 +537,10 @@ _AUDITED_PORTABLE_PATH_LITERALS = {
     "scripts/jy_http_server.py": ('"/tools/"',),
     "scripts/core/mocking_ops.py": ("c:/program",),
     "scripts/utils/jianying_env.py": ("c:\\program",),
+    "scripts/utils/lite_package.py": (
+        "\\resources\\audioalg\\",
+        "\\resources\\local\\",
+    ),
     "tests/audio_sound/test_bootstrap.py": ("c:/tools/",),
     "scripts/release/release_policy.py": (
         '"/tools/"',

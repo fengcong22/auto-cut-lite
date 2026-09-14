@@ -251,7 +251,7 @@
       "requires_user_authorization": true,
       "requires_user_assets": false,
       "unavailable": false,
-      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/auto_cut_first_run.py volc-status --json",
+      "verification_command": ".\\.venv\\Scripts\\python.exe scripts/portable/volc_setup.py status --json",
       "actual_result": {
         "status": "pending",
         "code": "requires_user_authorization",

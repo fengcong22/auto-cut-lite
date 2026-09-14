@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from scripts.release import audit_runtime_capabilities as auditor
+from scripts.release import release_policy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AUDITOR_PATH = REPO_ROOT / "scripts" / "release" / "audit_runtime_capabilities.py"
@@ -805,6 +806,23 @@ def test_repository_release_tree_has_zero_runtime_capability_findings() -> None:
 
     assert result["status"] == "ready", result["findings"]
     assert result["findings"] == []
+
+
+def test_lite_revision_verification_test_is_in_release_inventory() -> None:
+    release_paths = auditor.discover_release_paths(REPO_ROOT)
+
+    assert "tests/test_lite_revision.py" in release_paths
+
+
+def test_lite_package_resource_markers_are_audited_portable_literals() -> None:
+    assert release_policy.scan_text(
+        "scripts/utils/lite_package.py",
+        'markers = ("\\\\resources\\\\local\\\\", "\\\\resources\\\\audioalg\\\\")\n',
+    ) == []
+    assert release_policy.scan_text(
+        "scripts/utils/lite_package.py",
+        'marker = "\\\\private-host\\\\share\\\\"\n',
+    )
 
 
 def test_audit_cli_runs_without_git_and_emits_machine_readable_result(
