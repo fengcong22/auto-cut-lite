@@ -28,6 +28,6 @@ Lite ZIP 由 `scripts/release/build_lite_plugin.py` 的显式 allowlist 构建�
 
 ## `lite_package.py` 路径扫描误报
 
-`scripts/utils/lite_package.py` 中的 `\\resources\\local\\` 与 `\\resources\\audioalg\\` 是用于从剪映草稿素材路径中提取包内相对资源位置的匹配标记，不是 UNC 主机路径、构建机绝对路径或固定部署目录。解析结果仍必须落在当前草稿的 `Resources/local` 或 `Resources/audioAlg` 下，并通过目录包含关系、文件存在性及 reparse-point 检查。
+`scripts/utils/lite_package.py` 中允许的是单前导分隔符的运行时标记 `\resources\local\` 与 `\resources\audioalg\`，用于从剪映草稿素材路径中提取包内相对资源位置；它们不是 UNC 主机路径、构建机绝对路径或固定部署目录。解析结果仍必须落在当前草稿的 `Resources/local` 或 `Resources/audioAlg` 下，并通过目录包含关系、文件存在性及 reparse-point 检查。
 
-发布扫描只对白名单中的“文件路径 + 两个精确字面量”认定为已审计误报；其他 UNC、盘符绝对路径和机器绑定仍保持 fail-closed，并由负向测试覆盖。
+发布扫描只对白名单中的“文件路径 + 两个精确源码扫描表示”认定为已审计误报，不再折叠反斜杠。双前导分隔符的同名 UNC `\\resources\local\`、`\\resources\audioalg\`，以及通过普通字符串拼接或 raw string 拼接构造的等价 UNC 均保持 fail-closed，并由负向测试证明会返回 `absolute_local_path`。其他 UNC、盘符绝对路径和机器绑定同样不受豁免。

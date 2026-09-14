@@ -814,15 +814,34 @@ def test_lite_revision_verification_test_is_in_release_inventory() -> None:
     assert "tests/test_lite_revision.py" in release_paths
 
 
-def test_lite_package_resource_markers_are_audited_portable_literals() -> None:
-    assert release_policy.scan_text(
-        "scripts/utils/lite_package.py",
-        'markers = ("\\\\resources\\\\local\\\\", "\\\\resources\\\\audioalg\\\\")\n',
-    ) == []
-    assert release_policy.scan_text(
-        "scripts/utils/lite_package.py",
-        'marker = "\\\\private-host\\\\share\\\\"\n',
+@pytest.mark.parametrize("directory", ["local", "audioalg"])
+def test_lite_package_resource_markers_preserve_unc_prefix_semantics(directory: str) -> None:
+    separator = chr(92)
+    relative_marker = separator.join(("", "resources", directory, ""))
+    relative_source = f"marker = {relative_marker!r}\n"
+    unc_marker = separator + relative_marker
+    unc_source = f"marker = {unc_marker!r}\n"
+
+    assert release_policy.scan_text("scripts/utils/lite_package.py", relative_source) == []
+    findings = release_policy.scan_text("scripts/utils/lite_package.py", unc_source)
+
+    assert {finding.code for finding in findings} == {"absolute_local_path"}
+
+
+@pytest.mark.parametrize("directory", ["local", "audioalg"])
+def test_lite_package_resource_marker_unc_construction_remains_blocked(directory: str) -> None:
+    separator = chr(92)
+    unc_prefix = separator * 2
+    tail = separator.join(("resources", directory, ""))
+    sources = (
+        f"marker = {unc_prefix!r} + {tail!r}\n",
+        f"marker = r'{unc_prefix}resources{separator}{directory}' + {separator!r}\n",
     )
+
+    for source in sources:
+        findings = release_policy.scan_text("scripts/utils/lite_package.py", source)
+
+        assert {finding.code for finding in findings} == {"absolute_local_path"}
 
 
 def test_audit_cli_runs_without_git_and_emits_machine_readable_result(

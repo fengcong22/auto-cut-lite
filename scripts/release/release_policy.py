@@ -537,10 +537,6 @@ _AUDITED_PORTABLE_PATH_LITERALS = {
     "scripts/jy_http_server.py": ('"/tools/"',),
     "scripts/core/mocking_ops.py": ("c:/program",),
     "scripts/utils/jianying_env.py": ("c:\\program",),
-    "scripts/utils/lite_package.py": (
-        "\\resources\\audioalg\\",
-        "\\resources\\local\\",
-    ),
     "tests/audio_sound/test_bootstrap.py": ("c:/tools/",),
     "scripts/release/release_policy.py": (
         '"/tools/"',
@@ -562,9 +558,19 @@ _AUDITED_PORTABLE_PATH_LITERALS = {
     ),
 }
 
+_AUDITED_EXACT_SCANNED_PATH_LITERALS = {
+    "scripts/utils/lite_package.py": (
+        "\\\\resources\\\\audioalg\\\\",
+        "\\\\resources\\\\local\\\\",
+    ),
+}
+
 
 def _is_audited_absolute_path_example(path: str, value: str) -> bool:
-    normalized = re.sub(r"\\+", r"\\", value.casefold())
+    lowered = value.casefold()
+    if lowered in _AUDITED_EXACT_SCANNED_PATH_LITERALS.get(path, ()):
+        return True
+    normalized = re.sub(r"\\+", r"\\", lowered)
     digest = hashlib.sha256(path.encode("utf-8") + b"\0" + normalized.encode("utf-8")).hexdigest()
     if digest in _AUDITED_ABSOLUTE_PATH_EXAMPLE_DIGESTS:
         return True
