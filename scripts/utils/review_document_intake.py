@@ -4,24 +4,33 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+import psutil
+from utils.atomic_io import atomic_write_bytes, create_bounded_temporary_file
 from utils.execution_input import resolve_artifact_name
 
 INTAKE_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = 1
 LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v2"
+LARK_PREFLIGHT_COMMAND_TIMEOUT_SECONDS = 10.0
+LARK_COMMAND_TIMEOUT_SECONDS = 120.0
+LARK_COMMAND_CLEANUP_TIMEOUT_SECONDS = 0.5
+MAX_LARK_COMMAND_OUTPUT_BYTES = 32 * 1024 * 1024
 
 _MAX_DOCUMENT_XML_BYTES = 16 * 1024 * 1024
 _MAX_DOCUMENT_XML_ELEMENTS = 50_000
@@ -175,21 +184,8 @@ def _utc_now() -> str:
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
-            json.dump(payload, stream, ensure_ascii=False, indent=2, sort_keys=True)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
+    content = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    atomic_write_bytes(path, content.encode("utf-8"))
 
 
 def validate_document_url(raw_url: str) -> str:
@@ -360,15 +356,151 @@ def _lark_executable(explicit: str | os.PathLike[str] | None = None) -> tuple[st
         ) from exc
 
 
-def _default_command_runner(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        list(command),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+@contextmanager
+def _command_output_file(name: str):
+    descriptor, path = create_bounded_temporary_file(Path(tempfile.gettempdir()) / name)
+    stream = None
+    try:
+        stream = os.fdopen(descriptor, "w+b")
+        yield stream
+    finally:
+        # Diagnostic-file cleanup must preserve spawn, wait and timeout errors.
+        try:
+            if stream is None:
+                os.close(descriptor)
+            else:
+                stream.close()
+        except OSError:
+            pass
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _terminate_command_tree(process: subprocess.Popen, owner: psutil.Process | None) -> str:
+    """Kill the owned process and observed descendants with one short wait budget.
+
+    psutil retains creation identities to avoid signaling reused descendant PIDs.
+    Descendant discovery is a single snapshot: restricted or independently
+    detached children may not be observable, so cleanup reports partial failure.
+    Capture uses files, so an inherited child handle can never extend our wait.
+    """
+
+    deadline = time.monotonic() + LARK_COMMAND_CLEANUP_TIMEOUT_SECONDS
+    descendants: list[psutil.Process] = []
+    incomplete = owner is None
+    if owner is not None:
+        try:
+            descendants = owner.children(recursive=True)
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error:
+            incomplete = True
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError:
+        incomplete = True
+    for descendant in reversed(descendants):
+        try:
+            descendant.kill()
+        except psutil.NoSuchProcess:
+            pass
+        except psutil.Error:
+            incomplete = True
+    try:
+        process.wait(timeout=max(0.0, deadline - time.monotonic()))
+    except (OSError, subprocess.TimeoutExpired):
+        incomplete = True
+    if descendants:
+        try:
+            _, alive = psutil.wait_procs(descendants, timeout=max(0.0, deadline - time.monotonic()))
+            incomplete = incomplete or bool(alive)
+        except (OSError, psutil.Error):
+            incomplete = True
+    return "incomplete" if incomplete else "terminated"
+
+
+def _read_command_output(stream) -> str:
+    # A successfully exited parent can leave a descendant writing the capture
+    # file. Read a bounded size snapshot, never an open-ended read to EOF.
+    byte_count = os.fstat(stream.fileno()).st_size
+    if byte_count > MAX_LARK_COMMAND_OUTPUT_BYTES:
+        raise ReviewDocumentIntakeError(
+            "lark_cli_output_limit_exceeded",
+            "The CLI response exceeded the supported output size limit",
+            details={"maximum_bytes": MAX_LARK_COMMAND_OUTPUT_BYTES},
+        )
+    stream.seek(0)
+    return stream.read(byte_count).decode("utf-8", errors="replace")
+
+
+def _default_command_runner(
+    command: Sequence[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    # Windows subprocess.run(capture_output=True) drains pipes without a timeout
+    # after killing its direct child. Descendants inheriting those pipes can
+    # therefore defeat the requested timeout. File capture never waits for EOF.
+    with (
+        _command_output_file("auto-cut-lark-stdout") as stdout,
+        _command_output_file("auto-cut-lark-stderr") as stderr,
+    ):
+        process = subprocess.Popen(list(command), stdout=stdout, stderr=stderr, close_fds=True)
+        owner = None
+        try:
+            try:
+                owner = psutil.Process(process.pid)
+            except psutil.Error:
+                pass
+            process.wait(timeout=timeout_seconds)
+        except BaseException as exc:
+            try:
+                cleanup_status = _terminate_command_tree(process, owner)
+            except Exception:
+                cleanup_status = "incomplete"
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.cleanup_status = cleanup_status
+            raise
+        return subprocess.CompletedProcess(
+            list(command),
+            process.returncode,
+            _read_command_output(stdout),
+            _read_command_output(stderr),
+        )
+
+
+def _run_command(
+    command: Sequence[str],
+    *,
+    runner: CommandRunner | None,
+    failure_code: str,
+    failure_message: str,
+    timeout_seconds: float = LARK_COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("Lark command timeout must be a finite positive number")
+    try:
+        if runner is not None:
+            return runner(command)
+        return _default_command_runner(command, timeout_seconds=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        details = {"error_type": "TimeoutExpired", "timeout_seconds": timeout_seconds}
+        if hasattr(exc, "cleanup_status"):
+            details["process_cleanup"] = exc.cleanup_status
+        raise ReviewDocumentIntakeError(
+            failure_code,
+            f"{failure_message}; the CLI check exceeded its time limit",
+            details=details,
+        ) from exc
+    except OSError as exc:
+        raise ReviewDocumentIntakeError(
+            failure_code,
+            f"{failure_message}; check executable access permissions",
+            user_action={"action_code": "authorization", "reason_code": failure_code},
+            details={"error_type": type(exc).__name__},
+        ) from exc
 
 
 def _run_json_command(
@@ -377,8 +509,15 @@ def _run_json_command(
     runner: CommandRunner | None,
     failure_code: str,
     failure_message: str,
+    timeout_seconds: float = LARK_COMMAND_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
-    completed = (runner or _default_command_runner)(command)
+    completed = _run_command(
+        command,
+        runner=runner,
+        failure_code=failure_code,
+        failure_message=failure_message,
+        timeout_seconds=timeout_seconds,
+    )
     if completed.returncode != 0:
         raise ReviewDocumentIntakeError(
             failure_code,
@@ -407,13 +546,18 @@ def lark_cli_version(
     *,
     lark_cli: str | os.PathLike[str] | None = None,
     runner: CommandRunner | None = None,
+    timeout_seconds: float = LARK_PREFLIGHT_COMMAND_TIMEOUT_SECONDS,
 ) -> str:
     executable = _lark_executable(lark_cli)
-    completed = (runner or _default_command_runner)([*executable, "--version"])
+    completed = _run_command(
+        [*executable, "--version"],
+        runner=runner,
+        failure_code="lark_cli_unavailable",
+        failure_message="lark-cli version detection failed",
+        timeout_seconds=timeout_seconds,
+    )
     if completed.returncode != 0:
-        raise ReviewDocumentIntakeError(
-            "lark_cli_unavailable", "lark-cli version detection failed"
-        )
+        raise ReviewDocumentIntakeError("lark_cli_unavailable", "lark-cli version detection failed")
     match = re.search(r"\bversion\s+([^\s]+)", completed.stdout, flags=re.IGNORECASE)
     if not match:
         raise ReviewDocumentIntakeError(
@@ -426,6 +570,7 @@ def lark_whoami(
     *,
     lark_cli: str | os.PathLike[str] | None = None,
     runner: CommandRunner | None = None,
+    timeout_seconds: float = LARK_PREFLIGHT_COMMAND_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     executable = _lark_executable(lark_cli)
     payload = _run_json_command(
@@ -433,6 +578,7 @@ def lark_whoami(
         runner=runner,
         failure_code="lark_user_identity_unavailable",
         failure_message="The current Feishu/Lark user identity is unavailable",
+        timeout_seconds=timeout_seconds,
     )
     identity = str(payload.get("identity") or "").strip().casefold()
     default_as = str(payload.get("defaultAs") or payload.get("default_as") or "").strip().casefold()
@@ -1655,6 +1801,17 @@ def _read_readiness(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _write_readiness(path: Path, payload: Mapping[str, Any]) -> None:
+    try:
+        _atomic_write_json(path, payload)
+    except OSError as exc:
+        raise ReviewDocumentIntakeError(
+            "readiness_write_failed",
+            "Runtime readiness could not be saved; check directory write permissions and retry",
+            details={"error_type": type(exc).__name__},
+        ) from exc
+
+
 def _safe_identity_digest(payload: Mapping[str, Any]) -> str:
     safe: dict[str, Any] = {}
     for key, value in payload.items():
@@ -1708,7 +1865,7 @@ def evaluate_runtime_readiness(
         changed = True
     payload["schema_version"] = READINESS_SCHEMA_VERSION
     if changed or not target.is_file():
-        _atomic_write_json(target, payload)
+        _write_readiness(target, payload)
     return payload
 
 
@@ -1732,7 +1889,7 @@ def mark_lark_verified(
         "verified_at": _utc_now(),
         "identity_sha256": _safe_identity_digest(whoami),
     }
-    _atomic_write_json(target, payload)
+    _write_readiness(target, payload)
     return payload
 
 
@@ -1741,6 +1898,12 @@ def invalidate_lark_readiness(
     *,
     path: str | os.PathLike[str] | None = None,
 ) -> dict[str, Any]:
+    """Persist invalidation, reporting storage failure without provider/path data.
+
+    Error handlers must retain their primary error before calling this function
+    and attach any failure here as a secondary diagnostic only.
+    """
+
     target = Path(path).expanduser().resolve(strict=False) if path else default_readiness_path()
     payload = _read_readiness(target)
     payload["lark"] = {
@@ -1748,7 +1911,7 @@ def invalidate_lark_readiness(
         "invalidated_at": _utc_now(),
         "reason_code": str(reason_code),
     }
-    _atomic_write_json(target, payload)
+    _write_readiness(target, payload)
     return payload
 
 
@@ -1768,9 +1931,7 @@ def mark_asr_verified(
     }
     versions = payload.get("versions")
     expected_adapter = (
-        str(versions.get("asr_adapter_version") or "")
-        if isinstance(versions, Mapping)
-        else ""
+        str(versions.get("asr_adapter_version") or "") if isinstance(versions, Mapping) else ""
     )
     if (
         not expected_adapter
@@ -1782,7 +1943,7 @@ def mark_asr_verified(
             "status": "pending_validation",
             "reason_code": "asr_adapter_identity_mismatch",
         }
-        _atomic_write_json(target, payload)
+        _write_readiness(target, payload)
         return payload
     payload["asr"] = {
         "status": "verified",
@@ -1790,7 +1951,7 @@ def mark_asr_verified(
         "identity_sha256": _sha256_bytes(_canonical_json(identity)),
         "adapter_version": str(adapter_version),
     }
-    _atomic_write_json(target, payload)
+    _write_readiness(target, payload)
     return payload
 
 

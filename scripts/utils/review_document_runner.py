@@ -215,9 +215,9 @@ def _trusted_manifest_terminal_context() -> tuple[dict[str, Any], str] | None:
         config_version = int(str(values["config_version"]).strip())
     except (TypeError, ValueError):
         return None
-    manifest_sha256 = str(
-        os.environ.get("CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256") or ""
-    ).strip().lower()
+    manifest_sha256 = (
+        str(os.environ.get("CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256") or "").strip().lower()
+    )
     if not re.fullmatch(r"[0-9a-f]{64}", manifest_sha256):
         return None
     binding = {
@@ -367,10 +367,10 @@ def _phase_receipt_valid(
     phase: str,
     receipt_path: Path,
 ) -> bool:
-    record = store.get_phase(phase)
-    if record is None or not receipt_path.is_file():
-        return False
     try:
+        record = store.get_phase(phase)
+        if record is None or not receipt_path.is_file():
+            return False
         receipt = _read_json_object(receipt_path, f"{phase} receipt")
         if (
             receipt.get("schema_version") != _SCHEMA_VERSION
@@ -1923,10 +1923,37 @@ def run_review_document(
     )
     manifest_requested = bool(str(source_manifest_json or "").strip())
     trusted_manifest_context = _trusted_manifest_terminal_context()
+    terminal_result_attempted = False
 
-    def public_result(*, ok: bool, error: str = "") -> dict[str, Any]:
-        state = store.snapshot() if store is not None else {}
-        timing = store.timing_snapshot() if store is not None else {}
+    def record_intake_failure(phase: str, error: ReviewDocumentIntakeError) -> None:
+        # Publish the primary cause before attempting any diagnostic I/O. A
+        # denied readiness directory must never replace the CLI failure.
+        detail = _json_safe(error.public_data())
+        failure_details[phase] = detail
+        if error.code == "readiness_write_failed":
+            return
+        try:
+            invalidate_lark_readiness(error.code, path=readiness_path)
+        except Exception as diagnostic_error:
+            detail["readiness_persistence"] = {
+                "code": "readiness_write_failed",
+                "message": "Could not save readiness; check runtime state directory permissions and retry.",
+                "error_type": type(diagnostic_error).__name__,
+            }
+
+    def build_public_result(*, ok: bool, error: str = "") -> dict[str, Any]:
+        state: dict[str, Any] = {}
+        timing: dict[str, Any] = {}
+        if store is not None:
+            try:
+                state = store.snapshot()
+                timing = store.timing_snapshot()
+            except Exception as diagnostic_error:
+                failure_details["state_read"] = {
+                    "code": "state_read_failed",
+                    "message": "Could not read saved job state; the current run result remains authoritative.",
+                    "error_type": type(diagnostic_error).__name__,
+                }
         persisted = state.get("phases") if isinstance(state.get("phases"), Mapping) else {}
         phases: dict[str, Any] = {}
         for name in _RUN_PHASES:
@@ -1943,6 +1970,7 @@ def run_review_document(
 
         processed_plan_is_current = bool(
             store is not None
+            and state
             and paths["processed_cut_plan"].is_file()
             and _phase_receipt_valid(
                 store,
@@ -2000,11 +2028,22 @@ def run_review_document(
         if not package_is_current:
             for stale_name in ("final_acceptance", "package_zip", "package_receipt"):
                 artifact_candidates.pop(stale_name, None)
-        artifacts = {
-            name: row
-            for name, candidate in artifact_candidates.items()
-            if (row := _result_artifact(candidate)) is not None
-        }
+        artifacts: dict[str, Any] = {}
+        for name, candidate in artifact_candidates.items():
+            try:
+                row = _result_artifact(candidate)
+            except OSError as diagnostic_error:
+                failure_details.setdefault(
+                    "artifact_read",
+                    {
+                        "code": "artifact_read_failed",
+                        "message": "Some saved diagnostic artifacts could not be inspected; check job directory access.",
+                        "error_type": type(diagnostic_error).__name__,
+                    },
+                )
+                continue
+            if row is not None:
+                artifacts[name] = row
         if source_manifest is not None and package_is_current and effective_package_path.is_file():
             # Manifest callers consume this exact path/digest pair.  Keep the
             # legacy artifact rows for all other input modes unchanged.
@@ -2099,6 +2138,35 @@ def run_review_document(
             result["error"] = safe_error_text(error)
         return result
 
+    def public_result(*, ok: bool, error: str = "") -> dict[str, Any]:
+        try:
+            return build_public_result(ok=ok, error=error)
+        except Exception as diagnostic_error:
+            # Error reporting also inspects old receipts, hashes and timing.
+            # Restricted/corrupt diagnostics must not lose the primary failure
+            # by recursively attempting the same inaccessible reads.
+            if ok:
+                raise
+            details = _json_safe(failure_details)
+            details["result_diagnostics"] = {
+                "code": "result_diagnostics_unavailable",
+                "message": "Saved diagnostics could not be inspected; the original run error is preserved.",
+                "error_type": type(diagnostic_error).__name__,
+            }
+            return {
+                "ok": False,
+                "runner_version": RUNNER_VERSION,
+                "workflow_mode": "lite",
+                "job_root": str(root),
+                "job_state_json": str(state_path),
+                "job_timing_json": str(timing_path),
+                "phases": _json_safe(phase_records),
+                "phase_execution": _json_safe(phase_records),
+                "failure_details": details,
+                "output_artifacts": {},
+                "error": safe_error_text(error),
+            }
+
     def write_terminal_result(
         *,
         status: str,
@@ -2108,6 +2176,7 @@ def run_review_document(
     ) -> None:
         """Publish only the server-owned, manifest-bound terminal receipt."""
 
+        nonlocal terminal_result_attempted
         if result_file_path is None:
             return
         if source_manifest is not None:
@@ -2157,16 +2226,40 @@ def run_review_document(
                 details = error.details
             elif isinstance(failure_details.get("source_manifest"), Mapping):
                 details = failure_details["source_manifest"].get("details") or {}
+            preflight_messages = {
+                "lark_cli_unavailable": (
+                    "Auto-Cut preflight blocked: lark-cli is unavailable or timed out. "
+                    "Check executable access and retry."
+                ),
+                "lark_user_identity_unavailable": (
+                    "Auto-Cut preflight blocked: the current Feishu/Lark user could not be verified. "
+                    "Check CLI access and user configuration, then retry."
+                ),
+                "readiness_write_failed": (
+                    "Auto-Cut blocked: runtime readiness could not be saved. "
+                    "Check state directory write permissions and retry."
+                ),
+            }
             payload["error"] = {
                 "code": stable_code,
-                "message": f"Auto-Cut run blocked: {stable_code}",
+                "message": preflight_messages.get(
+                    stable_code, f"Auto-Cut run blocked: {stable_code}"
+                ),
                 "details": _json_safe(_sanitize_manifest_failure_details(details)),
             }
+        terminal_result_attempted = True
         try:
             atomic_write_json(result_file_path, payload)
-        except Exception:
+        except Exception as diagnostic_error:
             # A result receipt must never mask the primary Auto-Cut outcome.
-            pass
+            detail = {
+                "code": "terminal_result_write_failed",
+                "message": "Could not save the Taskboard result; check result directory permissions and retry.",
+                "error_type": type(diagnostic_error).__name__,
+            }
+            failure_details["terminal_result"] = detail
+            if isinstance(result, dict):
+                result.setdefault("failure_details", {})["terminal_result"] = dict(detail)
 
     try:
         has_doc_url = bool(str(doc_url or "").strip())
@@ -2353,17 +2446,16 @@ def run_review_document(
                         asr_adapter_version=VOLC_ASR_ADAPTER_VERSION,
                     )
                 except ReviewDocumentIntakeError as exc:
-                    invalidate_lark_readiness(exc.code, path=readiness_path)
-                    failure_details["preflight"] = _json_safe(exc.public_data())
+                    record_intake_failure("preflight", exc)
                     raise
                 except Exception as exc:
-                    invalidate_lark_readiness("lark_user_identity_unavailable", path=readiness_path)
-                    failure_details["preflight"] = {
-                        "code": "lark_user_identity_unavailable",
-                        "message": "Feishu/Lark user identity validation failed",
-                        "details": {"error": safe_error_text(exc)},
-                    }
-                    raise RuntimeError("Feishu/Lark user identity validation failed") from exc
+                    error = ReviewDocumentIntakeError(
+                        "lark_user_identity_unavailable",
+                        "Feishu/Lark user identity validation failed; check CLI access and user configuration.",
+                        details={"error_type": type(exc).__name__},
+                    )
+                    record_intake_failure("preflight", error)
+                    raise error from exc
             return _phase_outcome(
                 root,
                 "preflight",
@@ -2399,8 +2491,9 @@ def run_review_document(
                         "document_fetch_failed",
                         "lark_user_identity_unavailable",
                     }:
-                        invalidate_lark_readiness(exc.code, path=readiness_path)
-                    failure_details["document_fetch"] = _json_safe(exc.public_data())
+                        record_intake_failure("document_fetch", exc)
+                    else:
+                        failure_details["document_fetch"] = _json_safe(exc.public_data())
                     raise
                 intake["parsed"] = parsed
                 mark_lark_verified(
@@ -4450,7 +4543,7 @@ def run_review_document(
             write_terminal_result(status="pass", result=result)
         return result
     except ReviewDocumentRunError as exc:
-        if manifest_requested:
+        if manifest_requested and not terminal_result_attempted:
             # The failed-phase branch normally writes before raising; this is
             # also the recovery path for a malformed final delivery result.
             if result_file_path is not None:

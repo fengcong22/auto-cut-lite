@@ -156,6 +156,8 @@ def safe_error_text(error: BaseException | str) -> str:
     message = " ".join(raw_message.splitlines()).strip() or "phase failed"
     message = sanitize_public_text(message, maximum_length=300)
     return f"{error_type}: {message}" if error_type else message
+
+
 _EXTERNAL_WAIT_CODES = frozenset({"awaiting_subject_profile"})
 _EXTERNAL_WAIT_PHASES = frozenset({"subject_pointer_profile_gate"})
 _EXTERNAL_WAIT_PAYLOAD_FIELDS = frozenset(
@@ -200,6 +202,7 @@ _SUCCESSFUL_EXECUTION_STATUSES = frozenset({"complete", "resumed"})
 _BLOCKING_EXECUTION_STATUSES = frozenset({"failed", "skipped", "blocked"})
 _STATE_LOCKS_GUARD = threading.Lock()
 _STATE_LOCKS: dict[Path, threading.RLock] = {}
+_STATE_LOCK_TIMEOUT_SECONDS = 5.0
 _WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -1233,10 +1236,14 @@ class JobStateStore:
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        with self._lock:
+        if not self._lock.acquire(timeout=_STATE_LOCK_TIMEOUT_SECONDS):
+            raise TimeoutError("job state lock timed out; retry after the active writer exits")
+        try:
             with self._process_lock():
                 self._recover_transaction_locked()
                 yield
+        finally:
+            self._lock.release()
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
@@ -1258,7 +1265,13 @@ class JobStateStore:
             if not handle:
                 raise ctypes.WinError(ctypes.get_last_error())
             try:
-                result = kernel32.WaitForSingleObject(handle, 0xFFFFFFFF)
+                result = kernel32.WaitForSingleObject(
+                    handle, max(1, int(_STATE_LOCK_TIMEOUT_SECONDS * 1000))
+                )
+                if result == 0x00000102:
+                    raise TimeoutError(
+                        "job state process lock timed out; retry after the active writer exits"
+                    )
                 if result not in {0x00000000, 0x00000080}:
                     if result == 0xFFFFFFFF:
                         raise ctypes.WinError(ctypes.get_last_error())
@@ -1277,7 +1290,18 @@ class JobStateStore:
                 metadata = os.fstat(descriptor)
                 if not stat.S_ISDIR(metadata.st_mode):
                     raise ValueError("job state parent must be a physical directory")
-                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                deadline = time.monotonic() + _STATE_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError(
+                                "job state process lock timed out; retry after the active writer exits"
+                            ) from None
+                        time.sleep(min(0.05, remaining))
                 try:
                     yield
                 finally:
@@ -1876,13 +1900,13 @@ class JobStateStore:
             self._atomic_write_json(self.transaction_path, journal)
             for destination, payload in ordered_writes:
                 self._atomic_write_json(destination, payload)
-        except BaseException:
+        except BaseException as publish_error:
             try:
                 self._recover_transaction_locked()
             except BaseException as rollback_error:
-                raise RuntimeError(
-                    "external wait publish failed and byte rollback was incomplete"
-                ) from rollback_error
+                # A diagnostic rollback failure must not replace the write failure.
+                # Leave the verified journal for the next lock holder to recover.
+                raise publish_error from rollback_error
             raise
         self._remove_transaction_journal_locked()
 
@@ -2075,6 +2099,8 @@ class JobStateStore:
             return None
 
     def _restore_file_snapshot(self, path: Path, snapshot: bytes | None) -> None:
+        if self._file_snapshot(path) == snapshot:
+            return
         if snapshot is None:
             if path.is_symlink():
                 path.unlink()
@@ -2096,16 +2122,22 @@ class JobStateStore:
     def _atomic_write_bytes(self, destination: Path, content: bytes) -> None:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f"{destination.name}.tmp-{uuid.uuid4().hex}")
+        created = False
         try:
             with open(temporary, "xb") as handle:
+                created = True
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
+            os.replace(temporary, destination)
+            self._fsync_directory(destination.parent)
         except Exception:
-            self._remove_temporary(temporary)
+            if created:
+                try:
+                    self._remove_temporary(temporary)
+                except OSError:
+                    pass
             raise
-        os.replace(temporary, destination)
-        self._fsync_directory(destination.parent)
 
     @staticmethod
     def _fsync_directory(path: Path) -> None:
@@ -2376,7 +2408,9 @@ class ReviewJobExecutor:
                         phase = definitions[index]
                         reason = "scheduler made no progress"
                         records[phase.name] = self._record("blocked", error=reason)
-                        self._persist_skip(phase, reason)
+                        persistence_error = self._persist_skip(phase, reason)
+                        if persistence_error:
+                            records[phase.name]["state_persistence_error"] = persistence_error
                         self._emit_progress(phase.name, "blocked")
                     pending.clear()
 
@@ -2545,7 +2579,9 @@ class ReviewJobExecutor:
                     continue
                 reason = "blocked by earlier feishu_write: " f"{previous_feishu_write}"
             records[phase.name] = self._record("skipped", error=reason)
-            self._persist_skip(phase, reason)
+            persistence_error = self._persist_skip(phase, reason)
+            if persistence_error:
+                records[phase.name]["state_persistence_error"] = persistence_error
             self._emit_progress(phase.name, "skipped")
             pending.remove(index)
             progressed = True
@@ -2666,16 +2702,16 @@ class ReviewJobExecutor:
                     cache_hit = False
             except Exception as error:
                 error_text = self._safe_error(error)
+                persistence_error = None
                 if self.state_store is not None and started:
-                    try:
-                        self.state_store.fail_phase(phase.name, error_text)
-                    except Exception:
-                        pass
-                if attempt < phase.retry_count:
+                    persistence_error = self._persist_failure(phase, error_text)
+                if attempt < phase.retry_count and persistence_error is None:
                     self._emit_progress(phase.name, "retrying", attempt=attempt)
                     continue
                 self._emit_progress(phase.name, "failed", attempt=attempt)
-                return self._record("failed", error=error_text)
+                return self._record(
+                    "failed", error=error_text, state_persistence_error=persistence_error
+                )
 
             if self.state_store is not None:
                 try:
@@ -2686,13 +2722,16 @@ class ReviewJobExecutor:
                     )
                 except Exception as error:
                     error_text = f"state completion failed: {self._safe_error(error)}"
+                    persistence_error = None
                     if started:
-                        try:
-                            self.state_store.fail_phase(phase.name, error_text)
-                        except Exception:
-                            pass
+                        persistence_error = self._persist_failure(phase, error_text)
                     self._emit_progress(phase.name, "failed", attempt=attempt)
-                    return self._record("failed", result=result, error=error_text)
+                    return self._record(
+                        "failed",
+                        result=result,
+                        error=error_text,
+                        state_persistence_error=persistence_error,
+                    )
             self._emit_progress(phase.name, "complete", attempt=attempt)
             return self._record("complete", result=result)
         return self._record("failed", error="phase retry loop exhausted")
@@ -2713,7 +2752,27 @@ class ReviewJobExecutor:
         except Exception:
             pass
 
-    def _persist_skip(self, phase: PhaseDefinition, reason: str) -> None:
+    @staticmethod
+    def _persistence_error(error: Exception) -> str:
+        return (
+            f"job state could not be saved ({type(error).__name__}); "
+            "the saved phase may be stale. Check job-directory write access and resume."
+        )
+
+    def _persist_failure(self, phase: PhaseDefinition, error_text: str) -> str | None:
+        assert self.state_store is not None
+        # One bounded retry handles a transient save/rollback failure. Never rerun
+        # phase work when its terminal status cannot be durably recorded.
+        for attempt in range(2):
+            try:
+                self.state_store.fail_phase(phase.name, error_text)
+                return None
+            except Exception as error:
+                if attempt == 1 or not isinstance(error, OSError):
+                    return self._persistence_error(error)
+        return None
+
+    def _persist_skip(self, phase: PhaseDefinition, reason: str) -> str | None:
         if self.state_store is None:
             return
         try:
@@ -2724,8 +2783,9 @@ class ReviewJobExecutor:
                 item_ids=phase.item_ids,
                 retry_count=phase.retry_count,
             )
-        except Exception:
-            pass
+        except Exception as error:
+            return self._persistence_error(error)
+        return None
 
     @staticmethod
     def _result_digest(result: Any) -> str:
@@ -2749,8 +2809,12 @@ class ReviewJobExecutor:
         *,
         result: Any = None,
         error: str | None = None,
+        state_persistence_error: str | None = None,
     ) -> dict[str, Any]:
-        return {"status": status, "result": result, "error": error}
+        record = {"status": status, "result": result, "error": error}
+        if state_persistence_error:
+            record["state_persistence_error"] = state_persistence_error
+        return record
 
 
 __all__ = [

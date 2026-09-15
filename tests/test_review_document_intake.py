@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,7 @@ SCRIPTS_PATH = os.path.join(REPO_ROOT, "scripts")
 if SCRIPTS_PATH not in sys.path:
     sys.path.insert(0, SCRIPTS_PATH)
 
+from utils import atomic_io
 from utils import review_document_intake as intake
 
 
@@ -876,6 +878,271 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
 
         self.assertEqual(prefix, (str(node.resolve()), str(script.resolve())))
         self.assertFalse(any(value.casefold().endswith((".cmd", ".bat", ".ps1")) for value in prefix))
+
+
+class BoundedReadinessAndCliTests(unittest.TestCase):
+    def test_inaccessible_cli_is_sanitized_without_attempting_execution(self):
+        private_path = "C:/Users/private/npm/lark-cli.cmd"
+        with (
+            mock.patch.object(
+                intake, "_lark_command_prefix", side_effect=PermissionError(private_path)
+            ),
+            mock.patch.object(intake, "_default_command_runner") as runner,
+            self.assertRaises(intake.ReviewDocumentIntakeError) as raised,
+        ):
+            intake.lark_cli_version(lark_cli=private_path)
+        self.assertEqual(raised.exception.code, "lark_cli_unavailable")
+        self.assertNotIn(private_path, json.dumps(raised.exception.public_data()))
+        runner.assert_not_called()
+
+    def test_cli_spawn_permission_denial_retains_cause_and_safe_error(self):
+        denial = PermissionError("C:/Users/private/npm/lark-cli.cmd")
+        with self.assertRaises(intake.ReviewDocumentIntakeError) as raised:
+            intake.lark_cli_version(lark_cli=sys.executable, runner=mock.Mock(side_effect=denial))
+        self.assertIs(raised.exception.__cause__, denial)
+        self.assertEqual(raised.exception.code, "lark_cli_unavailable")
+        self.assertEqual(raised.exception.details["error_type"], "PermissionError")
+        self.assertNotIn("private", json.dumps(raised.exception.public_data()))
+
+    def test_cli_process_timeout_reaps_a_real_stalled_command(self):
+        started = time.monotonic()
+        with (
+            mock.patch.object(
+                intake,
+                "_lark_executable",
+                return_value=(sys.executable, "-c", "import time; time.sleep(30)"),
+            ),
+            self.assertRaises(intake.ReviewDocumentIntakeError) as raised,
+        ):
+            intake.lark_cli_version(timeout_seconds=0.15)
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertEqual(raised.exception.code, "lark_cli_unavailable")
+        self.assertEqual(raised.exception.details["error_type"], "TimeoutExpired")
+        self.assertEqual(raised.exception.details["timeout_seconds"], 0.15)
+
+    def test_version_and_identity_commands_receive_finite_default_deadlines(self):
+        whoami = json.dumps({"available": True, "identity": "user", "defaultAs": "user"})
+        with mock.patch.object(
+            intake,
+            "_default_command_runner",
+            side_effect=[
+                subprocess.CompletedProcess([], 0, "lark-cli version 1.2.3", ""),
+                subprocess.CompletedProcess([], 0, whoami, ""),
+            ],
+        ) as runner:
+            self.assertEqual(intake.lark_cli_version(lark_cli=sys.executable), "1.2.3")
+            self.assertEqual(intake.lark_whoami(lark_cli=sys.executable)["identity"], "user")
+        self.assertEqual(
+            [call.kwargs["timeout_seconds"] for call in runner.call_args_list],
+            [intake.LARK_PREFLIGHT_COMMAND_TIMEOUT_SECONDS] * 2,
+        )
+
+    def test_file_capture_preserves_normal_stdout_stderr_and_return_code(self):
+        completed = intake._default_command_runner(
+            [
+                sys.executable,
+                "-c",
+                "import sys; print('lark-cli version 1.2.3'); print('diagnostic', file=sys.stderr); sys.exit(7)",
+            ],
+            timeout_seconds=2.0,
+        )
+        self.assertEqual(completed.returncode, 7)
+        self.assertEqual(completed.stdout.strip(), "lark-cli version 1.2.3")
+        self.assertEqual(completed.stderr.strip(), "diagnostic")
+
+    def test_inherited_output_handles_do_not_extend_timeout_and_child_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "child-pid"
+            code = (
+                "import pathlib, subprocess, sys, time; "
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)']); "
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                "print('inherited output', flush=True); time.sleep(30)"
+            )
+            started = time.monotonic()
+            try:
+                with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                    intake._default_command_runner(
+                        [sys.executable, "-c", code, str(pid_file)], timeout_seconds=0.3
+                    )
+                self.assertLess(time.monotonic() - started, 1.5)
+                self.assertTrue(pid_file.exists(), "the child must inherit output before timeout")
+                child_pid = int(pid_file.read_text())
+                try:
+                    child = intake.psutil.Process(child_pid)
+                    self.assertEqual(child.status(), intake.psutil.STATUS_ZOMBIE)
+                except intake.psutil.NoSuchProcess:
+                    pass
+                self.assertIn(raised.exception.cleanup_status, {"terminated", "incomplete"})
+            finally:
+                if pid_file.exists():
+                    try:
+                        intake.psutil.Process(int(pid_file.read_text())).kill()
+                    except intake.psutil.NoSuchProcess:
+                        pass
+
+    def test_command_capture_permission_error_has_one_attempt_and_never_spawns(self):
+        capture_directory = tempfile.gettempdir()
+        with (
+            mock.patch.object(intake.tempfile, "gettempdir", return_value=capture_directory),
+            mock.patch.object(
+                atomic_io.os, "open", side_effect=PermissionError("private-path")
+            ) as opening,
+            mock.patch.object(intake.subprocess, "Popen") as popen,
+            self.assertRaises(intake.ReviewDocumentIntakeError) as raised,
+        ):
+            intake.lark_cli_version(lark_cli=sys.executable)
+        self.assertEqual(opening.call_count, 1)
+        popen.assert_not_called()
+        self.assertNotIn("private", json.dumps(raised.exception.public_data()))
+
+    def test_capture_cleanup_failure_cannot_mask_spawn_permission_error(self):
+        primary = PermissionError("private-cli-path")
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.object(intake.tempfile, "gettempdir", return_value=directory),
+                mock.patch.object(intake.subprocess, "Popen", side_effect=primary),
+                mock.patch.object(Path, "unlink", side_effect=PermissionError("cleanup-denied")),
+                self.assertRaises(PermissionError) as raised,
+            ):
+                intake._default_command_runner(["not-executed"], timeout_seconds=0.1)
+            self.assertIs(raised.exception, primary)
+
+    def test_process_cleanup_failure_preserves_primary_timeout(self):
+        process = mock.Mock()
+        timeout = subprocess.TimeoutExpired(["private-command"], 0.1)
+        process.wait.side_effect = timeout
+        with (
+            mock.patch.object(intake.subprocess, "Popen", return_value=process),
+            mock.patch.object(intake.psutil, "Process", side_effect=intake.psutil.NoSuchProcess(0)),
+            mock.patch.object(
+                intake, "_terminate_command_tree", side_effect=PermissionError("private")
+            ),
+            self.assertRaises(subprocess.TimeoutExpired) as raised,
+        ):
+            intake._default_command_runner(["not-executed"], timeout_seconds=0.1)
+        self.assertIs(raised.exception, timeout)
+        self.assertEqual(raised.exception.cleanup_status, "incomplete")
+
+    def test_output_snapshot_ignores_bytes_appended_after_the_parent_exits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "captured-output"
+            path.write_bytes(b"complete-response")
+            original_fstat = os.fstat
+
+            def snapshot_then_append(descriptor):
+                snapshot = original_fstat(descriptor)
+                with path.open("ab") as writer:
+                    writer.write(b"descendant-still-writing")
+                return snapshot
+
+            with (
+                path.open("rb") as stream,
+                mock.patch.object(intake.os, "fstat", side_effect=snapshot_then_append),
+            ):
+                self.assertEqual(intake._read_command_output(stream), "complete-response")
+
+    def test_oversized_cli_output_returns_safe_error_without_reading_contents(self):
+        with (
+            mock.patch.object(intake, "MAX_LARK_COMMAND_OUTPUT_BYTES", 8),
+            self.assertRaises(intake.ReviewDocumentIntakeError) as raised,
+        ):
+            intake._default_command_runner(
+                [sys.executable, "-c", "print('private-provider-response')"], timeout_seconds=2.0
+            )
+        self.assertEqual(raised.exception.code, "lark_cli_output_limit_exceeded")
+        self.assertNotIn("private", json.dumps(raised.exception.public_data()))
+
+    def test_successful_parent_does_not_wait_for_descendant_output_eof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "child-pid"
+            code = (
+                "import pathlib, subprocess, sys, time; "
+                "child = subprocess.Popen([sys.executable, '-c', "
+                "'import time; print(\\\"child-log\\\", flush=True); time.sleep(30)']); "
+                "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                "print('parent-result', flush=True); time.sleep(0.1)"
+            )
+            try:
+                started = time.monotonic()
+                with mock.patch.object(intake.tempfile, "gettempdir", return_value=directory):
+                    completed = intake._default_command_runner(
+                        [sys.executable, "-c", code, str(pid_file)], timeout_seconds=2.0
+                    )
+                self.assertLess(time.monotonic() - started, 1.5)
+                self.assertEqual(completed.returncode, 0)
+                self.assertIn("parent-result", completed.stdout)
+                self.assertTrue(pid_file.exists())
+                self.assertTrue(intake.psutil.Process(int(pid_file.read_text())).is_running())
+            finally:
+                if pid_file.exists():
+                    try:
+                        child = intake.psutil.Process(int(pid_file.read_text()))
+                        child.kill()
+                        child.wait(timeout=1.0)
+                    except intake.psutil.NoSuchProcess:
+                        pass
+
+    def test_identity_timeout_does_not_leak_provider_command_or_output(self):
+        timeout = subprocess.TimeoutExpired(
+            ["private-cli", "whoami"], 0.1, output="private-token", stderr="private-stderr"
+        )
+        with self.assertRaises(intake.ReviewDocumentIntakeError) as raised:
+            intake.lark_whoami(
+                lark_cli=sys.executable,
+                runner=mock.Mock(side_effect=timeout),
+                timeout_seconds=0.1,
+            )
+        self.assertEqual(raised.exception.code, "lark_user_identity_unavailable")
+        self.assertNotIn("private", json.dumps(raised.exception.public_data()))
+
+    def test_readiness_write_denial_is_bounded_and_recovers_without_corruption(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "readiness.json"
+            intake.evaluate_runtime_readiness(
+                path=target, runtime_version="1.6.8", lark_version="1.2.3", asr_adapter_version="v1"
+            )
+            previous = target.read_bytes()
+            started = time.monotonic()
+            with (
+                mock.patch.object(
+                    atomic_io.os, "open", side_effect=PermissionError("private-readiness-path")
+                ) as opening,
+                self.assertRaises(intake.ReviewDocumentIntakeError) as raised,
+            ):
+                intake.invalidate_lark_readiness("lark_cli_unavailable", path=target)
+            self.assertEqual(opening.call_count, 1)
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertEqual(raised.exception.code, "readiness_write_failed")
+            self.assertNotIn("private", json.dumps(raised.exception.public_data()))
+            self.assertEqual(target.read_bytes(), previous)
+            result = intake.invalidate_lark_readiness("lark_cli_unavailable", path=target)
+            self.assertEqual(result["lark"]["status"], "pending_validation")
+            verified = intake.mark_lark_verified(
+                {"identity": "user", "defaultAs": "user", "available": True},
+                path=target,
+                runtime_version="1.6.8",
+                lark_version="1.2.3",
+                asr_adapter_version="v1",
+            )
+            self.assertEqual(verified["lark"]["status"], "verified")
+            self.assertEqual(json.loads(target.read_text(encoding="utf-8")), verified)
+
+    def test_strict_user_identity_is_still_required(self):
+        for identity in ("bot", "tenant"):
+            with (
+                self.subTest(identity=identity),
+                self.assertRaises(intake.ReviewDocumentIntakeError),
+            ):
+                intake.lark_whoami(
+                    lark_cli=sys.executable,
+                    runner=lambda command: subprocess.CompletedProcess(
+                        command,
+                        0,
+                        json.dumps({"available": True, "identity": identity, "defaultAs": "user"}),
+                        "",
+                    ),
+                )
 
 
 if __name__ == "__main__":
