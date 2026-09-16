@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.6.10+codex.20260916122000"
+PLUGIN_VERSION = "1.6.11+codex.20260916152428"
 EMBEDDED_RUNTIME_NAME = "auto-cut"
 EMBEDDED_RUNTIME_VERSION = "1.7.0"
 VERSION_RELATIONSHIP = "independent_embedded_core"

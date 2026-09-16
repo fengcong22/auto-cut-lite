@@ -97,7 +97,7 @@ from utils.working_audio import validate_working_audio_sync
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v10-working-audio"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v11-sample-precision"
 WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
@@ -1569,58 +1569,108 @@ def _merge_source_asr_words(
     return merged
 
 
+def _alignment_wav_params(path: Path):
+    """Check the recipe and actual PCM bytes, including any discarded tail."""
+    try:
+        with wave.open(str(path), "rb") as source:
+            params = source.getparams()
+            if (params.nchannels, params.framerate, params.sampwidth, params.comptype) != (
+                1,
+                16000,
+                2,
+                "NONE",
+            ):
+                raise OrderedSourceAsrIntegrityError(
+                    "Alignment WAV must use the fixed 16 kHz mono PCM16 recipe"
+                )
+            actual_bytes = 0
+            while chunk := source.readframes(65536):
+                actual_bytes += len(chunk)
+            if actual_bytes != params.nframes * 2:
+                raise OrderedSourceAsrIntegrityError(
+                    "Alignment WAV PCM data is truncated or incomplete: "
+                    f"declared_frames={params.nframes}, actual_bytes={actual_bytes}"
+                )
+            return params
+    except (wave.Error, EOFError) as exc:
+        raise OrderedSourceAsrIntegrityError("Alignment WAV header or PCM data is invalid") from exc
+
+
+def _alignment_frame_count(duration_seconds: float) -> int:
+    try:
+        duration = float(duration_seconds)
+        frames = round(duration * 16000)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise OrderedSourceAsrIntegrityError("Alignment timeline duration is invalid") from exc
+    if not math.isfinite(duration) or frames <= 0:
+        raise OrderedSourceAsrIntegrityError("Alignment timeline duration must be positive")
+    return frames
+
+
 def _concat_alignment_wavs(
     sources: Sequence[str | os.PathLike[str]],
     output: str | os.PathLike[str],
+    *,
+    durations: Sequence[float],
 ) -> dict[str, Any]:
-    """Concatenate fixed mono PCM16 alignment WAVs without re-encoding."""
+    """Put diagnostic WAVs on cumulative sample boundaries, without time stretch.
 
-    if not sources:
-        raise ValueError("at least one alignment WAV is required")
+    Rounding each local duration independently accumulates error across pairs.
+    Each join instead uses the nearest sample to its authoritative video time.
+    Local ASR WAVs and provider word timestamps remain unchanged.
+    """
+    if not sources or len(sources) != len(durations):
+        raise OrderedSourceAsrIntegrityError("Alignment WAVs need one duration per source")
     output_path = Path(output).expanduser().resolve(strict=False)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.part")
+    cursor = 0.0
     total_frames = 0
-    params = None
+    mappings = []
     try:
         with wave.open(str(temporary), "wb") as target:
-            for index, raw_source in enumerate(sources):
+            target.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            for index, (raw_source, duration) in enumerate(zip(sources, durations)):
+                local_frames = _alignment_frame_count(duration)
                 source = Path(raw_source).expanduser().resolve(strict=True)
+                params = _alignment_wav_params(source)
+                if params.nframes != local_frames:
+                    raise OrderedSourceAsrIntegrityError(
+                        f"Alignment WAV {index} was not bounded to its local timeline"
+                    )
+                start_frame = total_frames
+                cursor += float(duration)
+                end_frame = _alignment_frame_count(cursor)
+                required = end_frame - start_frame
+                correction = required - params.nframes
+                if required <= 0 or abs(correction) > 1:
+                    raise OrderedSourceAsrIntegrityError(
+                        "Alignment join exceeds one sample of cumulative quantization"
+                    )
                 with wave.open(str(source), "rb") as stream:
-                    current = stream.getparams()
-                    if (
-                        current.nchannels != 1
-                        or current.framerate != 16000
-                        or current.sampwidth != 2
-                        or current.comptype != "NONE"
-                    ):
-                        raise ValueError(
-                            f"alignment WAV {index} does not match the fixed PCM16 recipe"
-                        )
-                    if params is None:
-                        params = current
-                        target.setnchannels(current.nchannels)
-                        target.setsampwidth(current.sampwidth)
-                        target.setframerate(current.framerate)
-                        target.setcomptype(current.comptype, current.compname)
-                    elif (
-                        current.nchannels,
-                        current.sampwidth,
-                        current.framerate,
-                        current.comptype,
-                    ) != (
-                        params.nchannels,
-                        params.sampwidth,
-                        params.framerate,
-                        params.comptype,
-                    ):
-                        raise ValueError("alignment WAV recipes do not match")
-                    while True:
-                        frames = stream.readframes(8192)
-                        if not frames:
-                            break
-                        target.writeframes(frames)
-                        total_frames += len(frames) // (current.nchannels * current.sampwidth)
+                    remaining = min(required, params.nframes)
+                    while remaining:
+                        count = min(remaining, 65536)
+                        chunk = stream.readframes(count)
+                        if len(chunk) != count * 2:
+                            raise OrderedSourceAsrIntegrityError(
+                                "Alignment WAV changed or is truncated"
+                            )
+                        target.writeframesraw(chunk)
+                        remaining -= count
+                if correction > 0:
+                    target.writeframesraw(b"\x00\x00")
+                total_frames = end_frame
+                mappings.append(
+                    {
+                        "pair_index": index,
+                        "input_frames": params.nframes,
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "grid_adjustment_frames": correction,
+                        "boundary_error_seconds": end_frame / 16000.0 - cursor,
+                    }
+                )
         os.replace(temporary, output_path)
     except Exception:
         temporary.unlink(missing_ok=True)
@@ -1629,33 +1679,69 @@ def _concat_alignment_wavs(
         "path": str(output_path),
         "sha256": sha256_file(output_path),
         "duration_seconds": round(total_frames / 16000.0, 6),
+        "timeline_quantization": {
+            "strategy": "cumulative_nearest_sample_v1",
+            "sample_rate": 16000,
+            "output_frames": total_frames,
+            "timeline_duration_seconds": cursor,
+            "pairs": mappings,
+            "timeline_modified": False,
+        },
     }
 
 
-def _bound_alignment_wav_to_timeline(path: Path, duration_seconds: float) -> None:
-    """Trim only a decoded diagnostic tail; never pad or alter delivery media.
+def _bound_alignment_wav_to_timeline(path: Path, duration_seconds: float) -> dict[str, Any]:
+    """Bound only the ASR diagnostic copy with one sample of rounding tolerance.
 
-    Pair offsets use video duration. Concatenating slightly longer audio files
-    verbatim would otherwise shift the reverse-ASR candidate after every pair.
+    Missing >=2 samples and truncated PCM are integrity failures. One absent
+    sample can arise during decode/resampling/container quantization; record it
+    and append one zero PCM frame. Never pad or alter working/delivery media.
     """
-    with wave.open(str(path), "rb") as source:
-        params = source.getparams()
-        required = int(round(float(duration_seconds) * params.framerate))
-        if required <= 0 or params.nframes < required:
-            raise OrderedSourceAsrIntegrityError(
-                "Working alignment audio does not cover the unchanged source timeline"
-            )
-        if params.nframes == required:
-            return
-        frames = source.readframes(required)
+    required = _alignment_frame_count(duration_seconds)
+    params = _alignment_wav_params(path)
+    missing = required - params.nframes
+    shortfall = max(0.0, float(duration_seconds) - params.nframes / 16000.0)
+    if params.nframes <= 0 or missing > 1:
+        raise OrderedSourceAsrIntegrityError(
+            "Working alignment audio does not cover the unchanged source timeline: "
+            f"expected_frames={required}, actual_frames={params.nframes}, "
+            f"timeline_seconds={duration_seconds}, "
+            f"audio_seconds={params.nframes / 16000.0:.9f}, "
+            f"shortfall_seconds={shortfall:.9f}, allowed_missing_frames=1 at 16000 Hz"
+        )
+    report = {
+        "strategy": "diagnostic_pcm_one_sample_v1",
+        "sample_rate": 16000,
+        "input_frames": params.nframes,
+        "output_frames": required,
+        "input_duration_seconds": params.nframes / 16000.0,
+        "timeline_duration_seconds": float(duration_seconds),
+        "shortfall_seconds": shortfall,
+        "allowed_missing_frames": 1,
+        "padded_frames": max(0, missing),
+        "trimmed_frames": max(0, -missing),
+        "timeline_modified": False,
+    }
+    if missing == 0:
+        return report
     temporary = path.with_name(f".{path.name}.{os.getpid()}.timeline.tmp")
     try:
-        with wave.open(str(temporary), "wb") as output:
-            output.setparams(params)
-            output.writeframes(frames)
+        with wave.open(str(path), "rb") as source, wave.open(str(temporary), "wb") as target:
+            target.setparams(params)
+            remaining = min(required, params.nframes)
+            while remaining:
+                count = min(remaining, 65536)
+                chunk = source.readframes(count)
+                if len(chunk) != count * 2:
+                    raise OrderedSourceAsrIntegrityError("Alignment WAV changed or is truncated")
+                target.writeframesraw(chunk)
+                remaining -= count
+            if missing == 1:
+                target.writeframesraw(b"\x00\x00")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+    return report
 
 
 def _run_ordered_source_asr(
@@ -1729,7 +1815,9 @@ def _run_ordered_source_asr(
             suffix=".wav",
         )
         _copy_cached_file(cached_alignment, pair_alignment)
-        _bound_alignment_wav_to_timeline(pair_alignment, float(raw_source.get("duration")))
+        alignment_adjustment = _bound_alignment_wav_to_timeline(
+            pair_alignment, float(raw_source.get("duration"))
+        )
         alignment_paths.append(pair_alignment)
         artifacts.extend([source, pair_alignment])
         cache_hits.append(alignment_hit)
@@ -1814,6 +1902,7 @@ def _run_ordered_source_asr(
                 "pair_index": pair_index,
                 "offset": offset,
                 "duration": duration,
+                "alignment_timeline_adjustment": alignment_adjustment,
                 "alignment_audio_path": str(pair_alignment),
                 "alignment_audio_sha256": alignment_sha256,
                 "alignment_cache_identity_digest": alignment_identity.digest(),
@@ -1830,7 +1919,10 @@ def _run_ordered_source_asr(
             }
         )
 
-    combined = _concat_alignment_wavs(alignment_paths, alignment_output)
+    combined = _concat_alignment_wavs(
+        alignment_paths, alignment_output,
+        durations=[row["duration"] for row in pair_payloads],
+    )
     merged_words = _merge_source_asr_words(pair_payloads)
     first_asr = asr_payloads[0]
     source_asr = {
@@ -1858,6 +1950,7 @@ def _run_ordered_source_asr(
         "source_pair_count": len(pair_payloads),
         "alignment_audio_path": str(alignment_output),
         "alignment_audio_sha256": combined["sha256"],
+        "alignment_concatenation": combined["timeline_quantization"],
         "alignment_sources": pair_receipts,
         "alignment_cache_identity_digests": [
             str(row["alignment_cache_identity_digest"]) for row in pair_receipts
@@ -3622,7 +3715,7 @@ def run_review_document(
                         )
                         cache_hits.append(alignment_hit)
                         _copy_cached_file(cached_alignment, paths["alignment_wav"])
-                        _bound_alignment_wav_to_timeline(
+                        alignment_adjustment = _bound_alignment_wav_to_timeline(
                             paths["alignment_wav"], float(materials["source_duration_seconds"])
                         )
                         source_identity_payload = source_asr_cache_identity(
@@ -3669,6 +3762,7 @@ def run_review_document(
                             {
                                 "asr_available": True,
                                 "asr_status": "verified",
+                                "alignment_timeline_adjustment": alignment_adjustment,
                                 "alignment_audio_path": str(paths["alignment_wav"]),
                                 "alignment_audio_sha256": sha256_file(paths["alignment_wav"]),
                                 "alignment_cache_identity_digest": alignment_identity.digest(),
