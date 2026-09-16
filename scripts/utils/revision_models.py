@@ -20,6 +20,9 @@ class RevisionProject:
     source_pairs: List[Dict[str, Any]] = field(default_factory=list)
     audio_mode: str = "video_original"
     duration_tolerance_seconds: float = 3.0
+    source_video_sha256: str = ""
+    source_audio_sha256: str = ""
+    replacement_audio_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -1321,15 +1324,25 @@ def load_revision_request(path: str) -> RevisionRequest:
     if media_duration_seconds < 0:
         raise ValueError("project.media_duration_seconds must be non-negative.")
 
+    default_audio_mode = (
+        source_pairs[0].get("audio_mode")
+        if source_pairs
+        else ("replace_original" if replacement_audio else "video_original")
+    )
     project = RevisionProject(
         draft_name=draft_name,
         source_video=source_video,
         source_audio=str(project_payload.get("source_audio") or "").strip(),
         replacement_audio=replacement_audio,
+        source_video_sha256=str(project_payload.get("source_video_sha256") or ""),
+        source_audio_sha256=str(project_payload.get("source_audio_sha256") or ""),
+        replacement_audio_sha256=str(project_payload.get("replacement_audio_sha256") or ""),
         project_key=str(project_payload.get("project_key") or "").strip(),
         media_duration_seconds=media_duration_seconds,
         source_pairs=source_pairs,
-        audio_mode=str(project_payload.get("audio_mode") or (source_pairs[0].get("audio_mode") if source_pairs else "video_original")).strip().casefold(),
+        audio_mode=str(
+            project_payload.get("audio_mode") or default_audio_mode
+        ).strip().casefold(),
         duration_tolerance_seconds=_as_finite_float(
             project_payload.get("duration_tolerance_seconds", 3.0),
             "project.duration_tolerance_seconds",
@@ -1339,10 +1352,10 @@ def load_revision_request(path: str) -> RevisionRequest:
         raise ValueError("project.duration_tolerance_seconds must be non-negative.")
     if project.audio_mode not in {"video_original", "replace_original"}:
         raise ValueError("project.audio_mode must be video_original or replace_original.")
-    if source_pairs:
-        pair_modes = {str(row.get("audio_mode") or project.audio_mode).casefold() for row in source_pairs}
-        if pair_modes != {project.audio_mode}:
-            raise ValueError("project.source_pairs audio modes must match project.audio_mode.")
+    # The project mode is a legacy/default value. Each manifest pair chooses
+    # its own working source, so mixed original/replacement inputs are valid.
+    if not source_pairs and project.audio_mode == "replace_original" and not replacement_audio:
+        raise ValueError("project.audio_mode=replace_original requires replacement_audio.")
 
     edits_payload = payload.get("edits") or []
     if not isinstance(edits_payload, list):
@@ -1614,7 +1627,7 @@ def summarize_revision_request(path: str) -> Dict[str, Any]:
 
 
 def _request_uses_full_track_replacement_audio(request: RevisionRequest) -> bool:
-    if request.audio_delivery_plan.mode == "segmented":
+    if request.workflow_mode == "lite" or request.audio_delivery_plan.mode == "segmented":
         return False
     return bool(
         request.preserve.replacement_audio_material
@@ -1632,6 +1645,14 @@ def _replacement_audio_paths_for_request(request: RevisionRequest) -> List[str]:
     ]
     if _request_uses_full_track_replacement_audio(request):
         paths.append(request.project.replacement_audio)
+    if request.workflow_mode == "lite":
+        paths.extend(
+            str(pair.get("replacement_audio_path") or "")
+            for pair in request.project.source_pairs
+            if pair.get("audio_mode") == "replace_original"
+        )
+        if not request.project.source_pairs and request.project.audio_mode == "replace_original":
+            paths.append(request.project.replacement_audio)
     unique_paths: List[str] = []
     for path in paths:
         if path and path not in unique_paths:

@@ -532,9 +532,11 @@ class _LiteSourcePair:
     duration: float = 0.0
     video_stream_duration: float = 0.0
     source_audio_duration: float = 0.0
+    working_audio_duration: float = 0.0
     video_material: Any = None
     source_audio_material: Any = None
     replacement_audio_material: Any = None
+    working_audio_material: Any = None
 
 
 def _lite_pause_offset_before(
@@ -1475,6 +1477,15 @@ def _source_pair_result_rows(pairs: List[_LiteSourcePair]) -> List[Dict[str, Any
             ),
             "video_material_id": str(getattr(pair.video_material, "material_id", "")),
             "source_audio_material_id": str(getattr(pair.source_audio_material, "material_id", "")),
+            "working_audio_path": (
+                pair.replacement_audio_path if pair.audio_mode == "replace_original"
+                else pair.source_audio_path or pair.video_path
+            ),
+            "working_audio_sha256": (
+                pair.replacement_audio_sha256 if pair.audio_mode == "replace_original"
+                else pair.source_audio_sha256 or pair.video_sha256
+            ),
+            "working_audio_material_id": str(getattr(pair.working_audio_material, "material_id", "")),
             "replacement_audio_material_id": str(
                 getattr(pair.replacement_audio_material, "material_id", "")
             ),
@@ -1967,8 +1978,11 @@ def _validate_lite_content(
     source_pair_offsets: Optional[Iterable[float]] = None,
     source_pair_video_durations: Optional[Iterable[float]] = None,
     source_pair_audio_durations: Optional[Iterable[float]] = None,
+    working_audio_bindings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
+    from utils.working_audio import saved_working_audio_errors
+    errors.extend(saved_working_audio_errors(content, working_audio_bindings or []))
     tracks = [track for track in content.get("tracks", []) if isinstance(track, dict)]
     track_names = [str(track.get("name") or "") for track in tracks]
     duplicate_track_names = sorted(
@@ -2582,6 +2596,11 @@ def execute_lite_revision_request(
         _validate_pause_delete_boundaries(provisional_deletes, request.pause_adjustments)
 
     draft, marker_type, mock_audio, mock_video, _jy_project = _runtime_components()
+    if not mock_media and not request.project.source_pairs:
+        for field in ("source_video", "source_audio", "replacement_audio"):
+            expected = getattr(request.project, field + "_sha256", "")
+            if expected and _file_sha256(getattr(request.project, field)) != expected:
+                raise ValueError("Working audio source material changed before localization")
     project, write_info = _open_project(request, drafts_root)
     _disable_maintrack_adsorb(project)
     validated = False
@@ -2593,6 +2612,8 @@ def execute_lite_revision_request(
         if request.project.duration_tolerance_seconds is not None
         else 3.0
     )
+    working_audio_bindings: List[Dict[str, Any]] = []
+    working_audio_sync_reports: List[Dict[str, Any]] = []
     if pair_mode and pair_tolerance < 0:
         raise ValueError("project.duration_tolerance_seconds must be non-negative.")
     try:
@@ -2670,6 +2691,11 @@ def execute_lite_revision_request(
                         pair.duration,
                     ),
                 )
+                # Preserve the original in the library even when no timeline
+                # segment should play it. A1/A2 will select working material.
+                project.script.add_material(pair.source_audio_material)
+                pair.working_audio_material = pair.source_audio_material
+                pair.working_audio_duration = pair.source_audio_duration
                 if pair.audio_mode == "replace_original":
                     pair.replacement_audio_material = _make_audio_material(
                         draft,
@@ -2678,16 +2704,10 @@ def execute_lite_revision_request(
                         pair.declared_audio_duration or pair.duration,
                         mock_media,
                     )
-                    if mock_media:
-                        detected_audio_duration = _material_duration_seconds(
-                            pair.replacement_audio_material,
-                            pair.declared_audio_duration or pair.duration,
-                        )
-                    else:
-                        detected_audio_duration = _material_duration_seconds(
-                            pair.replacement_audio_material,
-                            pair.declared_audio_duration or pair.duration,
-                        )
+                    detected_audio_duration = _material_duration_seconds(
+                        pair.replacement_audio_material,
+                        pair.declared_audio_duration or pair.duration,
+                    )
                     if detected_audio_duration <= 0:
                         raise ValueError(
                             f"Lite source pair {pair.pair_index} has no positive replacement audio duration."
@@ -2696,7 +2716,44 @@ def execute_lite_revision_request(
                         raise ValueError(
                             f"Lite source pair {pair.pair_index} video/audio duration exceeds configured tolerance."
                         )
+                    if detected_audio_duration + 1e-6 < pair.duration:
+                        raise ValueError(
+                            f"Lite source pair {pair.pair_index} replacement audio does not cover "
+                            "the unchanged source timeline."
+                        )
                     pair.declared_audio_duration = detected_audio_duration
+                    pair.working_audio_material = pair.replacement_audio_material
+                    pair.working_audio_duration = pair.duration
+                    if not mock_media:
+                        from utils.working_audio import validate_working_audio_sync
+
+                        working_audio_sync_reports.append({
+                            "pair_index": pair.pair_index,
+                            **validate_working_audio_sync(
+                                pair.video_path,
+                                pair.replacement_audio_path,
+                                duration_seconds=pair.duration,
+                            ),
+                        })
+                binding = {
+                    "pair_index": pair.pair_index,
+                    "offset": pair.offset,
+                    "duration": pair.duration,
+                    "original_path": pair.source_audio_path or pair.video_path,
+                    "working_path": (
+                        pair.replacement_audio_path if pair.audio_mode == "replace_original"
+                        else pair.source_audio_path or pair.video_path
+                    ),
+                }
+                if not mock_media:
+                    binding.update(
+                        original_sha256=pair.source_audio_sha256 or pair.video_sha256,
+                        working_sha256=(
+                            pair.replacement_audio_sha256 if pair.audio_mode == "replace_original"
+                            else pair.source_audio_sha256 or pair.video_sha256
+                        ),
+                    )
+                working_audio_bindings.append(binding)
                 pair_runtime_rows.append(pair)
                 pair_cursor += pair.duration
             source_pairs = pair_runtime_rows
@@ -2771,8 +2828,6 @@ def execute_lite_revision_request(
         ]
         if not segmented_audio_delivery:
             fixed_tracks.append((LITE_TRACKS["source_audio"], draft.TrackType.audio))
-            if pair_mode and any(pair.audio_mode == "replace_original" for pair in source_pairs):
-                fixed_tracks.append(("Replacement Audio", draft.TrackType.audio))
         for track_name, track_type in fixed_tracks:
             absolute_index = video_render_indexes.get(track_name)
             if absolute_index is None:
@@ -2926,13 +2981,40 @@ def execute_lite_revision_request(
                     }
                 )
 
-        audio_path = request.project.source_audio or request.project.source_video
+        original_audio_path = request.project.source_audio or request.project.source_video
+        audio_path = (
+            request.project.replacement_audio
+            if request.project.audio_mode == "replace_original" else original_audio_path
+        )
+        if not pair_mode:
+            binding = {
+                "pair_index": 0, "offset": 0.0, "duration": total_duration,
+                "original_path": original_audio_path, "working_path": audio_path,
+            }
+            if not mock_media:
+                binding.update(
+                    original_sha256=request.project.source_audio_sha256 or _file_sha256(original_audio_path),
+                    working_sha256=(
+                        request.project.replacement_audio_sha256 if request.project.audio_mode == "replace_original"
+                        else request.project.source_audio_sha256
+                    ) or _file_sha256(audio_path),
+                )
+                if request.project.audio_mode == "replace_original":
+                    from utils.working_audio import validate_working_audio_sync
+
+                    working_audio_sync_reports.append({
+                        "pair_index": 0,
+                        **validate_working_audio_sync(
+                            request.project.source_video, audio_path, duration_seconds=total_duration
+                        ),
+                    })
+            working_audio_bindings.append(binding)
         audio_material = None
         audio_duration = total_duration
         source_audio_duration = total_duration
         if pair_mode:
-            # Each pair owns its own source audio material.  Kept A1 clips and
-            # deleted A2 reference clips use local source clocks, while their
+            # Each pair owns a working source. Kept A1 clips and audible
+            # deleted A2 trace clips use local source clocks, while their
             # target positions remain on the cumulative timeline.
             audio_delete_items = [
                 _LiteDeleteWindow(
@@ -2956,12 +3038,12 @@ def execute_lite_revision_request(
                     source_pairs,
                     keep_start,
                     keep_end,
-                    duration_field="source_audio_duration",
+                    duration_field="working_audio_duration",
                 ):
                     _add_audio_segment(
                         project,
                         draft,
-                        pair.source_audio_material,
+                        pair.working_audio_material,
                         track_name=LITE_TRACKS["source_audio"],
                         timeline_start=_map_lite_source_time(
                             global_start,
@@ -2970,7 +3052,7 @@ def execute_lite_revision_request(
                         ),
                         source_start=local_start,
                         duration=local_end - local_start,
-                        volume=0.0 if pair.audio_mode == "replace_original" else 1.0,
+                        volume=1.0,
                     )
             if audio_delete_items:
                 project.script.add_track(draft.TrackType.audio, LITE_TRACKS["reused_audio"])
@@ -2979,7 +3061,7 @@ def execute_lite_revision_request(
                         source_pairs,
                         window.start,
                         window.end,
-                        duration_field="source_audio_duration",
+                        duration_field="working_audio_duration",
                     ):
                         target_start = _map_lite_source_time(
                             global_start,
@@ -2989,7 +3071,7 @@ def execute_lite_revision_request(
                         audio_segment = _add_audio_segment(
                             project,
                             draft,
-                            pair.source_audio_material,
+                            pair.working_audio_material,
                             track_name=LITE_TRACKS["reused_audio"],
                             timeline_start=target_start,
                             source_start=local_start,
@@ -3013,36 +3095,10 @@ def execute_lite_revision_request(
                 reused_audio_expected = True
             else:
                 reused_audio_expected = False
-            if any(pair.audio_mode == "replace_original" for pair in source_pairs):
-                for pair in source_pairs:
-                    replacement_segment = _add_audio_segment(
-                        project,
-                        draft,
-                        pair.replacement_audio_material,
-                        track_name="Replacement Audio",
-                        timeline_start=pair.offset,
-                        source_start=0.0,
-                        duration=pair.duration,
-                        volume=1.0,
-                    )
-                    segment_receipts.append(
-                        {
-                            "item_id": f"source_pair_{pair.pair_index}",
-                            "kind": "replacement_audio",
-                            "track_name": "Replacement Audio",
-                            "segment_id": str(getattr(replacement_segment, "segment_id", "")),
-                            "material_id": str(getattr(replacement_segment, "material_id", "")),
-                            "pair_index": pair.pair_index,
-                            "source_start": 0.0,
-                            "timeline_start": pair.offset,
-                            "duration": pair.duration,
-                            "volume": 1.0,
-                        }
-                    )
-            audio_material = source_pairs[0].source_audio_material
+            audio_material = source_pairs[0].working_audio_material
             audio_duration = total_duration
             source_audio_duration = max(
-                pair.offset + pair.source_audio_duration for pair in source_pairs
+                pair.offset + pair.working_audio_duration for pair in source_pairs
             )
         elif segmented_audio_delivery:
             from utils.revision_runner import _write_segmented_audio_delivery
@@ -3075,7 +3131,13 @@ def execute_lite_revision_request(
             )
             audio_duration = min(total_duration, planned_audio_source_end)
             source_audio_duration = audio_duration
+            if request.project.audio_mode == "replace_original":
+                project.script.add_material(_make_audio_material(
+                    draft, mock_audio, original_audio_path, total_duration, mock_media
+                ))
         else:
+            if not audio_path:
+                raise ValueError("Lite replacement audio is required; original fallback is forbidden.")
             audio_material = _make_audio_material(
                 draft,
                 mock_audio,
@@ -3084,6 +3146,14 @@ def execute_lite_revision_request(
                 mock_media,
             )
             audio_duration = _material_duration_seconds(audio_material, total_duration)
+            if request.project.audio_mode == "replace_original":
+                if abs(audio_duration - total_duration) > pair_tolerance:
+                    raise ValueError("Lite video/audio duration exceeds configured tolerance.")
+                if audio_duration + 1e-6 < total_duration:
+                    raise ValueError("Lite replacement audio does not cover the unchanged source timeline.")
+                project.script.add_material(_make_audio_material(
+                    draft, mock_audio, original_audio_path, total_duration, mock_media
+                ))
             source_audio_duration = min(total_duration, audio_duration)
             if layout == "split_gap":
                 audio_delete_items = [
@@ -3414,47 +3484,30 @@ def execute_lite_revision_request(
                 pause_adjustments=request.pause_adjustments,
                 pause_receipts=pause_receipts,
                 segment_receipts=segment_receipts,
-                    source_video_material_id=str(
-                        getattr(video_material, "material_id", "")
-                    ),
-                    source_video_path=request.project.source_video,
-                    source_video_material_ids=(
-                        [
-                            str(getattr(pair.video_material, "material_id", ""))
-                            for pair in source_pairs
-                        ]
-                        if pair_mode
-                        else None
-                    ),
-                    source_video_paths=(
-                        [pair.video_path for pair in source_pairs]
-                        if pair_mode
-                        else None
-                    ),
-                    source_audio_material_ids=(
-                        [
-                            str(getattr(pair.source_audio_material, "material_id", ""))
-                            for pair in source_pairs
-                        ]
-                        if pair_mode
-                        else None
-                    ),
-                    source_pair_offsets=(
-                        [pair.offset for pair in source_pairs]
-                        if pair_mode
-                        else None
-                    ),
-                    source_pair_video_durations=(
-                        [pair.video_stream_duration for pair in source_pairs]
-                        if pair_mode
-                        else None
-                    ),
-                    source_pair_audio_durations=(
-                        [pair.source_audio_duration for pair in source_pairs]
-                        if pair_mode
-                        else None
-                    ),
-                )
+                working_audio_bindings=working_audio_bindings,
+                source_video_material_id=str(getattr(video_material, "material_id", "")),
+                source_video_path=request.project.source_video,
+                source_video_material_ids=(
+                    [str(getattr(pair.video_material, "material_id", "")) for pair in source_pairs]
+                    if pair_mode else None
+                ),
+                source_video_paths=(
+                    [pair.video_path for pair in source_pairs] if pair_mode else None
+                ),
+                source_audio_material_ids=(
+                    [str(getattr(pair.working_audio_material, "material_id", "")) for pair in source_pairs]
+                    if pair_mode else None
+                ),
+                source_pair_offsets=(
+                    [pair.offset for pair in source_pairs] if pair_mode else None
+                ),
+                source_pair_video_durations=(
+                    [pair.video_stream_duration for pair in source_pairs] if pair_mode else None
+                ),
+                source_pair_audio_durations=(
+                    [pair.working_audio_duration for pair in source_pairs] if pair_mode else None
+                ),
+            )
             validations.append((variant_name, variant_validation))
         primary_name, primary_validation = validations[0]
         validation = {
@@ -3581,6 +3634,8 @@ def execute_lite_revision_request(
             "source_pairs": (
                 _source_pair_result_rows(source_pairs) if pair_mode else []
             ),
+            "working_audio_bindings": working_audio_bindings,
+            "working_audio_sync_reports": working_audio_sync_reports,
             "visual_overlay_results": visual_results,
             "review_marker_count": len(marker_receipt_dicts),
             "review_marker_receipts": marker_receipt_dicts,

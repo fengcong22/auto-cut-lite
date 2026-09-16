@@ -11,12 +11,16 @@ from unittest import mock
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(CURRENT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 SCRIPTS_PATH = os.path.join(REPO_ROOT, "scripts")
 if SCRIPTS_PATH not in sys.path:
     sys.path.insert(0, SCRIPTS_PATH)
 
 from utils import atomic_io
 from utils import review_document_intake as intake
+
+from tests.readiness_support import IsolatedReadinessTestCase
 
 
 class FakeLarkRunner:
@@ -117,7 +121,7 @@ def _single_asset_parsed(
     }
 
 
-class ReviewDocumentIntakeTests(unittest.TestCase):
+class ReviewDocumentIntakeTests(IsolatedReadinessTestCase):
     maxDiff = None
 
     def test_url_mode_uses_fixed_user_identity_commands(self) -> None:
@@ -880,7 +884,7 @@ class ReviewDocumentIntakeTests(unittest.TestCase):
         self.assertFalse(any(value.casefold().endswith((".cmd", ".bat", ".ps1")) for value in prefix))
 
 
-class BoundedReadinessAndCliTests(unittest.TestCase):
+class BoundedReadinessAndCliTests(IsolatedReadinessTestCase):
     def test_inaccessible_cli_is_sanitized_without_attempting_execution(self):
         private_path = "C:/Users/private/npm/lark-cli.cmd"
         with (

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.9+codex.20260915222824",
+  "plugin_version": "1.6.10+codex.20260916122000",
   "embedded_runtime": {
     "name": "auto-cut",
     "version": "1.7.0",
@@ -73,6 +73,7 @@
         "runtime/scripts/utils/review_document_runner.py",
         "runtime/scripts/utils/review_job_compiler.py",
         "runtime/scripts/utils/review_job_pipeline.py",
+        "runtime/scripts/utils/working_audio.py",
         "runtime/scripts/utils/source_manifest.py"
       ]
     },

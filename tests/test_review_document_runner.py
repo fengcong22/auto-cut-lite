@@ -23,6 +23,7 @@ if SCRIPTS_PATH not in sys.path:
 from utils import review_document_runner as runner
 
 from audio_sound.volc_asr import VolcAsrConfig
+from tests.readiness_support import IsolatedReadinessTestCase, isolated_readiness
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -40,7 +41,7 @@ def _write_wav(path: Path, *, fill: int = 1, duration: float = 3.0) -> None:
         target.writeframes(sample * int(16000 * duration))
 
 
-class ReviewDocumentRunnerTests(unittest.TestCase):
+class ReviewDocumentRunnerTests(IsolatedReadinessTestCase):
     maxDiff = None
 
     def _audio_inputs(self, root: Path, *, video_suffix: str = ".mp4") -> tuple[Path, Path]:
@@ -275,6 +276,7 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
                 runner.atomic_copy_file(source, output)
 
         with ExitStack() as stack:
+            stack.enter_context(isolated_readiness())
             stack.enter_context(
                 patch(
                     "utils.runtime_integrity.validate_current_lite_runtime",
@@ -344,16 +346,18 @@ class ReviewDocumentRunnerTests(unittest.TestCase):
         cache_root: Path,
         execution_input_json: Path | None = None,
     ):
-        return runner.run_review_document(
-            snapshot,
-            project,
-            job_root=job_root,
-            drafts_root=drafts_root,
-            package_zip=package_zip,
-            cache_root=cache_root,
-            execution_input_json=execution_input_json,
-            workflow_mode="lite",
-        )
+        with isolated_readiness() as readiness:
+            return runner.run_review_document(
+                snapshot,
+                project,
+                job_root=job_root,
+                drafts_root=drafts_root,
+                package_zip=package_zip,
+                cache_root=cache_root,
+                execution_input_json=execution_input_json,
+                workflow_mode="lite",
+                readiness_path=readiness.path,
+            )
 
     def test_fixed_dag_caches_source_and_reverse_asr_and_resumes_every_phase(self):
         with tempfile.TemporaryDirectory() as tmpdir:

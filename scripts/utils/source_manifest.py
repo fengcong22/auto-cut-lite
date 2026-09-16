@@ -1081,24 +1081,28 @@ def validate_source_pairs(
     mode = str(project.get("audio_mode") or "").strip().casefold()
     if mode not in {"video_original", "replace_original"}:
         mode = "replace_original" if any(isinstance(row, Mapping) and row.get("replacement_audio_path") for row in pairs) else "video_original"
-    if mode == "replace_original" and any(not isinstance(row, Mapping) or not row.get("replacement_audio_path") for row in pairs):
-        raise SourceManifestError("media_count_mismatch", "every video pair requires replacement audio")
     try:
         tolerance = float(tolerance_seconds)
     except (TypeError, ValueError) as exc:
         raise SourceManifestError("media_duration_mismatch", "duration tolerance is invalid") from exc
-    if tolerance < 0:
+    if not math.isfinite(tolerance) or tolerance < 0:
         raise SourceManifestError("media_duration_mismatch", "duration tolerance is invalid")
     result = json.loads(json.dumps(dict(project), ensure_ascii=False))
     result_pairs = result["source_pairs"]
     for index, pair in enumerate(result_pairs):
         if not isinstance(pair, Mapping):
             raise SourceManifestError("media_count_mismatch", f"source pair {index} is invalid")
+        pair_mode = str(pair.get("audio_mode") or mode).strip().casefold()
+        if pair_mode not in {"video_original", "replace_original"}:
+            raise SourceManifestError("audio_mode_invalid", f"source pair {index} audio mode is invalid")
+        pair["audio_mode"] = pair_mode
         video_duration = _duration_from_probe(ffprobe(str(pair.get("video_path") or ""))) if ffprobe is not None else _duration_from_probe(pair.get("video_duration_seconds"))
         if video_duration is not None:
             pair["video_duration_seconds"] = video_duration
-        if mode == "replace_original":
+        if pair_mode == "replace_original":
             audio_path = str(pair.get("replacement_audio_path") or "")
+            if not audio_path:
+                raise SourceManifestError("media_count_mismatch", f"source pair {index} requires replacement audio")
             audio_duration = _duration_from_probe(ffprobe(audio_path)) if ffprobe is not None else _duration_from_probe(pair.get("audio_duration_seconds"))
             if audio_duration is not None:
                 pair["audio_duration_seconds"] = audio_duration

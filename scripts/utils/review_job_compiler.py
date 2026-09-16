@@ -834,6 +834,9 @@ def _normalize_project(project: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("project.source_video is required")
     normalized.setdefault("source_audio", "")
     normalized.setdefault("replacement_audio", "")
+    normalized.setdefault(
+        "audio_mode", "replace_original" if normalized.get("replacement_audio") else "video_original"
+    )
     normalized.setdefault("project_key", "")
     workflow_mode = str(normalized.get("workflow_mode") or "full").strip().lower()
     if workflow_mode not in {"full", "lite"}:

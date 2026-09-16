@@ -92,11 +92,13 @@ from utils.source_manifest import (
     load_source_manifest,
     materialize_manifest_sources,
 )
+from utils.working_audio import validate_working_audio_sync
 
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v9"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v10-working-audio"
+WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
@@ -1328,6 +1330,7 @@ def _validate_existing_package(
         draft_tree = capture_draft_tree_receipt(draft_path)
         if (
             receipt.get("schema_version") != PACKAGE_SCHEMA_VERSION
+            or receipt.get("working_audio_writer_version") != WORKING_AUDIO_WRITER_VERSION
             or receipt.get("status") != "pass"
             or receipt.get("workflow_mode") != "lite"
             or Path(str(receipt.get("archive_path") or "")).resolve(strict=False)
@@ -1629,6 +1632,32 @@ def _concat_alignment_wavs(
     }
 
 
+def _bound_alignment_wav_to_timeline(path: Path, duration_seconds: float) -> None:
+    """Trim only a decoded diagnostic tail; never pad or alter delivery media.
+
+    Pair offsets use video duration. Concatenating slightly longer audio files
+    verbatim would otherwise shift the reverse-ASR candidate after every pair.
+    """
+    with wave.open(str(path), "rb") as source:
+        params = source.getparams()
+        required = int(round(float(duration_seconds) * params.framerate))
+        if required <= 0 or params.nframes < required:
+            raise OrderedSourceAsrIntegrityError(
+                "Working alignment audio does not cover the unchanged source timeline"
+            )
+        if params.nframes == required:
+            return
+        frames = source.readframes(required)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.timeline.tmp")
+    try:
+        with wave.open(str(temporary), "wb") as output:
+            output.setparams(params)
+            output.writeframes(frames)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _run_ordered_source_asr(
     alignment_sources: Sequence[Mapping[str, Any]],
     *,
@@ -1700,6 +1729,7 @@ def _run_ordered_source_asr(
             suffix=".wav",
         )
         _copy_cached_file(cached_alignment, pair_alignment)
+        _bound_alignment_wav_to_timeline(pair_alignment, float(raw_source.get("duration")))
         alignment_paths.append(pair_alignment)
         artifacts.extend([source, pair_alignment])
         cache_hits.append(alignment_hit)
@@ -3125,6 +3155,12 @@ def run_review_document(
                         else (source_audio_path or str(video_path))
                     )
                     alignment_sha256 = sha256_file(Path(alignment_input))
+                    synchronization = None
+                    if mode == "replace_original" and not mock_media:
+                        synchronization = validate_working_audio_sync(
+                            video_path, alignment_input,
+                            duration_seconds=duration, ffmpeg_bin=ffmpeg_bin,
+                        )
                     video_row = {
                         "path": str(video_path),
                         "sha256": video_sha256,
@@ -3140,6 +3176,11 @@ def run_review_document(
                         "source_video_effective": dict(video_row),
                         "source_audio_effective": source_audio_row,
                         "replacement_audio": replacement_row,
+                        "working_audio": {
+                            "path": alignment_input, "sha256": alignment_sha256,
+                            "role": "replacement_audio" if replacement_row is not None else "source_audio",
+                        },
+                        "working_audio_sync": synchronization,
                         "alignment_source": {
                             "path": alignment_input,
                             "sha256": alignment_sha256,
@@ -3208,6 +3249,7 @@ def run_review_document(
                         "source_video_effective": dict(first_pair["source_video_effective"]),
                         "source_audio_effective": dict(first_source_audio),
                         "replacement_audio": dict(first_replacement),
+                        "working_audio": dict(first_pair["working_audio"]),
                         "alignment_source": dict(alignment_sources[0]),
                     },
                 }
@@ -3255,6 +3297,14 @@ def run_review_document(
                 ) != expected.get("sha256"):
                     raise RuntimeError(f"{field} changed after the job input identity was captured")
                 optional_materials[field] = candidate
+
+            audio_mode = str(project.get("audio_mode") or (
+                "replace_original" if optional_materials.get("replacement_audio") else "video_original"
+            )).strip().casefold()
+            if audio_mode not in {"video_original", "replace_original"}:
+                raise ValueError("Legacy project audio_mode is invalid")
+            if audio_mode == "replace_original" and "replacement_audio" not in optional_materials:
+                raise ValueError("replace_original requires replacement_audio; original audio fallback is forbidden")
 
             ffmpeg_info = _media_tool_identity(ffmpeg_bin, mock_media=mock_media)
             ffprobe_info = _media_tool_identity(ffprobe_bin, mock_media=mock_media)
@@ -3356,7 +3406,17 @@ def run_review_document(
                 optional_materials.get("replacement_audio") or ""
             )
             effective_project["media_duration_seconds"] = duration
-            alignment_source = effective_audio
+            effective_project["audio_mode"] = audio_mode
+            alignment_source = (
+                optional_materials["replacement_audio"]
+                if audio_mode == "replace_original" else effective_audio
+            )
+            synchronization = None
+            if audio_mode == "replace_original" and not mock_media:
+                synchronization = validate_working_audio_sync(
+                    effective_video, alignment_source,
+                    duration_seconds=duration, ffmpeg_bin=ffmpeg_bin,
+                )
             material_rows = {
                 "source_video_original": {
                     "path": str(source_video),
@@ -3369,6 +3429,12 @@ def run_review_document(
                 "alignment_source": {
                     "path": str(alignment_source),
                     "sha256": sha256_file(alignment_source),
+                    "role": "replacement_audio" if audio_mode == "replace_original" else "source_audio",
+                },
+                "working_audio": {
+                    "path": str(alignment_source),
+                    "sha256": sha256_file(alignment_source),
+                    "role": "replacement_audio" if audio_mode == "replace_original" else "source_audio",
                 },
                 "source_audio_effective": {
                     "path": str(effective_audio),
@@ -3393,6 +3459,7 @@ def run_review_document(
                 "editable_audio_identity_digest": editable_audio_identity_digest,
                 "ffmpeg_identity": ffmpeg_info,
                 "ffprobe_identity": ffprobe_info,
+                "working_audio_sync": synchronization,
                 "materials": material_rows,
             }
             atomic_write_json(paths["materials_ledger"], materials)
@@ -3555,6 +3622,9 @@ def run_review_document(
                         )
                         cache_hits.append(alignment_hit)
                         _copy_cached_file(cached_alignment, paths["alignment_wav"])
+                        _bound_alignment_wav_to_timeline(
+                            paths["alignment_wav"], float(materials["source_duration_seconds"])
+                        )
                         source_identity_payload = source_asr_cache_identity(
                             alignment_audio_sha256=sha256_file(paths["alignment_wav"]),
                             config=config,
@@ -3915,9 +3985,9 @@ def run_review_document(
                     material_rows = materials.get("materials")
                     if not isinstance(material_rows, Mapping):
                         raise ValueError("Source material ledger is missing material identities")
-                    source_audio_row = material_rows.get("source_audio_effective")
+                    source_audio_row = material_rows.get("working_audio")
                     if not isinstance(source_audio_row, Mapping):
-                        raise ValueError("Source material ledger is missing editable source audio")
+                        raise ValueError("Source material ledger is missing selected working audio")
                     source_audio = Path(str(source_audio_row.get("path") or "")).resolve(
                         strict=True
                     )
@@ -4207,7 +4277,26 @@ def run_review_document(
 
         def run_saved_draft() -> PhaseOutcome:
             nonlocal draft_path_text
+            # Recheck the exact files whose bytes were used by ASR, then carry
+            # their hashes through localization so a copy-time change also fails.
+            from dataclasses import replace
+            material_evidence = _read_json_object(paths["materials_ledger"], "source materials")
+            evidence_rows = list((material_evidence.get("materials") or {}).values())
+            for pair in material_evidence.get("source_pairs") or []:
+                evidence_rows.extend(pair.values())
+            for row in evidence_rows:
+                if isinstance(row, Mapping) and row.get("path") and row.get("sha256"):
+                    if sha256_file(Path(str(row["path"]))) != row["sha256"]:
+                        raise ValueError("Source material changed after ASR identity was captured")
             request = load_revision_request(str(paths["processed_request"]))
+            if not request.project.source_pairs:
+                rows = material_evidence["materials"]
+                request = replace(request, project=replace(
+                    request.project,
+                    source_video_sha256=rows["source_video_effective"]["sha256"],
+                    source_audio_sha256=rows["source_audio_effective"]["sha256"],
+                    replacement_audio_sha256=(rows.get("replacement_audio") or {}).get("sha256", ""),
+                ))
             doc_items = load_review_items_json(str(paths["processed_items"]))
             try:
                 execution = execute_revision_request(
@@ -4233,6 +4322,7 @@ def run_review_document(
             execution_payload = _json_compatible(execution)
             if not isinstance(execution_payload, dict):
                 raise TypeError("Low-level revision execution result is not JSON-compatible")
+            execution_payload["working_audio_writer_version"] = WORKING_AUDIO_WRITER_VERSION
             ledger = _read_json_object(paths["processed_items"], "processed source ledger")
             _validate_marker_receipts(execution_payload, ledger)
             draft_path_text = str(execution_payload.get("draft_path") or "")
@@ -4310,6 +4400,12 @@ def run_review_document(
                     name_resolution=name_resolution,
                     execution_input_digest=execution_input_digest,
                 )
+                # Compatible v2 receipt extension binds a package to the new
+                # working-audio writer; pre-upgrade ZIPs cannot be resumed.
+                receipt_path = _package_receipt_path(package_path)
+                fresh_receipt = _read_json_object(receipt_path, "Lite package receipt")
+                fresh_receipt["working_audio_writer_version"] = WORKING_AUDIO_WRITER_VERSION
+                atomic_write_json(receipt_path, fresh_receipt)
                 package_result = _validate_existing_package(
                     package_path,
                     draft_path,

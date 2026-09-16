@@ -177,6 +177,19 @@ Auto-Cut 1.7.0 checkout or reuse its task intermediates.
 
 ## Required Acceptance
 
+### Restored external working audio
+
+`replace_original` selects the supplied restored file independently for each video pair;
+`video_original` selects original audio. Both A1 and A2 use that working source at normal
+volume. Preserve original audio in the material library; mute video sound and any reference
+track, and never add an audible full-length Replacement Audio over A1/A2.
+ASR, split boundaries, reverse candidate and delivery must share the working source identity.
+Preserve original and restored path/hash separately. Real replacements require the maintained
+`preserve_timeline_envelope_v1` check (coverage, maximum 40 ms measured offset/drift, correlation
+and uniqueness gates); ordinary duration tolerance is not synchronization evidence. Unverifiable
+or short input fails rather than shifting, stretching, padding or falling back to original audio.
+See `docs/working-audio-replacement.zh-CN.md` for thresholds and limitations.
+
 Before delivery, validate the saved root and active timeline variants:
 
 - project duration equals source duration, including when the review asks to add, extend,

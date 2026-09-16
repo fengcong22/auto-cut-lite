@@ -1983,11 +1983,16 @@ def apply_audio_plan_to_compiled_payloads(
     ledger = deepcopy(dict(doc_items))
     rows = _row_by_id(cut_plan)
     source_audio = str(Path(source_audio_path).expanduser().resolve(strict=True))
-    request.setdefault("project", {})["source_audio"] = source_audio
-    request["project"]["media_duration_seconds"] = float(cut_plan["source_duration_seconds"])
-    request["project"]["replacement_audio"] = ""
+    project = request.setdefault("project", {})
+    # This argument is the working source of the delivery plan. It may be a
+    # repaired file (or ordered-pair alignment probe), never a replacement for
+    # the original-source provenance recorded by compilation.
+    if not project.get("source_audio") and not project.get("source_pairs"):
+        mode = str(project.get("audio_mode") or "").casefold()
+        if mode != "replace_original" and not project.get("replacement_audio"):
+            project["source_audio"] = source_audio
+    project["media_duration_seconds"] = float(cut_plan["source_duration_seconds"])
     request["audio_delivery_plan"] = deepcopy(dict(audio_delivery_plan))
-    request.setdefault("preserve", {})["replacement_audio_material"] = False
 
     def update_items(items: Any) -> None:
         if not isinstance(items, list):

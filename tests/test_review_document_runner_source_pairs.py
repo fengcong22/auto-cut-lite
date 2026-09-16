@@ -19,6 +19,7 @@ from utils.source_manifest import canonical_sha256, load_source_manifest
 
 from audio_sound.volc_asr import VolcAsrConfig
 from tests import test_review_document_runner as runner_test_support
+from tests.readiness_support import IsolatedReadinessTestCase
 
 
 def _write_wav(path: Path, *, fill: int, duration: float) -> None:
@@ -39,7 +40,7 @@ class _WaitStore:
         self.waits.append((phase, seconds))
 
 
-class ReviewDocumentRunnerSourcePairTests(unittest.TestCase):
+class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
     def _manifest_payload(self) -> dict[str, object]:
         return {
             "schema_version": 1,

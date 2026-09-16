@@ -1,8 +1,10 @@
+import hashlib
 import json
 import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -187,6 +189,24 @@ class LiteSourcePairsTests(unittest.TestCase):
                 return_value=627.589002,
             ),
         ):
+            # This test stubs decoders, but keeps real byte identities so the
+            # saved-material integrity check remains active in non-mock mode.
+            video_path = os.path.join(drafts_root, "source.mp4")
+            audio_path = os.path.join(drafts_root, "source.m4a")
+            for path in (video_path, audio_path):
+                with open(path, "wb") as stream:
+                    stream.write(b"container-tail-fixture")
+            source_pair = {
+                **request.project.source_pairs[0],
+                "video_path": video_path,
+                "source_audio_path": audio_path,
+                "video_sha256": hashlib.sha256(b"container-tail-fixture").hexdigest(),
+                "source_audio_sha256": hashlib.sha256(b"container-tail-fixture").hexdigest(),
+            }
+            request = replace(request, project=replace(
+                request.project, source_video=video_path, source_audio=audio_path,
+                source_pairs=[source_pair],
+            ))
             result = execute_revision_request(
                 request,
                 drafts_root=drafts_root,
@@ -271,7 +291,7 @@ class LiteSourcePairsTests(unittest.TestCase):
             [row["path"] for row in audios if row["path"].endswith(("first.wav", "second.wav"))],
             ["C:/media/first.wav", "C:/media/second.wav"],
         )
-        replacement = next(track for track in content["tracks"] if track["name"] == "Replacement Audio")
+        replacement = next(track for track in content["tracks"] if track["name"] == "Separated Source Audio")
         self.assertEqual(
             [
                 (

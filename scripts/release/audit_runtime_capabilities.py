@@ -1283,7 +1283,9 @@ def audit_runtime_capabilities(repo_root: Path, release_paths: Iterable[str]) ->
 def discover_release_paths(repo_root: Path) -> list[str]:
     root = repo_root.resolve()
     inventory_path = root / "release-inventory.json"
-    if inventory_path.is_file():
+    # A source checkout may retain a historical exported inventory. Only an
+    # extracted release without Git treats it as the authoritative file set.
+    if inventory_path.is_file() and not (root / ".git").exists():
         inventory = _load_json_object(inventory_path)
         files = inventory.get("files")
         if not isinstance(files, list):

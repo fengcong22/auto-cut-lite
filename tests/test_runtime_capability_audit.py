@@ -808,6 +808,18 @@ def test_repository_release_tree_has_zero_runtime_capability_findings() -> None:
     assert result["findings"] == []
 
 
+def test_live_checkout_audit_uses_tracked_sources_instead_of_stale_release_inventory(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    (root / ".git").mkdir(parents=True)
+    (root / "scripts").mkdir()
+    (root / "scripts" / "current.py").write_text("pass\n", encoding="utf-8")
+    (root / "release-inventory.json").write_text('{"files": [{"path": "scripts/retired.py"}]}', encoding="utf-8")
+    def tracked(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 0, b"scripts/current.py\0", b"")
+    monkeypatch.setattr(auditor.subprocess, "run", tracked)
+    assert auditor.discover_release_paths(root) == ["scripts/current.py"]
+
+
 def test_lite_revision_verification_test_is_in_release_inventory() -> None:
     release_paths = auditor.discover_release_paths(REPO_ROOT)
 
