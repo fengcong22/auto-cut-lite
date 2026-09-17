@@ -105,7 +105,7 @@ from utils.working_audio import validate_working_audio_sync
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v13-document-order-labels"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v14-quoted-range-precedence"
 WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1

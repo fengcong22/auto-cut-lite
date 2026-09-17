@@ -3018,6 +3018,78 @@ class LiteRevisionTests(unittest.TestCase):
             ["\u5443", "\u753b"],
         )
 
+    def test_explicit_quoted_ellipsis_delete_ignores_line_color_runs(self):
+        source_text = "05：40-05：43，删除“我们知道……对吧”"
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "quoted-range",
+                            "source_text": source_text,
+                            "colored_spans": [
+                                {"text": "05：", "color": "rgb(216,57,49)"},
+                                {"text": "40", "color": "rgb(216,57,49)"},
+                                {"text": "-05：43，删除“", "color": "rgb(216,57,49)"},
+                                {"text": "我们知道", "color": "rgb(216,57,49)"},
+                                {"text": "……对吧”", "color": "rgb(216,57,49)"},
+                            ],
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "QuotedRangeColorDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "ellipsis_range_delete")
+        self.assertTrue(item["execution_required"])
+        self.assertNotIn("colored_span_status", item["evidence"])
+        self.assertEqual(
+            item["evidence"]["ignored_rich_text_color_reason"],
+            "explicit_quoted_spoken_delete",
+        )
+
+    def test_named_blue_delete_filters_red_instruction_and_context_runs(self):
+        source_text = "10:27，删除蓝色字“那他面对着民众的抗议”"
+        with tempfile.TemporaryDirectory() as output_dir:
+            compiled = compile_review_job(
+                {
+                    "review_items": [
+                        {
+                            "id": "named-blue",
+                            "source_text": source_text,
+                            "colored_spans": [
+                                {"text": "10:27，删除蓝色字“", "color": "rgb(216,57,49)"},
+                                {"text": "那他", "color": "rgb(36,91,219)"},
+                                {"text": "面对着民众的抗议”", "color": "rgb(216,57,49)"},
+                            ],
+                        }
+                    ]
+                },
+                {
+                    "draft_name": "NamedBlueDraft",
+                    "source_video": "C:/media/source.mp4",
+                    "workflow_mode": "lite",
+                },
+                output_dir,
+            )
+            with open(compiled["doc_items"], "r", encoding="utf-8") as source_file:
+                item = json.load(source_file)["review_items"][0]
+
+        self.assertEqual(item["kind"], "colored_span_delete")
+        self.assertTrue(item["execution_required"])
+        self.assertEqual(item["evidence"]["colored_span_status"], "resolved")
+        self.assertEqual(
+            item["evidence"]["colored_spans"],
+            [{"text": "那他", "color": "rgb(36,91,219)"}],
+        )
+
     def test_blue_delete_without_markup_is_not_guessed_as_whole_sentence(self):
         source_text = (
             "08\uff1a51-08\uff1a56\uff0c\u201c\u4f60\u770b\u3002\u90a3\u4e2a\u8bae\u4f1a\u201d"

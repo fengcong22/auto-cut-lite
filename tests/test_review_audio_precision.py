@@ -890,6 +890,33 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 [edit["start"], edit["end"]],
             )
 
+    def test_quoted_ellipsis_delete_cuts_one_continuous_anchor_range(self):
+        result = resolve_lite_audio_items(
+            [
+                {
+                    "id": "quoted-range",
+                    "kind": "ellipsis_range_delete",
+                    "source_text": "05：40-05：43，删除“我们知道……对吧”",
+                    "start": 340.0,
+                    "execution_required": True,
+                    "evidence": {"delete": "我们知道……对吧"},
+                }
+            ],
+            _source_asr(
+                [
+                    {"text": "我们知道", "start": 339.6, "end": 340.0},
+                    {"text": "中间完整内容", "start": 340.1, "end": 342.8},
+                    {"text": "对吧", "start": 343.07, "end": 343.39},
+                ]
+            ),
+            source_duration_seconds=800.0,
+        )
+
+        row = result["rows"][0]
+        self.assertTrue(row["execution_required"])
+        self.assertEqual(row["source_cut_windows"], [[339.6, 343.39]])
+        self.assertEqual(row["match_method"], "ellipsis_anchor_range")
+
     def test_colored_span_0833_protects_uncolored_inter_span_word(self):
         cut_plan = resolve_lite_audio_items(
             [
@@ -927,7 +954,10 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         )
 
         row = cut_plan["rows"][0]
-        self.assertEqual(cut_plan["planner_version"], "lite-asr-cut-planner-v8-document-order-labels")
+        self.assertEqual(
+            cut_plan["planner_version"],
+            "lite-asr-cut-planner-v9-quoted-range-precedence",
+        )
         self.assertEqual(
             row["source_cut_windows"],
             [[513.44, 513.64], [513.76, 514.0]],

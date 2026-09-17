@@ -33,7 +33,7 @@ from utils.revision_validation import derive_acceptance_profile
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
-_TOOL_VERSION = 5
+_TOOL_VERSION = 6
 _OUTPUT_NAMES = {
     "doc_items": "doc_items.json",
     "revision_request": "revision_request.json",
@@ -208,6 +208,29 @@ def _extract_colored_spans(row: Mapping[str, Any]) -> list[dict[str, Any]]:
                 entry[key] = run.get(key)
         spans.append(entry)
     return spans
+
+
+def _requested_delete_colors(text: str) -> set[str]:
+    """Return colors named as deletion targets, excluding incidental line styling."""
+    requested: set[str] = set()
+    if re.search(r"(?:蓝色字|蓝字)", text):
+        requested.add("blue")
+    if re.search(r"(?:红色字|红字)", text):
+        requested.add("red")
+    return requested
+
+
+def _filter_named_delete_colors(
+    spans: list[dict[str, Any]], requested: set[str]
+) -> list[dict[str, Any]]:
+    if not requested:
+        return spans
+    return [
+        span
+        for span in spans
+        if ("blue" in requested and _is_blue_color(span.get("color")))
+        or ("red" in requested and _is_red_color(span.get("color")))
+    ]
 
 
 def _canonical_json_bytes(value: Any) -> bytes:
@@ -630,11 +653,30 @@ def _canonical_review_items(
         # Only actual Feishu rich-text color proves a spoken colored-span
         # deletion. Plain wording such as "delete the blue text" is ambiguous
         # between speech and the picture, so it remains a non-executing label.
-        colored_spans = _extract_colored_spans(source_row)
+        raw_colored_spans = _extract_colored_spans(source_row)
         has_color_reference = any(
             hint.casefold() in inference_text.casefold() for hint in _COLORED_NOTE_HINTS
         )
-        if colored_spans:
+        requested_colors = _requested_delete_colors(inference_text)
+        explicit_quoted_spoken_delete = (
+            inferred_kind in {"phrase_delete", "ellipsis_range_delete", "gap_delete"}
+            and not has_color_reference
+        )
+        colored_spans = _filter_named_delete_colors(raw_colored_spans, requested_colors)
+        if explicit_quoted_spoken_delete:
+            # Formatting an entire review row (or splitting it into style runs)
+            # does not redefine an explicit quoted spoken target.
+            row.pop("colored_spans", None)
+            row_evidence = (
+                source_row.get("evidence") if isinstance(source_row.get("evidence"), dict) else {}
+            )
+            row_evidence = copy.deepcopy(row_evidence)
+            row_evidence.pop("colored_spans", None)
+            row_evidence.pop("colored_span_status", None)
+            row_evidence["ignored_rich_text_color_reason"] = "explicit_quoted_spoken_delete"
+            row_evidence["ignored_rich_text_color_run_count"] = len(raw_colored_spans)
+            row["evidence"] = row_evidence
+        elif colored_spans:
             kind = "colored_span_delete"
             row["colored_spans"] = copy.deepcopy(colored_spans)
             row_evidence = (

@@ -59,13 +59,13 @@ validation:
 Classify each review item before matching ASR. Do not flatten every item into one phrase-delete operation.
 
 - `phrase_delete`: delete the exact requested spoken phrase.
-- `ellipsis_range_delete`: when the reviewer writes `...` or `……`, delete the full spoken range between the matched prefix and suffix, not only the suffix phrase.
+- `ellipsis_range_delete`: when the reviewer writes `...` or `……`, delete the full spoken range between the matched prefix and suffix, not only the suffix phrase. An explicit quoted range such as `删除“我们知道……对吧”` is controlled by those two spoken anchors; rich-text color applied to the review line is presentation metadata and must not reclassify it as colored-span deletion.
 - `colored_span_delete`: when the Feishu/Lark document uses colored spans, preserve span boundaries and create one delete window per colored fragment. Do not join uncolored words between colored spans into the deletion. Record the uncolored inter-span text and its exact ASR window as automatic `must_keep` evidence.
 - `gap_delete`: when the note says delete the pause between two anchors, keep both anchors in `must_keep` and delete only the gap/filler between them.
 - `pause_timing_review`: when a spoken deletion leaves a questionable pause, decide `shorten`, `extend`, `keep`, `semantic_pause_adjustment`, or `visual_hold_review` separately from whether the delete itself succeeded.
 - `tail_particle_delete`: for particles such as `吧`, `啊`, `哈`, `哎`, protect the following word onset and use a precise non-destructive duck/mute pass if the tail remains.
 
-If the review document contains blue or red deletion text, inspect the document markup for the colored spans instead of relying on the plain-text rendering. Treat `text-color="rgb(36,91,219)"` as blue-span evidence and `text-color="rgb(216,57,49)"` as red-span evidence when present. Preserve every marked fragment independently and never absorb uncolored words between two marked spans.
+If the review document explicitly says to delete blue or red text, inspect the document markup for the requested color instead of relying on the plain-text rendering. Treat `text-color="rgb(36,91,219)"` as blue-span evidence and `text-color="rgb(216,57,49)"` as red-span evidence when present. Ignore other-colored instruction, timestamp, and context runs. Preserve every requested-color fragment independently and never absorb uncolored words between two marked spans.
 
 ## Alignment Rules
 

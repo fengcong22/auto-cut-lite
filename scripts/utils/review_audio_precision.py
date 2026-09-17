@@ -38,7 +38,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v8-document-order-labels"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v9-quoted-range-precedence"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.

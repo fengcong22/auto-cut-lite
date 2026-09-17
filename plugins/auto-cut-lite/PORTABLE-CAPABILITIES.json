@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.13+codex.20260917133513",
+  "plugin_version": "1.6.14+codex.20260917153042",
   "embedded_runtime": {
     "name": "auto-cut",
     "version": "1.7.0",
