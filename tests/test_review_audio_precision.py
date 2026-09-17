@@ -927,7 +927,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         )
 
         row = cut_plan["rows"][0]
-        self.assertEqual(cut_plan["planner_version"], "lite-asr-cut-planner-v7")
+        self.assertEqual(cut_plan["planner_version"], "lite-asr-cut-planner-v8-document-order-labels")
         self.assertEqual(
             row["source_cut_windows"],
             [[513.44, 513.64], [513.76, 514.0]],

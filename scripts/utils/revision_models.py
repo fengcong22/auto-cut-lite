@@ -628,6 +628,8 @@ def lite_unresolved_timebase_status(item: Any) -> str:
 def lite_review_item_execution_status(item: RevisionReviewItem) -> str:
     """Make an unresolved timebase an authoritative Lite marker-only state."""
 
+    if item.kind == "global_review":
+        return "label_only_global_review"
     if lite_unresolved_timebase_status(item):
         return "label_only_unresolved"
     return review_item_execution_status(item)
@@ -649,6 +651,8 @@ def lite_timing_source(kind: str, source_text: str = "") -> str:
     """Choose the authoritative Lite timing source for one review item."""
 
     normalized_kind = str(kind or "").strip().casefold()
+    if normalized_kind == "global_review":
+        return "scope_start"
     if normalized_kind in _LITE_ASR_TIMING_KINDS or lite_pause_change_is_label_only(
         normalized_kind, source_text
     ):

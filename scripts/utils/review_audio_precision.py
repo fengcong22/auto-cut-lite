@@ -38,7 +38,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v7"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v8-document-order-labels"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
@@ -474,6 +474,8 @@ def _rough_window(item: Mapping[str, Any]) -> tuple[float | None, float | None]:
     start = item.get("start")
     end = item.get("end")
     evidence = item.get("evidence") if isinstance(item.get("evidence"), Mapping) else {}
+    if evidence.get("timing_source") == "document_order_fallback" or evidence.get("label_placement"):
+        start = end = None
     if start is None:
         start = evidence.get("review_search_hint_seconds")
     text_start, text_end = _review_text_window(item.get("source_text"))
@@ -967,7 +969,7 @@ def _review_timestamp(item: Mapping[str, Any]) -> float | None:
         evidence.get("review_search_hint_seconds"),
         evidence.get("resolved_review_timestamp_seconds"),
         text_time,
-        item.get("start"),
+        item.get("start") if not evidence.get("label_placement") else None,
     ):
         try:
             value = float(candidate)
@@ -1670,13 +1672,11 @@ def resolve_lite_audio_items(
             )
         else:
             review_time = review_label_time
-            if review_time is None:
-                raise ValueError(
-                    f"Lite audio item {item_id} could not be ASR-located and has no review timestamp"
-                )
             label_matches = []
             resolved_time = review_time
-            timing_source = "review_timestamp_fallback"
+            timing_source = (
+                "review_timestamp_fallback" if review_time is not None else "document_order_fallback"
+            )
             alignment = None
         if unresolved_timebase:
             reason = unresolved_timebase
@@ -1702,7 +1702,7 @@ def resolve_lite_audio_items(
                 "delete": delete_phrase,
                 "must_keep": must_keep,
                 "must_keep_origin": must_keep_origin,
-                "resolved_time": round(resolved_time, 6),
+                "resolved_time": round(resolved_time, 6) if resolved_time is not None else None,
                 "reason": reason,
                 "match_method": match_method,
                 "matches": label_matches,
@@ -1809,24 +1809,22 @@ def downgrade_reverse_asr_failures(
             if math.isfinite(value) and value >= 0.0:
                 fallback_time = value
                 break
-        if fallback_time is None:
-            raise ValueError(
-                f"Reverse-ASR fallback item {item_id} has no reliable review timestamp"
-            )
         start = float(raw_row.pop("start"))
         end = float(raw_row.pop("end"))
         raw_row["status"] = "label_only"
         raw_row["execution_required"] = False
         raw_row["execution_status"] = "label_only_unresolved"
         raw_row["reason"] = "reverse_asr_validation_unresolved"
-        raw_row["resolved_time"] = round(fallback_time, 6)
-        raw_row["timing_source"] = "review_timestamp_fallback"
+        raw_row["resolved_time"] = round(fallback_time, 6) if fallback_time is not None else None
+        raw_row["timing_source"] = (
+            "review_timestamp_fallback" if fallback_time is not None else "document_order_fallback"
+        )
         raw_row["rejected_cut_window"] = [round(start, 6), round(end, 6)]
         alignment = raw_row.get("asr_alignment")
         if isinstance(alignment, dict):
             alignment["authoritative_timing"] = False
             alignment["authoritative_cut_boundary"] = False
-            alignment["resolved_time"] = round(fallback_time, 6)
+            alignment["resolved_time"] = raw_row["resolved_time"]
             alignment.pop("resolved_cut_window", None)
         downgraded_ids.append(item_id)
 
@@ -2042,11 +2040,17 @@ def apply_audio_plan_to_compiled_payloads(
                 evidence["resolved_cut_windows"] = deepcopy(row_windows)
             if row.get("delete_phrases"):
                 evidence["delete_phrases"] = list(row.get("delete_phrases") or [])
-            if row.get("timing_source") == "review_timestamp_fallback":
-                evidence["timing_source"] = "review_timestamp_fallback"
-                evidence["review_timestamp_role"] = "authoritative_fallback"
+            if row.get("timing_source") in {"review_timestamp_fallback", "document_order_fallback"}:
+                evidence["timing_source"] = row["timing_source"]
+                evidence["review_timestamp_role"] = (
+                    "display_only"
+                    if row["timing_source"] == "document_order_fallback"
+                    else "authoritative_fallback"
+                )
                 evidence.pop("asr_alignment", None)
             else:
+                evidence["timing_source"] = "asr"
+                evidence.pop("label_placement", None)
                 evidence["review_timestamp_role"] = "search_hint"
                 evidence["asr_alignment"] = deepcopy(row["asr_alignment"])
             if row["execution_required"]:
@@ -2058,13 +2062,20 @@ def apply_audio_plan_to_compiled_payloads(
                 evidence["execution_status"] = row["execution_status"]
                 evidence["reason"] = row.get("reason")
             item["start"] = row["resolved_time"]
-            item["end"] = round(float(row["resolved_time"]) + 0.8, 6)
+            item["end"] = (
+                round(float(row["resolved_time"]) + 0.8, 6)
+                if row["resolved_time"] is not None else None
+            )
             item["execution_required"] = bool(row["execution_required"])
             item["execution_status"] = row["execution_status"]
             item["evidence"] = evidence
 
     update_items(request.get("review_items"))
     update_items(ledger.get("review_items"))
+    from utils.review_scope import place_missing_review_labels
+
+    for payload in (request, ledger):
+        place_missing_review_labels(payload.get("review_items") or [], project)
 
     asr_item_ids = set(rows)
     request["edits"] = [

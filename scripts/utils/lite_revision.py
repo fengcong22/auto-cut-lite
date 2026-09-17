@@ -73,7 +73,7 @@ _VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 _TRUE_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "no", "n", "off"}
-_LITE_GROUPED_MARKER_TRACK = re.compile(r"^Review Marker (Delete|Visual|Animation) ([1-9]\d*)$")
+_LITE_GROUPED_MARKER_TRACK = re.compile(r"^Review Marker (Delete|Visual|Animation|Global) ([1-9]\d*)$")
 _LITE_GROUPED_MARKER_MIN_FONT_SIZE = 4.0
 _LITE_GROUPED_MARKER_MAX_FONT_SIZE = 5.0
 _LITE_GROUPED_DELETE_COLOR = "#B42318"
@@ -1855,6 +1855,10 @@ def _marker_items(
     marker_source_request: Optional[RevisionRequest] = None,
 ) -> Tuple[List[Any], List[Dict[str, Any]], List[str]]:
     source_request = marker_source_request or execution_request
+    source_request = replace(
+        source_request,
+        project=replace(source_request.project, media_duration_seconds=timeline_duration),
+    )
     plan = map_marker_plan_to_timeline(
         build_marker_plan(source_request, doc_items=doc_items),
         execution_request,
@@ -1866,7 +1870,8 @@ def _marker_items(
         if start >= timeline_duration and timeline_duration > 0:
             start = max(0.0, timeline_duration - 0.01)
             warnings.append(f"Marker {item.item_id} started at the timeline end and was clamped.")
-        duration = min(2.0, max(0.01, timeline_duration - start)) if timeline_duration > 0 else 0.01
+        display_end = min(timeline_duration, item.review_scope.get("end", timeline_duration))
+        duration = min(2.0, max(0.01, display_end - start)) if timeline_duration > 0 else 0.01
         markers.append(
             marker_type(
                 label=item.source_text,
@@ -1878,6 +1883,8 @@ def _marker_items(
                 verbatim_status=item.verbatim_status,
                 kind=item.kind,
                 execution_status=item.execution_status,
+                review_scope=item.review_scope,
+                label_placement=item.label_placement,
             )
         )
     return markers, plan, warnings
@@ -1907,7 +1914,7 @@ def _lite_grouped_marker_layout_problems(content: Dict[str, Any]) -> List[str]:
         match = _LITE_GROUPED_MARKER_TRACK.fullmatch(name)
         if match is None:
             problems.append(
-                f"Lite marker track {name!r} is not one of the grouped Delete/Visual/Animation lanes."
+                f"Lite marker track {name!r} is not one of the grouped Delete/Visual/Animation/Global lanes."
             )
             continue
         group = match.group(1)
@@ -1989,6 +1996,8 @@ def _lite_grouped_marker_layout_problems(content: Dict[str, Any]) -> List[str]:
                 problems.append(
                     f"Lite animation marker {segment_id} does not use the stable animation color."
                 )
+            elif group == "Global" and background_color != "#475569":
+                problems.append(f"Lite global marker {segment_id} does not use the global label color.")
             if material.get("force_apply_line_max_width") is not True:
                 problems.append(f"Lite marker {segment_id} does not force the safe line width.")
     return problems
@@ -2549,6 +2558,25 @@ def _validate_lite_content(
             errors.append(f"Lite marker {marker.item_id} is not aligned to its edit start.")
         if saved["duration"] <= 0 or saved["duration"] > 2.001:
             errors.append(f"Lite marker {marker.item_id} duration is outside the 2s rule.")
+        if marker.label_placement:
+            receipts = [row for row in marker_receipts if row.get("item_id") == marker.item_id]
+            if (
+                len(receipts) != 1
+                or receipts[0].get("label_placement") != marker.label_placement
+                or not str(receipts[0].get("execution_status") or "").startswith("label_only_")
+                or abs(saved["start"] - marker.label_placement["resolved_time"]) > 0.001
+            ):
+                errors.append(f"Lite untimed marker {marker.item_id} display receipt mismatch.")
+        if marker.kind == "global_review":
+            receipts = [row for row in marker_receipts if row.get("item_id") == marker.item_id]
+            if (
+                len(receipts) != 1
+                or receipts[0].get("review_scope") != marker.review_scope
+                or not str(receipts[0].get("track_name", "")).startswith("Review Marker Global ")
+                or receipts[0].get("execution_status") != "label_only_global_review"
+                or saved["start"] + saved["duration"] > marker.review_scope["end"] + 1e-6
+            ):
+                errors.append(f"Lite global marker {marker.item_id} scope/receipt mismatch.")
     errors.extend(review_marker_top_layout_problems(content))
     errors.extend(_lite_grouped_marker_layout_problems(content))
 
@@ -3516,6 +3544,8 @@ def execute_lite_revision_request(
                 "item_id": item.item_id,
                 "source_text": item.source_text,
                 "execution_status": item.execution_status,
+                "review_scope": item.review_scope,
+                "label_placement": item.label_placement,
                 "segment_id": item.segment_id,
                 "material_id": item.material_id,
                 "track_name": item.track_name,
@@ -3696,6 +3726,12 @@ def execute_lite_revision_request(
             "pause_results": pause_receipts,
             "label_only_item_ids": label_only_item_ids,
             "label_only_unresolved_item_ids": unresolved_label_only_item_ids,
+            "global_review_labels": [
+                {"item_id": item.item_id, "source_text": item.source_text,
+                 "status": "label_only_global_review", "executed": False,
+                 "review_scope": item.review_scope}
+                for item in marker_plan if item.kind == "global_review"
+            ],
             "label_only_pause_item_ids": pause_label_only_item_ids,
             "localized_materials": localized_materials,
             "source_pairs": (_source_pair_result_rows(source_pairs) if pair_mode else []),

@@ -599,14 +599,9 @@ def select_docx_section(
 
 
 def _review_items_from_section(selection: DocxSectionSelection) -> list[dict[str, Any]]:
-    rows = [dict(row) for row in selection.text_blocks]
-    checkbox_rows = [row for row in rows if _block_kind(row) == "checkbox"]
-    selected = checkbox_rows or [row for row in rows if not _is_heading(row)]
-    for row in selected:
-        if _block_kind(row) in {"checkbox", "text"}:
-            row.pop("kind", None)
-            row.pop("type", None)
-    return selected
+    from utils.review_scope import select_review_rows
+
+    return select_review_rows([dict(row) for row in selection.blocks], bounded=True)
 
 
 def _safe_filename(name: Any, fallback: str) -> str:
@@ -959,6 +954,21 @@ def materialize_manifest_sources(
     review_descriptor = source_descriptors["review"]
     review_selection = select_docx_section(parsed, str(review_descriptor.get("anchor_text") or ""), configured_anchors)
     review_items = _review_items_from_section(review_selection)
+    video_assets = [
+        row for row in select_docx_section(
+            parsed, str(source_descriptors["video"].get("anchor_text") or ""), configured_anchors
+        ).attachments
+        if _classify(row.get("mime"), str(row.get("name") or row.get("filename") or "")) == "video"
+    ] if source_descriptors["video"].get("kind") == "docx_section" else []
+    for item in review_items:
+        intake = item.get("evidence", {}).get("review_intake", {})
+        target = intake.get("target_asset_id")
+        if target:
+            matches = [index for index, row in enumerate(video_assets) if target == row.get("asset_id")]
+            if len(matches) == 1:
+                intake["target_pair_index"] = matches[0]
+            else:
+                intake["target_unresolved"] = True
     if not review_items:
         raise SourceManifestError("review_source_empty", "configured review source contains no meaningful text")
 

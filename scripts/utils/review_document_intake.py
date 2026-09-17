@@ -26,7 +26,7 @@ from utils.execution_input import resolve_artifact_name
 
 INTAKE_SCHEMA_VERSION = 1
 READINESS_SCHEMA_VERSION = 1
-LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v2"
+LARK_ADAPTER_VERSION = "auto-cut-lite-lark-document-v3-mixed-review-blocks"
 LARK_PREFLIGHT_COMMAND_TIMEOUT_SECONDS = 10.0
 LARK_COMMAND_TIMEOUT_SECONDS = 120.0
 LARK_COMMAND_CLEANUP_TIMEOUT_SECONDS = 0.5
@@ -1020,11 +1020,6 @@ def parse_lark_document(
         review_rows.append(row)
         checkbox_positions.append((top_indexes.get(id(checkbox), -1), len(review_rows) - 1))
 
-    if not review_rows and require_review_items:
-        raise ReviewDocumentIntakeError(
-            "review_items_missing", "The Feishu/Lark document contains no review checkbox items"
-        )
-
     assets: list[dict[str, Any]] = []
     for asset_index, element in enumerate(
         candidate for candidate in root.iter() if candidate.tag in {"img", "source"}
@@ -1139,17 +1134,20 @@ def parse_lark_document(
         recognized = [
             node
             for node in top.iter()
-            if str(node.tag or "").casefold() in {"heading", "header", "title", "checkbox"}
+            if str(node.tag or "").casefold() in {"heading", "header", "title", "checkbox", "li", "p", "paragraph"}
             or re.fullmatch(r"h[1-6]", str(node.tag or "").casefold())
         ]
+        recognized = [node for node in recognized if not any(
+            child is not node and child in recognized for child in node.iter()
+        )]
         if recognized:
             for node in recognized:
-                text = "".join(node.itertext()).strip()
+                text = "".join(node.itertext())
                 kind = str(node.tag or "").casefold()
-                if not text and kind != "checkbox":
+                if not text.strip() and kind != "checkbox":
                     continue
                 block: dict[str, Any] = {
-                    "kind": "heading" if kind in {"heading", "header", "title"} or re.fullmatch(r"h[1-6]", kind) else kind,
+                    "kind": "heading" if kind in {"heading", "header", "title"} or re.fullmatch(r"h[1-6]", kind) else "checkbox" if kind == "checkbox" else "text",
                     "text": text,
                     "source_text": text,
                     "block_index": top_index,
@@ -1159,6 +1157,20 @@ def parse_lark_document(
                     block["level"] = level
                 if node.get("id"):
                     block["id"] = str(node.get("id"))
+                if kind == "checkbox":
+                    checked = node.get("checked")
+                    block["checked"] = (
+                        str(checked).casefold() in {"true", "1", "yes"} if checked is not None else None
+                    )
+                block["block_id"] = "block_" + _sha256_text(
+                    f"{document_identity_sha256}\0{node.get('id') or str(top_index) + ':' + str(len(blocks))}"
+                )[:24]
+                colored_spans = [
+                    {"text": "".join(span.itertext()), "color": str(span.get("text-color"))}
+                    for span in node.iter("span") if span.get("text-color")
+                ]
+                if colored_spans:
+                    block["colored_spans"] = colored_spans
                 blocks.append(block)
         else:
             # A plain/bold label is represented as one text block.  Attachment
@@ -1169,14 +1181,17 @@ def parse_lark_document(
                     continue
                 if node.text:
                     text_parts.append(node.text)
-            text = "".join(text_parts).strip()
-            if text:
+            text = "".join(text_parts)
+            if text.strip():
                 blocks.append(
                     {
                         "kind": "text",
                         "text": text,
                         "source_text": text,
                         "block_index": top_index,
+                        "block_id": "block_" + _sha256_text(
+                            f"{document_identity_sha256}\0{top.get('id') or top_index}"
+                        )[:24],
                         "standalone": True,
                     }
                 )
@@ -1194,6 +1209,27 @@ def parse_lark_document(
                     "document_position": asset.get("document_position"),
                 }
             )
+
+    from utils.review_scope import select_review_rows
+
+    old_rows = review_rows
+    review_rows = select_review_rows(blocks)
+    new_by_id = {row.get("block_id"): index for index, row in enumerate(review_rows)}
+    for asset in assets:
+        old_index = asset.get("associated_item_index")
+        if isinstance(old_index, int) and 0 <= old_index < len(old_rows):
+            asset["associated_item_index"] = new_by_id.get(old_rows[old_index].get("block_id"))
+        if asset.get("associated_item_index") is None:
+            preceding = [
+                (index, row) for index, row in enumerate(review_rows)
+                if 0 < asset["block_index"] - row.get("block_index", -100) <= 1
+            ]
+            if preceding:
+                asset["associated_item_index"] = preceding[-1][0]
+    if not review_rows and require_review_items:
+        raise ReviewDocumentIntakeError(
+            "review_items_missing", "The document contains no review items in a review or material region"
+        )
 
     safe_asset_identity = [
         {
@@ -1618,6 +1654,14 @@ def compile_url_inputs(
         )
 
     visual_asset_ids: set[str] = set()
+    for item in review_items:
+        intake = item.get("evidence", {}).get("review_intake", {})
+        target = intake.get("target_asset_id")
+        if target:
+            if target == source_video.get("asset_id"):
+                intake["target_pair_index"] = 0
+            else:
+                intake["target_unresolved"] = True
     direct_by_item: dict[int, list[dict[str, Any]]] = {}
     for asset in asset_rows:
         if not _is_image_asset(asset):

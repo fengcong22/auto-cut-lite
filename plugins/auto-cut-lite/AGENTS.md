@@ -47,6 +47,14 @@
 
 ## Lite Execution Precedence
 
+- Explicit whole-source/project requirements and maintained voice-preset, toolbar-hiding, and
+  rough-cut checklist profiles are label-only `global_review`. Read mixed paragraphs/lists and
+  checkboxes only within review/material regions, preserving original text and checkbox state.
+  Require a unique source binding or explicit project scope. Place one exact label per item on
+  `Review Marker Global N` at the scope start for up to two seconds, clamped to the scope end.
+  This display anchor is not an inferred edit time; record scope and `label_only_global_review`
+  internally and report not executed. Local or ambiguous items still require valid timing.
+
 - Before classifying or executing any visual review item, read
   `.codex/skills/auto-cut-lite/references/lite-execution-contract.md`.
 - That contract overrides conflicting text in every router, focused skill, reference, checklist,
@@ -69,13 +77,15 @@
 - Review-only, newly encountered, unrecognized, and ASR-unresolved non-executing items use
   review-comment timestamps. When a comment names an old time and a requested target such as
   `07:14 ... 提前到 07:12`, place the label at `07:12`. Point timestamps are valid label starts;
-  fail only when neither ASR nor the review comment supplies a valid time, and never use `0:00`.
+  if neither ASR nor the review comment supplies a time, keep a display-only label immediately
+  after the previous local label (two seconds later), or at `0:00` for the first local item.
+  Chain consecutive untimed labels and clamp to the project end. Record `document_order_fallback`
+  and the predecessor internally; this placement never authorizes an edit or supplies an ASR hint.
 - If a new issue cannot be solved safely but has a reliable authoritative start, create exactly
   one visible label equal only to its `source_text`, record
   `execution_status=label_only_unresolved` only in internal metadata/receipts/reports, and continue
   independent items. Do not improvise an edit. If ASR cannot uniquely locate a non-executing
-  item, use its review-comment time. Fail before opening or writing only when neither source
-  supplies a valid time.
+  item, use its review-comment time, then the display-only document-order rule above.
 - Lite deletion never compresses the timeline, and final duration always equals source duration.
   Every request to add, extend, shorten, or otherwise adjust a pause, including `+Ns`, `-Ns`, and
   `semantic_pause_adjustment`, is label-only at its unique ASR point or review-time fallback. Do not create a

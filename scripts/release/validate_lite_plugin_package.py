@@ -28,6 +28,7 @@ EXPECTED_WORKSPACE_SKILL_COUNT = 17
 REQUIRED_REVIEW_RUNTIME_PATHS = frozenset(
     {
         "runtime/scripts/utils/audio_coverage.py",
+        "runtime/scripts/utils/review_scope.py",
         "runtime/scripts/utils/review_audio_precision.py",
         "runtime/scripts/utils/review_document_runner.py",
         "runtime/scripts/utils/source_manifest.py",

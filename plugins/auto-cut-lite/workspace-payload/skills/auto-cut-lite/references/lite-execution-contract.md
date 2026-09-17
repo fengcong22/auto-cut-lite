@@ -17,6 +17,7 @@ as approval or resolution.
 
 | Review request | Lite behavior | `execution_required` | Acceptance |
 | --- | --- | --- | --- |
+| Explicit whole-source/project requirement, or maintained voice-preset/toolbar-hiding/rough-cut checklist profile | One verbatim label on `Review Marker Global N` at the bound scope start; do not apply the requested effect or edit | `false` | Unique source binding or explicit project scope, full scope receipt, original text, non-execution status; no local timestamp required |
 | Animation, page turn, reveal, release, or other picture-timing change | Keep one two-second label whose text is exactly `source_text` at the requested start | `false` | Label only; no animation evidence |
 | Supplied hand, arrow, pointer, or other local visual asset | Insert one ordinary editable asset segment at the requested start | `true` | Saved asset, editable segment, and start alignment only |
 | Supplied PNG/JPG replacement or local picture | Insert one ordinary editable asset segment at the requested start | `true` | Saved asset, editable segment, and start alignment only |
@@ -27,7 +28,7 @@ as approval or resolution.
 | Pronunciation, breath, mouth noise, or other audio-identifiable timing | Attempt the actual word/character boundary with source ASR | `false` unless an explicit maintained non-duration executor exists | Label at the unique ASR boundary, otherwise at the review-comment time |
 | Review-only or ASR-unresolved item | Parse the review timestamp or explicitly requested target | Per visual rule | Point timestamps are valid; a two-clock move uses the first/original time for the label and keeps the destination only as internal evidence |
 | New or unrecognized issue with reliable authoritative time but no safe maintained implementation | Keep one label whose visible text is exactly `source_text`; skip ad-hoc execution | `false` | Record `execution_status=label_only_unresolved` only in internal metadata/receipts/reports and continue independent items |
-| Item with neither a unique ASR point nor a valid review-comment time | Do not create or update the draft | N/A | Fail before draft open/write; never guess `0:00` |
+| Local item with neither a unique ASR point nor a valid review-comment time | Keep one independent original-text label after the preceding local label; first local item at `0:00` | `false` | Display-only document-order receipt; chain labels two seconds apart, clamp at project end; never infer execution timing |
 
 An item that explicitly asks both to insert a supplied pointer and to clean the original hand
 executes only the insertion. It must not create a cleanup layer; the same verbatim review label
@@ -68,6 +69,16 @@ correct Lite output.
 
 ## Labels And Acceptance
 
+- Read ordinary requirement paragraphs, list entries, and checkboxes together inside the selected
+  review/material region. Exclude headings, file metadata, examples, and course prose. Preserve
+  checkbox state as source metadata only; it never proves execution or authorizes dropping an item.
+- Whole-scope labels are a separate scope, never inferred solely from missing time. Bind the
+  corresponding source uniquely; use project scope only when explicit. Keep one independent exact
+  original-text label at the scope start for up to two seconds, clamped to that scope's end.
+  Record `placement_basis=scope_start`, scope bounds, and `label_only_global_review` internally;
+  report these requirements as labelled, not executed. No ASR localization is needed for this
+  display anchor. The local timing/ASR rules below apply to local items, not whole-scope labels.
+
 - Keep exactly one visible label per source review item. Its text must equal only that item's
   `source_text` code-point-for-code-point, including timestamps, punctuation, whitespace, line
   breaks, and literal question marks.
@@ -89,9 +100,11 @@ correct Lite output.
 - Review-only and ASR-unresolved items use review timestamps. When both clocks are present after
   cues such as `提前到`, `推迟到`, `移到`, or `调到`, the first/original clock is the label point
   in either direction; retain the destination only as internal `target_time` evidence.
-- Reject every item whose authoritative time is unresolved before draft writing. A missing time
-  source must never produce a marker at `0:00`. This timing failure is distinct from
-  `label_only_unresolved`, which is allowed only after authoritative time is reliable.
+- If local timing remains absent, keep the item `label_only_unresolved` with a verbatim label
+  immediately after the preceding local label (two seconds later). Chain consecutive untimed
+  labels; use `0:00` for the first local item. Clamp to the project end without moving media or
+  existing timed labels. Record `document_order_fallback`, predecessor ID, and `display_only=true`
+  internally. This position never supplies ASR search hints, cut boundaries, or visual edit timing.
 - Put animation/timing labels on `Review Marker Animation N`, supplied visual/pointer labels on
   `Review Marker Visual N`, and other review-only items on the documented fallback family.
 - Start each label at the source item's authoritative source start without a pause-derived offset

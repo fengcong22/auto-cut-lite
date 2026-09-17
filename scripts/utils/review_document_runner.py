@@ -105,7 +105,7 @@ from utils.working_audio import validate_working_audio_sync
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v12-source-tail-coverage"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v13-document-order-labels"
 WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
@@ -1108,7 +1108,10 @@ def _assert_authoritative_starts(ledger: Mapping[str, Any]) -> None:
             continue
         item_id = str(item.get("id") or item.get("item_id") or "")
         start = item.get("start")
-        if isinstance(start, bool) or not isinstance(start, (int, float)) or float(start) < 0:
+        if (
+            isinstance(start, bool) or not isinstance(start, (int, float))
+            or not math.isfinite(start) or float(start) < 0
+        ):
             raise ValueError(
                 f"Review item {item_id} has no authoritative non-negative start; refusing draft write"
             )
@@ -1170,7 +1173,7 @@ def _review_comment_time(item: Mapping[str, Any]) -> float | None:
         evidence.get("review_search_hint_seconds"),
         evidence.get("resolved_review_timestamp_seconds"),
         text_time,
-        item.get("start"),
+        item.get("start") if not evidence.get("label_placement") else None,
     ):
         try:
             value = float(candidate)
@@ -1196,11 +1199,7 @@ def _source_asr_unavailable_cut_plan(
             continue
         item_id = str(item.get("id") or item.get("item_id") or f"item_{index + 1:03d}")
         review_time = _review_comment_time(item)
-        if review_time is None:
-            raise ValueError(
-                f"Lite audio item {item_id} has no review timestamp for safe ASR fallback"
-            )
-        if review_time > float(source_duration_seconds) + 1e-6:
+        if review_time is not None and review_time > float(source_duration_seconds) + 1e-6:
             raise ValueError(
                 f"Lite audio item {item_id} review timestamp exceeds the source duration"
             )
@@ -1230,11 +1229,14 @@ def _source_asr_unavailable_cut_plan(
                 "strategy": str(evidence.get("strategy") or "precision_first"),
                 "delete": delete_phrase,
                 "must_keep": must_keep,
-                "resolved_time": round(review_time, 6),
+                "resolved_time": round(review_time, 6) if review_time is not None else None,
                 "reason": "source_asr_unavailable",
                 "match_method": "",
                 "matches": [],
-                "timing_source": "review_timestamp_fallback",
+                "timing_source": (
+                    "review_timestamp_fallback"
+                    if review_time is not None else "document_order_fallback"
+                ),
                 "asr_alignment": None,
             }
         )
@@ -1404,6 +1406,28 @@ def _validate_marker_receipts(execution: Mapping[str, Any], ledger: Mapping[str,
         actual[key] = str(receipt.get("source_text") or "")
     if actual != expected:
         raise ValueError("Saved marker text is not code-point identical to source_text")
+    receipts_by_id = {str(row["item_id"]).casefold(): row for row in receipts}
+    for item in ledger.get("review_items") or []:
+        placement = (item.get("evidence") or {}).get("label_placement")
+        if placement:
+            receipt = receipts_by_id[str(item.get("id") or item.get("item_id")).casefold()]
+            if (
+                receipt.get("label_placement") != placement
+                or not str(receipt.get("execution_status") or "").startswith("label_only_")
+                or item.get("execution_required")
+            ):
+                raise ValueError("Saved untimed review label lacks matching display-only evidence")
+        if item.get("kind") != "global_review":
+            continue
+        receipt = receipts_by_id[str(item.get("id") or item.get("item_id")).casefold()]
+        scope = (item.get("evidence") or {}).get("review_scope") or {}
+        if (
+            receipt.get("review_scope") != scope
+            or scope.get("placement_basis") != "scope_start"
+            or receipt.get("execution_status") != "label_only_global_review"
+            or not str(receipt.get("track_name") or "").startswith("Review Marker Global ")
+        ):
+            raise ValueError("Saved global review label lacks matching scope and non-execution evidence")
 
 
 def _result_artifact(path: Path) -> dict[str, Any] | None:
@@ -2259,6 +2283,7 @@ def run_review_document(
             "workflow_mode": "lite",
             "completion_boundary": "lite_zip_delivery",
             "acceptance_scope": "draft_structure_and_package_delivery",
+            "global_review_labels": execution.get("global_review_labels") or [],
             "job_root": str(root),
             "job_state_json": str(state_path),
             "job_timing_json": str(timing_path),
@@ -4433,6 +4458,11 @@ def run_review_document(
                         )
                     else:
                         request_preserve.pop("replacement_audio_material", None)
+
+            from utils.review_scope import place_missing_review_labels
+
+            for payload in (request, ledger):
+                place_missing_review_labels(payload.get("review_items") or [], request["project"])
 
             try:
                 _compile_explicit_lite_visuals(request, ledger)

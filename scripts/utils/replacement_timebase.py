@@ -15,7 +15,6 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-
 _CLOCK = re.compile(r"(?<!\d)(\d{1,3})\s*[:：]\s*(\d{1,2}(?:\.\d+)?)(?!\d)")
 _RANGE = re.compile(
     r"\s*(?:-|–|—|~|至|到|鈥搢鈥攟|\bto\b)\s*", re.IGNORECASE
@@ -194,6 +193,10 @@ def resolve_review_timebases(
     active_row_indexes: list[int] = []
     for index, original in enumerate(rows):
         row = copy.deepcopy(dict(original))
+        if row.get("kind") == "global_review":
+            # A scope anchor is not a spoken/local replacement timestamp.
+            output.append(row)
+            continue
         item_id = str(row.get("id") or row.get("item_id") or f"index_{index + 1:03d}")
         text = _row_text(row)
         anchor_declared = _is_anchor(text)

@@ -1,6 +1,6 @@
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Iterable, List, Optional, Sequence, Union
 
 import pyJianYingDraft as draft
@@ -37,6 +37,8 @@ class ReviewMarkerItem:
     kind: str = "review_only"
     background_color: str = ""
     execution_status: str = ""
+    review_scope: dict = field(default_factory=dict)
+    label_placement: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -116,6 +118,7 @@ class ReviewMarkerOpsMixin:
         ("delete", "Review Marker Delete"),
         ("visual", "Review Marker Visual"),
         ("animation", "Review Marker Animation"),
+        ("global", "Review Marker Global"),
     )
     LITE_GROUPED_DELETE_KINDS = frozenset(
         {
@@ -298,6 +301,8 @@ class ReviewMarkerOpsMixin:
 
     def _lite_group_for_marker(self, marker: ReviewMarkerItem) -> str:
         kind = str(marker.kind or "review_only").strip().casefold()
+        if kind == "global_review":
+            return "global"
         if kind == "animation_timing":
             return "animation"
         if kind in self.LITE_GROUPED_VISUAL_KINDS:
@@ -376,6 +381,8 @@ class ReviewMarkerOpsMixin:
                     # Keep all lite Delete labels visually consistent.  Do
                     # not leak subtype colors such as colored-span purple.
                     background_color = self.LITE_GROUPED_DELETE_BACKGROUND_COLOR
+                elif group == "global":
+                    background_color = "#475569"
                 else:
                     background_color = self.LITE_GROUPED_ANIMATION_BACKGROUND_COLOR
                 segment = self.add_text_simple(

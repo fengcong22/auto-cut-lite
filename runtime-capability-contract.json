@@ -11,6 +11,7 @@
       "required_paths": [
         "scripts/core/review_marker_ops.py",
         "scripts/utils/audio_coverage.py",
+        "scripts/utils/review_scope.py",
         "scripts/utils/revision_evidence.py",
         "scripts/utils/lite_revision.py",
         "scripts/utils/revision_markers.py",

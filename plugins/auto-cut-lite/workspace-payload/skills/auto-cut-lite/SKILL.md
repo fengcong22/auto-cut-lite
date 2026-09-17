@@ -11,6 +11,14 @@ executing, or validating a review item. Read
 
 ## Fixed Workflow
 
+- Explicit whole-source/project requirements and maintained voice-preset, toolbar-hiding, and
+  rough-cut checklist profiles are always label-only. Read mixed review paragraphs/lists and
+  checkboxes, preserve original text, and require a unique source binding or explicit project
+  scope. Use `Review Marker Global N` at the scope start for up to two seconds (clamped to that
+  scope end), with `label_only_global_review` and scope metadata in the receipt. This is a
+  display anchor, not an edit time. Report not executed. The local timing rules below remain
+  mandatory for local/ambiguous opinions; missing time alone never means whole-scope.
+
 - Keep `workflow_mode=lite` and default `lite_cut_layout=split_gap`.
 - Reject `lite_cut_layout=copy` for new execution; it is historical read/validation compatibility
   only.
@@ -43,12 +51,16 @@ executing, or validating a review item. Read
   keep the label at the object's original clock: both `09:02 提前到 08:52` and
   `08:52 延后到 09:02` are labelled at the first (original) time. The destination is retained
   only as internal `target_time` evidence; Lite never moves the animation or changes duration.
-  A single point timestamp remains valid for the label and never falls back to `0:00`.
+  A single point timestamp remains valid for the label. If no local time remains after ASR,
+  keep a display-only label after the previous local label (two seconds later), chaining
+  consecutive missing labels. The first local label uses `0:00`; clamp at the project end.
+  Record `document_order_fallback` and its predecessor internally. This position is never an
+  ASR search hint or an execution boundary.
 - Every newly encountered or unrecognized issue is label-only by default. If it has a reliable
   start but no safe maintained implementation, leave one original-text label, record
   `execution_status=label_only_unresolved` internally, skip that execution, and continue
-  independent items. If ASR cannot locate it, use the review-comment time. Fail before draft
-  writing only when neither source supplies a valid time; never fall back to `0:00`.
+  independent items. If ASR cannot locate it, use the review-comment time, then the display-only
+  document-order fallback above.
 - Insert supplied pointer or picture files on `Lite Visual Assets` at the requested start using
   JianYing default geometry and no keyframes.
 - When one hand/pointer row omitted its attachment, reuse the best matching attachment from

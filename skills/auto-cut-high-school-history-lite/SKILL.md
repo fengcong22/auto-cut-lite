@@ -84,7 +84,17 @@ Auto-Cut 1.7.0 checkout or reuse its task intermediates.
 - Review-only and ASR-unresolved items use the timestamp written in the review comment. Parse
   the requested target when the text contains both a current time and a move target: for example,
   `07:14 ... 提前到 07:12` labels at `07:12`. A point timestamp does not require a fabricated
-  end time. Missing or unresolved timing must fail before writing, never fall back to `0:00`.
+  end time. If local timing remains absent, keep a display-only label after the previous local
+  label (two seconds later); consecutive missing labels chain, and the first uses `0:00`.
+  Clamp at the project end and record `document_order_fallback` plus predecessor evidence.
+  Never use this display placement as an ASR search hint or an execution boundary.
+- Whole-source/project requirements are a separate label-only scope. Read mixed review paragraphs,
+  lists, and checkboxes; exclude headings, filenames, attachment sizes, examples, and course prose.
+  Explicit whole-scope wording or maintained voice-preset, toolbar-hiding, and rough-cut checklist
+  profiles require a uniquely bound source or explicit project scope. Keep one exact original label
+  on `Review Marker Global N` at the scope start, clamped to two seconds or that scope's end.
+  Record `placement_basis=scope_start`, complete scope bounds, and `label_only_global_review`
+  internally; report not executed. Missing local timing must never be inferred as whole scope.
 - For source ASR, use the same local path as the full workflow: extract audio from the local source
   video when no separate source audio is present, then submit it through the bundled
   `volc.bigasr.auc` adapter. Do not ask the user to create TOS storage, a bucket, a signed URL,
@@ -120,14 +130,15 @@ Auto-Cut 1.7.0 checkout or reuse its task intermediates.
   supplied pointer insertion is execution-required, but an existing-hand occlusion, removal,
   clean-cover, cleanup, or residual-cover request is label-only. Animation or other
   picture-timing requests are label-only and do not create `Lite Timing Adjusted` segments.
-- Review labels are all retained verbatim. Lite uses three isolated marker track families rather
+- Review labels are all retained verbatim. Lite uses isolated marker track families rather
   than the full workflow's dynamic horizontal lanes:
   - `Review Marker Delete 1/2/...` contains spoken/delete/noise items; an overlap only adds
     another Delete lane.
   - `Review Marker Visual 1/2/...` contains pointer or other visual-material items and is green.
   - `Review Marker Animation 1/2/...` contains animation-timing items.
-  The three families never share a track. Unknown review-only items remain visible in the Delete
-  family as a safe three-family fallback.
+  - `Review Marker Global 1/2/...` contains non-executing whole-source/project requirements.
+  The families never share a track. Unknown local review-only items remain visible in the Delete
+  family when their authoritative time is available.
 - For every source-ledger item, render exactly and only `source_text` code-point-for-code-point.
   Keep `execution_status`, including `label_only_unresolved`, solely in internal metadata, marker
   receipts, validation output, and reports. Never prefix, suffix, or otherwise annotate visible
@@ -135,8 +146,8 @@ Auto-Cut 1.7.0 checkout or reuse its task intermediates.
 - If a new issue cannot be solved safely but its authoritative start is reliable, keep exactly one
   original-text label, set `execution_status=label_only_unresolved` internally, do not improvise an
   edit, and continue independent items. Every newly encountered or unrecognized instruction is
-  label-only by default. If ASR cannot locate it, use the review-comment time; fail only when neither
-  an ASR point nor a valid review time exists, and never guess `0:00`.
+  label-only by default. If ASR cannot locate it, use the review-comment time, then the display-only
+  document-order fallback above. Missing timing alone never authorizes execution.
 - Lite marker text is left-aligned (`alignment=0`), rendered at a 4–5 font-size range, and uses
   the full normalized safe width with a clamped background/transform so neither stage edge is
   crossed. These grouped lanes are the intentional lite exception to the full workflow's

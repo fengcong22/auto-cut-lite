@@ -95,6 +95,17 @@ When returning a revision result, report:
 
 ## Source-ledger Marker Fidelity
 
+- Whole-source review exception: read mixed checkboxes, lists, and ordinary requirement paragraphs
+  within the selected review/material region. Exclude headings, attachment metadata, examples,
+  and course prose. A checkbox is source formatting/state, never proof of execution.
+- Explicit whole-source/project requirements and maintained whole-source profiles (voice preset,
+  toolbar hiding, rough-cut checklist) are `global_review`, always label-only. Bind a source
+  uniquely or require an explicit project scope; absence of timing alone never establishes scope.
+  Preserve one exact original-text label on `Review Marker Global N` at the bound scope start,
+  for up to two seconds clamped to that scope's end. This is a display anchor, not an edit time.
+  Record scope, placement basis, and `label_only_global_review` internally and report not executed.
+  Missing local timing uses the display-only fallback below and never establishes whole scope.
+
 - For a source-ledger item, the visible marker text must equal `source_text` code-point-for-code-point, including timestamps, punctuation, whitespace, line breaks, and literal question marks.
 - Never replace source-ledger text with a summary, prefix, item ID, translation, or truncation unless that content already exists in `source_text`.
 - Keep `execution_status`, `label_only_unresolved`, `verbatim_status`, item IDs, warnings, and
@@ -111,9 +122,12 @@ When returning a revision result, report:
 - In Lite, every newly encountered or unrecognized instruction is label-only by default. A new
   executable category requires an explicit maintained allowlist and tests; never infer execution
   from generic words such as “修改”, “添加”, or “调整”.
-- That downgrade never authorizes guessed timing. Attempt speech/audio ASR first. If ASR cannot
-  uniquely locate a non-executing item, use the time written in the review comment. Fail before
-  draft writing only when neither ASR nor the review comment supplies a valid time; never use `0:00`.
+- That downgrade never authorizes guessed edit timing. Attempt speech/audio ASR first. If ASR
+  cannot uniquely locate a non-executing item, use the review-comment time. When local timing is
+  absent, retain an independent verbatim label immediately after the preceding local label
+  (two seconds later); consecutive untimed labels chain, and the first local label uses `0:00`.
+  Clamp display to the project end without changing media duration. Record `document_order_fallback`
+  and its predecessor internally; this is display-only and never an ASR hint or execution boundary.
 
 ## Review Document Audio Precision
 
@@ -128,7 +142,8 @@ When returning a revision result, report:
   available, otherwise the review-comment time, and is never executed in Lite.
 - Review-only and ASR-unresolved items use the timestamp written in the review comment.
   For target wording such as `07:14 ... 提前到 07:12`, use the requested target `07:12`.
-  A point timestamp is sufficient for a two-second label; never map missing timing to `0:00`.
+  A point timestamp is sufficient for a two-second label. Missing local timing follows the
+  display-only document-order rule above; every executable spoken cut still requires unique ASR.
 - Protect `must_keep` phrases explicitly. Do not widen the logical source-aligned boundary across
   adjacent words unless the item is marked `listening_first` or the user accepts that tradeoff.
 - In Lite, a spoken deletion may use a time-anchored high-confidence fuzzy ASR match when literal

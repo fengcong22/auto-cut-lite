@@ -33,7 +33,7 @@ from utils.revision_validation import derive_acceptance_profile
 
 _SCHEMA_VERSION = 1
 _TOOL_NAME = "auto-cut-review-job-compiler"
-_TOOL_VERSION = 4
+_TOOL_VERSION = 5
 _OUTPUT_NAMES = {
     "doc_items": "doc_items.json",
     "revision_request": "revision_request.json",
@@ -714,6 +714,9 @@ def _canonical_review_items(
         evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
         evidence = copy.deepcopy(evidence)
         if workflow_mode == "lite":
+            if evidence.get("label_placement"):
+                # A prior display fallback is not a timestamp supplied by the author.
+                start = end = None
             evidence["timing_source"] = timing_source
             if move_times is not None:
                 original_time, target_time = move_times
@@ -902,6 +905,7 @@ def _request_model(
             source_audio=str(project.get("source_audio") or ""),
             replacement_audio=str(project.get("replacement_audio") or ""),
             project_key=str(project.get("project_key") or ""),
+            media_duration_seconds=float(project.get("media_duration_seconds") or 0),
             source_pairs=(
                 [copy.deepcopy(dict(row)) for row in project.get("source_pairs") or []]
                 if isinstance(project.get("source_pairs"), list)
@@ -950,10 +954,18 @@ def compile_review_job(snapshot: dict, project: dict, output_dir: str | Path) ->
         source_rows,
         workflow_mode=workflow_mode,
     )
+    if workflow_mode == "lite":
+        from utils.review_scope import bind_global_reviews
+
+        review_items = bind_global_reviews(review_items, normalized_project)
     review_items, timebase_warnings, unresolved_timebase_ids, replacement_anchors = (
         resolve_review_timebases(review_items, snapshot=snapshot_copy, project=normalized_project)
     )
     warnings.extend(timebase_warnings)
+    if workflow_mode == "lite":
+        from utils.review_scope import place_missing_review_labels
+
+        place_missing_review_labels(review_items, normalized_project)
     acceptance = _acceptance_payload(review_items)
     provisional_request, model_items = _request_model(normalized_project, review_items, acceptance)
     provisional_profile = derive_acceptance_profile(provisional_request, doc_items=model_items)

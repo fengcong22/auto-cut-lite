@@ -1,9 +1,10 @@
 import json
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from utils.review_scope import document_order_marker_time
 from utils.revision_models import (
     RevisionRequest,
     RevisionReviewItem,
@@ -35,6 +36,8 @@ class MarkerPlanItem:
     source: str = ""
     kind: str = "review_only"
     execution_status: str = ""
+    review_scope: Dict[str, Any] = field(default_factory=dict)
+    label_placement: Dict[str, Any] = field(default_factory=dict)
 
 
 def _execution_status_from_source_item(source_item: RevisionReviewItem) -> str:
@@ -63,6 +66,9 @@ def _label_only_asr_marker_time(source_item: RevisionReviewItem) -> Optional[flo
     ):
         return None
     evidence = source_item.evidence if isinstance(source_item.evidence, Mapping) else {}
+    display_time = document_order_marker_time(evidence)
+    if display_time is not None:
+        return display_time
     if str(evidence.get("timing_source") or "").strip().casefold() == (
         "review_timestamp_fallback"
     ):
@@ -176,6 +182,9 @@ def lite_unresolved_timebase_marker_time(source_item: RevisionReviewItem) -> Opt
     if not status:
         return None
     evidence = source_item.evidence if isinstance(source_item.evidence, Mapping) else {}
+    display_time = document_order_marker_time(evidence)
+    if display_time is not None:
+        return display_time
     timebase = evidence.get("timebase")
     if not isinstance(timebase, Mapping):
         raise ValueError(
@@ -933,7 +942,24 @@ def build_marker_plan(
             if asr_aligned_lite_marker and unresolved_timebase_marker_time is None
             else None
         )
-        if unresolved_timebase_marker_time is not None:
+        review_scope: Dict[str, Any] = {}
+        display_time = (
+            document_order_marker_time(source_item.evidence)
+            if request.workflow_mode == "lite" else None
+        )
+        if request.workflow_mode == "lite" and source_kind == "global_review":
+            from utils.review_scope import GLOBAL_STATUS, scope_window
+
+            review_scope = dict(source_item.evidence.get("review_scope") or {})
+            start, scope_end = scope_window(review_scope, request.project)
+            review_scope.update(start=start, end=scope_end, placement_basis="scope_start")
+            end = min(start + 2.0, scope_end)
+            execution_status = GLOBAL_STATUS
+        elif display_time is not None:
+            if not execution_status.startswith("label_only_") or source_item.execution_required:
+                raise ValueError("Document-order label placement cannot authorize execution")
+            start, end = display_time, display_time + 0.8
+        elif unresolved_timebase_marker_time is not None:
             start = unresolved_timebase_marker_time
             end = unresolved_timebase_marker_time + 0.8
         elif label_only_asr_time is not None:
@@ -986,6 +1012,8 @@ def build_marker_plan(
                 source=str(source_item.source or ""),
                 kind=str(source_item.kind or "review_only"),
                 execution_status=execution_status,
+                review_scope=review_scope,
+                label_placement=dict(source_item.evidence.get("label_placement") or {}),
             )
         )
 
