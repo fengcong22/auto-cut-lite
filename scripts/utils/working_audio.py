@@ -11,10 +11,11 @@ import hashlib
 import math
 import os
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-SYNC_VERSION = "preserve_timeline_envelope_v1"
+SYNC_VERSION = "preserve_timeline_envelope_v2_native_coverage"
 SAMPLE_RATE = 8000
 HOP_SECONDS = 0.01
 MAX_OFFSET_SECONDS = 0.04
@@ -42,6 +43,7 @@ def _decode(path: Path, ffmpeg_bin: str):
             "-nostdin",
             "-v",
             "error",
+            "-xerror",
             "-i",
             str(path),
             "-map",
@@ -58,7 +60,7 @@ def _decode(path: Path, ffmpeg_bin: str):
         capture_output=True,
         check=False,
     )
-    if result.returncode or not result.stdout:
+    if result.returncode or result.stderr.strip() or not result.stdout:
         raise ValueError("Working audio synchronization cannot decode the selected media")
     data = np.frombuffer(result.stdout, dtype="<f4")
     if not np.isfinite(data).all():
@@ -72,6 +74,7 @@ def validate_working_audio_sync(
     *,
     duration_seconds: float,
     ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
 ) -> dict[str, Any]:
     """Require coverage, <=40 ms offset/drift, and unique local correlation.
 
@@ -86,13 +89,51 @@ def validate_working_audio_sync(
     duration = float(duration_seconds)
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("Working audio requires positive finite timeline duration")
+    from utils.audio_coverage import NATIVE_TAIL_TOLERANCE_SECONDS, probe_source_audio_coverage
+
     original_hash, working_hash = _sha256(original), _sha256(working)
+    try:
+        source_coverage = probe_source_audio_coverage(original, ffprobe_bin=ffprobe_bin)
+        working_coverage = probe_source_audio_coverage(working, ffprobe_bin=ffprobe_bin)
+    except ValueError as exc:
+        raise ValueError(f"Working audio native coverage could not be verified: {exc}") from exc
     source = _decode(original, ffmpeg_bin)
     candidate = _decode(working, ffmpeg_bin)
     target_samples = int(round(duration * SAMPLE_RATE))
-    # One diagnostic sample is only float-rounding tolerance, never gap padding.
-    if len(candidate) < target_samples - 1 or len(source) < target_samples - 1:
-        raise ValueError("Working audio does not cover the unchanged source timeline")
+    source_rate = int(source_coverage["source_native_rate"])
+    working_rate = int(working_coverage["source_native_rate"])
+    source_native_duration = Fraction(int(source_coverage["source_native_frames"]), source_rate)
+    working_native_frames = int(working_coverage["source_native_frames"])
+    working_native_duration = Fraction(working_native_frames, working_rate)
+    source_duration = float(source_native_duration)
+    working_duration = float(working_native_duration)
+    native_tail = max(0.0, duration - source_duration)
+    if native_tail > NATIVE_TAIL_TOLERANCE_SECONDS + 1e-9:
+        raise ValueError("Working audio original source tail exceeds the 50 ms tolerance")
+    # Independent native counts distinguish pre-existing container tails from a
+    # diagnostic decode that silently lost samples. Silence is counted normally.
+    for data, coverage in ((source, source_coverage), (candidate, working_coverage)):
+        expected = round(
+            Fraction(
+                int(coverage["source_native_frames"]) * SAMPLE_RATE,
+                int(coverage["source_native_rate"]),
+            )
+        )
+        if abs(len(data) - expected) > 1:
+            raise ValueError("Working audio diagnostic decode lost native sample coverage")
+    required_samples = min(target_samples, len(source))
+    # Native coverage is independent of the 8 kHz diagnostic rounding above.
+    # On the same sample grid no real sample may disappear. A different native
+    # rate may quantize the required boundary only to its nearest sample (ties
+    # upward); this allows at most half a destination sample, never a flat gap.
+    required_native_position = min(Fraction(str(duration)), source_native_duration) * working_rate
+    required_native_frames = (
+        math.ceil(required_native_position)
+        if source_rate == working_rate
+        else math.floor(required_native_position + Fraction(1, 2))
+    )
+    if working_native_frames < required_native_frames or len(candidate) < required_samples - 1:
+        raise ValueError("Working audio lost samples from the original audio coverage")
     if len(candidate) / SAMPLE_RATE - duration > MAX_DURATION_EXCESS_SECONDS:
         raise ValueError("Working audio duration exceeds the 50 ms preservation tolerance")
     report: dict[str, Any] = {
@@ -104,6 +145,23 @@ def validate_working_audio_sync(
         "working_sha256": working_hash,
         "duration_seconds": duration,
         "working_duration_seconds": len(candidate) / SAMPLE_RATE,
+        "source_audio_duration_seconds": source_duration,
+        "working_native_duration_seconds": working_duration,
+        "native_source_tail_seconds": native_tail,
+        "native_tail_tolerance_seconds": NATIVE_TAIL_TOLERANCE_SECONDS,
+        "diagnostic_rounding_tolerance_samples": 1,
+        "diagnostic_sample_rate": SAMPLE_RATE,
+        "replacement_required_native_frames": required_native_frames,
+        "replacement_native_rounding": "none" if source_rate == working_rate else "nearest_ties_up",
+        "replacement_native_quantization_seconds": float(
+            max(
+                Fraction(0),
+                required_native_position / working_rate
+                - Fraction(required_native_frames, working_rate),
+            )
+        ),
+        "source_native_coverage": source_coverage,
+        "working_native_coverage": working_coverage,
         "max_offset_seconds": MAX_OFFSET_SECONDS,
         "max_drift_seconds": MAX_DRIFT_SECONDS,
         "min_correlation": MIN_CORRELATION,

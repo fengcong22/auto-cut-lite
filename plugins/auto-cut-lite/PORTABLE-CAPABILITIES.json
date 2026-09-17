@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "plugin_name": "auto-cut-lite",
-  "plugin_version": "1.6.11+codex.20260916152428",
+  "plugin_version": "1.6.12+codex.20260917113552",
   "embedded_runtime": {
     "name": "auto-cut",
     "version": "1.7.0",
@@ -67,6 +67,7 @@
         "runtime/scripts/jy_wrapper.py",
         "runtime/scripts/review_job.py",
         "runtime/scripts/cli/jy_wrapper_parser.py",
+        "runtime/scripts/utils/audio_coverage.py",
         "runtime/scripts/utils/replacement_timebase.py",
         "runtime/scripts/utils/review_audio_precision.py",
         "runtime/scripts/utils/review_document_intake.py",

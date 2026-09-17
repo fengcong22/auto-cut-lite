@@ -310,6 +310,34 @@ class ReviewDocumentRunnerTests(IsolatedReadinessTestCase):
                     side_effect=extract_alignment,
                 )
             )
+
+            # Orchestration fixtures contain placeholder video bytes. Real PCM
+            # and timestamp verification has dedicated FFmpeg integration tests.
+            def source_integrity(alignment, source, **_kwargs):
+                with wave.open(str(alignment), "rb") as stream:
+                    frames = stream.getnframes()
+                    pcm_hash = hashlib.sha256(stream.readframes(frames)).hexdigest()
+                duration = frames / 16000.0
+                return {
+                    "status": "pass",
+                    "policy_version": runner.AUDIO_COVERAGE_VERSION,
+                    "source_sha256": runner.sha256_file(Path(source)),
+                    "alignment_sha256": runner.sha256_file(Path(alignment)),
+                    "alignment_frames": frames,
+                    "authoritative_16k_frames": frames,
+                    "alignment_pcm_sha256": pcm_hash,
+                    "authoritative_pcm_sha256": pcm_hash,
+                    "pcm_exact_match": True,
+                    "start_seconds": 0.0,
+                    "end_seconds": duration,
+                    "source_duration_seconds": duration,
+                    "source_effective_duration_seconds": duration,
+                    "timestamps_contiguous": True,
+                }
+
+            integrity = stack.enter_context(
+                patch.object(runner, "verify_alignment_source", side_effect=source_integrity)
+            )
             asr = stack.enter_context(
                 patch.object(runner, "run_resumable_volc_asr", side_effect=self._fake_asr)
             )
@@ -329,6 +357,7 @@ class ReviewDocumentRunnerTests(IsolatedReadinessTestCase):
             )
             yield {
                 "extract": extract,
+                "integrity": integrity,
                 "asr": asr,
                 "render": render,
                 "execute": execute,

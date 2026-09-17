@@ -4,6 +4,8 @@
 仅修改独立 Auto-Cut Lite 源码；不修改 Taskboard，不热补丁已安装运行时。
 后续 `1.6.11` 的诊断 WAV 单样本精度边界见 [采样精度修复](alignment-sample-precision.zh-CN.md)；
 以下交付工作素材不补白、不拉伸的约束保持不变。
+`1.6.12` 的原生尾差与完整性检查见 [50 ms 尾差兼容](native-audio-tail-compatibility.zh-CN.md)；
+下文 v1 同步策略是历史实现，当前使用 v2 原生音频覆盖校验。
 
 ## 音源与时间轴
 
@@ -74,9 +76,9 @@ pytest 每例使用临时 readiness；相关 unittest 测试类提供相同保�
 - `test_every_normalized_source_blob_is_reachable_in_git_history`：迁移清单记录的
   `a1055faa0c6b09ab37600098750a5954ab272e2a` 对象在当前 Git 对象库不可用。
 - `test_ffmpeg_build_receipt_has_complete_toolchain_hashes`：缺少
-  `scripts/release/ffmpeg_assets/build/build-receipt.json`。
+  FFmpeg 资产构建目录中的 `build-receipt.json`。
 - `test_ffmpeg_asset_manifest_self_hash_and_file_rows_are_complete`：缺少
-  `scripts/release/ffmpeg_assets/manifest.json`。
+  FFmpeg 资产目录中的 `manifest.json`。
 
 这些是全量核心离线依赖包的历史/构建输入；本次 Lite 插件包使用自己的显式 runtime
 allowlist、PACKAGE-MANIFEST 和离线解包校验，不包含或伪造上述缺失 FFmpeg 构建材料。

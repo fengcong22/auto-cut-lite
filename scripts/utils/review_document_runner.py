@@ -15,6 +15,14 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from utils.audio_coverage import (
+    NATIVE_TAIL_TOLERANCE_SECONDS,
+    AudioCoverageError,
+    verify_alignment_source,
+)
+from utils.audio_coverage import (
+    POLICY_VERSION as AUDIO_COVERAGE_VERSION,
+)
 from utils.execution_input import (
     ExecutionInputError,
     load_execution_input,
@@ -97,12 +105,13 @@ from utils.working_audio import validate_working_audio_sync
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v11-sample-precision"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v12-source-tail-coverage"
 WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
 _NORMALIZER_VERSION = "lite-source-video-normalizer-v1"
 _EDITABLE_AUDIO_EXTRACTOR_VERSION = "lite-editable-source-audio-v1"
+ALIGNMENT_TAIL_TOLERANCE_SECONDS = NATIVE_TAIL_TOLERANCE_SECONDS
 _VIDEO_NORMALIZE_PARAMS = {
     "video_codec": "libx264",
     "pixel_format": "yuv420p",
@@ -1690,34 +1699,61 @@ def _concat_alignment_wavs(
     }
 
 
-def _bound_alignment_wav_to_timeline(path: Path, duration_seconds: float) -> dict[str, Any]:
-    """Bound only the ASR diagnostic copy with one sample of rounding tolerance.
+def _bound_alignment_wav_to_timeline(
+    path: Path,
+    duration_seconds: float,
+    *,
+    source_path: Path | None = None,
+    ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
+) -> dict[str, Any]:
+    """Pad a proved original tail only in the diagnostic copy, never delivery media.
 
-    Missing >=2 samples and truncated PCM are integrity failures. One absent
-    sample can arise during decode/resampling/container quantization; record it
-    and append one zero PCM frame. Never pad or alter working/delivery media.
+    A fresh decode of the authoritative source must match the input PCM exactly.
+    The 50 ms tail allowance is separate from resampling's one-sample rounding.
+    Calls without source evidence retain the historical one-sample boundary.
     """
     required = _alignment_frame_count(duration_seconds)
     params = _alignment_wav_params(path)
     missing = required - params.nframes
     shortfall = max(0.0, float(duration_seconds) - params.nframes / 16000.0)
-    if params.nframes <= 0 or missing > 1:
+    integrity = None
+    allowed_missing = 1
+    if source_path is not None:
+        try:
+            integrity = verify_alignment_source(
+                path,
+                source_path,
+                ffmpeg_bin=ffmpeg_bin,
+                ffprobe_bin=ffprobe_bin,
+            )
+        except AudioCoverageError as exc:
+            raise OrderedSourceAsrIntegrityError(str(exc)) from exc
+        native_tail = max(0.0, float(duration_seconds) - integrity["end_seconds"])
+        if native_tail > ALIGNMENT_TAIL_TOLERANCE_SECONDS + 1e-9:
+            raise OrderedSourceAsrIntegrityError(
+                f"Original audio tail exceeds 50 ms: tail_seconds={native_tail:.9f}"
+            )
+        allowed_missing = round(ALIGNMENT_TAIL_TOLERANCE_SECONDS * params.framerate)
+    if params.nframes <= 0 or missing > allowed_missing:
         raise OrderedSourceAsrIntegrityError(
             "Working alignment audio does not cover the unchanged source timeline: "
             f"expected_frames={required}, actual_frames={params.nframes}, "
             f"timeline_seconds={duration_seconds}, "
             f"audio_seconds={params.nframes / 16000.0:.9f}, "
-            f"shortfall_seconds={shortfall:.9f}, allowed_missing_frames=1 at 16000 Hz"
+            f"shortfall_seconds={shortfall:.9f}, allowed_missing_frames={allowed_missing} at 16000 Hz"
         )
     report = {
-        "strategy": "diagnostic_pcm_one_sample_v1",
+        "strategy": "verified_source_tail_50ms_v1" if integrity else "diagnostic_pcm_one_sample_v1",
         "sample_rate": 16000,
         "input_frames": params.nframes,
         "output_frames": required,
         "input_duration_seconds": params.nframes / 16000.0,
         "timeline_duration_seconds": float(duration_seconds),
         "shortfall_seconds": shortfall,
-        "allowed_missing_frames": 1,
+        "allowed_missing_frames": allowed_missing,
+        "tail_tolerance_seconds": ALIGNMENT_TAIL_TOLERANCE_SECONDS if integrity else None,
+        "source_integrity": integrity,
         "padded_frames": max(0, missing),
         "trimmed_frames": max(0, -missing),
         "timeline_modified": False,
@@ -1736,8 +1772,8 @@ def _bound_alignment_wav_to_timeline(path: Path, duration_seconds: float) -> dic
                     raise OrderedSourceAsrIntegrityError("Alignment WAV changed or is truncated")
                 target.writeframesraw(chunk)
                 remaining -= count
-            if missing == 1:
-                target.writeframesraw(b"\x00\x00")
+            if missing > 0:
+                target.writeframesraw(b"\x00\x00" * missing)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -1759,6 +1795,8 @@ def _run_ordered_source_asr(
     asr_poll_interval_seconds: float,
     asr_max_wait_seconds: float,
     store: JobStateStore,
+    ffprobe_bin: str = "ffprobe",
+    mock_media: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], list[Path], list[bool]]:
     """Extract, recognize, and merge every ordered source pair."""
 
@@ -1815,8 +1853,20 @@ def _run_ordered_source_asr(
             suffix=".wav",
         )
         _copy_cached_file(cached_alignment, pair_alignment)
+        authoritative_source = Path(str(raw_source.get("integrity_source_path") or source))
+        expected_authoritative_hash = str(
+            raw_source.get("integrity_source_sha256") or source_sha256
+        )
+        if sha256_file(authoritative_source) != expected_authoritative_hash:
+            raise OrderedSourceAsrIntegrityError(
+                "Authoritative audio source changed before verification"
+            )
         alignment_adjustment = _bound_alignment_wav_to_timeline(
-            pair_alignment, float(raw_source.get("duration"))
+            pair_alignment,
+            float(raw_source.get("duration")),
+            source_path=None if mock_media else authoritative_source,
+            ffmpeg_bin=ffmpeg_bin,
+            ffprobe_bin=ffprobe_bin,
         )
         alignment_paths.append(pair_alignment)
         artifacts.extend([source, pair_alignment])
@@ -1920,7 +1970,8 @@ def _run_ordered_source_asr(
         )
 
     combined = _concat_alignment_wavs(
-        alignment_paths, alignment_output,
+        alignment_paths,
+        alignment_output,
         durations=[row["duration"] for row in pair_payloads],
     )
     merged_words = _merge_source_asr_words(pair_payloads)
@@ -3251,8 +3302,11 @@ def run_review_document(
                     synchronization = None
                     if mode == "replace_original" and not mock_media:
                         synchronization = validate_working_audio_sync(
-                            video_path, alignment_input,
-                            duration_seconds=duration, ffmpeg_bin=ffmpeg_bin,
+                            video_path,
+                            alignment_input,
+                            duration_seconds=duration,
+                            ffmpeg_bin=ffmpeg_bin,
+                            ffprobe_bin=ffprobe_bin,
                         )
                     video_row = {
                         "path": str(video_path),
@@ -3270,13 +3324,24 @@ def run_review_document(
                         "source_audio_effective": source_audio_row,
                         "replacement_audio": replacement_row,
                         "working_audio": {
-                            "path": alignment_input, "sha256": alignment_sha256,
-                            "role": "replacement_audio" if replacement_row is not None else "source_audio",
+                            "path": alignment_input,
+                            "sha256": alignment_sha256,
+                            "role": (
+                                "replacement_audio"
+                                if replacement_row is not None
+                                else "source_audio"
+                            ),
                         },
                         "working_audio_sync": synchronization,
                         "alignment_source": {
                             "path": alignment_input,
                             "sha256": alignment_sha256,
+                            "integrity_source_path": (
+                                alignment_input if replacement_row is not None else str(video_path)
+                            ),
+                            "integrity_source_sha256": (
+                                alignment_sha256 if replacement_row is not None else video_sha256
+                            ),
                             "role": (
                                 "replacement_audio"
                                 if replacement_row is not None
@@ -3391,13 +3456,24 @@ def run_review_document(
                     raise RuntimeError(f"{field} changed after the job input identity was captured")
                 optional_materials[field] = candidate
 
-            audio_mode = str(project.get("audio_mode") or (
-                "replace_original" if optional_materials.get("replacement_audio") else "video_original"
-            )).strip().casefold()
+            audio_mode = (
+                str(
+                    project.get("audio_mode")
+                    or (
+                        "replace_original"
+                        if optional_materials.get("replacement_audio")
+                        else "video_original"
+                    )
+                )
+                .strip()
+                .casefold()
+            )
             if audio_mode not in {"video_original", "replace_original"}:
                 raise ValueError("Legacy project audio_mode is invalid")
             if audio_mode == "replace_original" and "replacement_audio" not in optional_materials:
-                raise ValueError("replace_original requires replacement_audio; original audio fallback is forbidden")
+                raise ValueError(
+                    "replace_original requires replacement_audio; original audio fallback is forbidden"
+                )
 
             ffmpeg_info = _media_tool_identity(ffmpeg_bin, mock_media=mock_media)
             ffprobe_info = _media_tool_identity(ffprobe_bin, mock_media=mock_media)
@@ -3502,13 +3578,17 @@ def run_review_document(
             effective_project["audio_mode"] = audio_mode
             alignment_source = (
                 optional_materials["replacement_audio"]
-                if audio_mode == "replace_original" else effective_audio
+                if audio_mode == "replace_original"
+                else effective_audio
             )
             synchronization = None
             if audio_mode == "replace_original" and not mock_media:
                 synchronization = validate_working_audio_sync(
-                    effective_video, alignment_source,
-                    duration_seconds=duration, ffmpeg_bin=ffmpeg_bin,
+                    effective_video,
+                    alignment_source,
+                    duration_seconds=duration,
+                    ffmpeg_bin=ffmpeg_bin,
+                    ffprobe_bin=ffprobe_bin,
                 )
             material_rows = {
                 "source_video_original": {
@@ -3522,12 +3602,26 @@ def run_review_document(
                 "alignment_source": {
                     "path": str(alignment_source),
                     "sha256": sha256_file(alignment_source),
-                    "role": "replacement_audio" if audio_mode == "replace_original" else "source_audio",
+                    "integrity_source_path": str(
+                        alignment_source
+                        if audio_mode == "replace_original" or explicit_source_audio is not None
+                        else effective_video
+                    ),
+                    "integrity_source_sha256": sha256_file(
+                        alignment_source
+                        if audio_mode == "replace_original" or explicit_source_audio is not None
+                        else effective_video
+                    ),
+                    "role": (
+                        "replacement_audio" if audio_mode == "replace_original" else "source_audio"
+                    ),
                 },
                 "working_audio": {
                     "path": str(alignment_source),
                     "sha256": sha256_file(alignment_source),
-                    "role": "replacement_audio" if audio_mode == "replace_original" else "source_audio",
+                    "role": (
+                        "replacement_audio" if audio_mode == "replace_original" else "source_audio"
+                    ),
                 },
                 "source_audio_effective": {
                     "path": str(effective_audio),
@@ -3681,6 +3775,8 @@ def run_review_document(
                             asr_poll_interval_seconds=asr_poll_interval_seconds,
                             asr_max_wait_seconds=asr_max_wait_seconds,
                             store=store,
+                            ffprobe_bin=ffprobe_bin,
+                            mock_media=mock_media,
                         )
                         source_index.update(ordered_source_index)
                         artifacts.extend(ordered_artifacts)
@@ -3715,8 +3811,23 @@ def run_review_document(
                         )
                         cache_hits.append(alignment_hit)
                         _copy_cached_file(cached_alignment, paths["alignment_wav"])
+                        authoritative_source = Path(
+                            str(alignment_row.get("integrity_source_path") or alignment_source)
+                        )
+                        expected_authoritative_hash = str(
+                            alignment_row.get("integrity_source_sha256")
+                            or alignment_row.get("sha256")
+                        )
+                        if sha256_file(authoritative_source) != expected_authoritative_hash:
+                            raise OrderedSourceAsrIntegrityError(
+                                "Authoritative audio source changed before verification"
+                            )
                         alignment_adjustment = _bound_alignment_wav_to_timeline(
-                            paths["alignment_wav"], float(materials["source_duration_seconds"])
+                            paths["alignment_wav"],
+                            float(materials["source_duration_seconds"]),
+                            source_path=None if mock_media else authoritative_source,
+                            ffmpeg_bin=ffmpeg_bin,
+                            ffprobe_bin=ffprobe_bin,
                         )
                         source_identity_payload = source_asr_cache_identity(
                             alignment_audio_sha256=sha256_file(paths["alignment_wav"]),
@@ -3909,6 +4020,20 @@ def run_review_document(
                             or raw_receipt.get("pair_index") != pair_index
                         ):
                             return False
+                        if not mock_media:
+                            proof = (raw_receipt.get("alignment_timeline_adjustment") or {}).get(
+                                "source_integrity"
+                            ) or {}
+                            if (
+                                proof.get("policy_version") != AUDIO_COVERAGE_VERSION
+                                or proof.get("status") != "pass"
+                                or proof.get("source_sha256")
+                                != (
+                                    raw_source.get("integrity_source_sha256")
+                                    or raw_source.get("sha256")
+                                )
+                            ):
+                                return False
                         source = Path(str(raw_source.get("path") or "")).resolve(strict=True)
                         source_sha256 = sha256_file(source)
                         if source_sha256 != str(raw_source.get("sha256") or "").casefold():
@@ -3963,6 +4088,22 @@ def run_review_document(
                     == canonical_json_sha256(actual_source_digests)
                 )
             else:
+                if not mock_media:
+                    source_index = _read_json_object(paths["source_index"], "source ASR index")
+                    proof = (source_index.get("alignment_timeline_adjustment") or {}).get(
+                        "source_integrity"
+                    ) or {}
+                    alignment_row = materials["materials"]["alignment_source"]
+                    if (
+                        proof.get("policy_version") != AUDIO_COVERAGE_VERSION
+                        or proof.get("status") != "pass"
+                        or proof.get("source_sha256")
+                        != (
+                            alignment_row.get("integrity_source_sha256")
+                            or alignment_row.get("sha256")
+                        )
+                    ):
+                        return False
                 identity_payload = source_asr_cache_identity(
                     alignment_audio_sha256=sha256_file(paths["alignment_wav"]), config=config
                 )
@@ -4068,6 +4209,7 @@ def run_review_document(
             cut_plan = _read_json_object(paths["cut_plan"], "audio cut plan")
             audio_rows = [row for row in cut_plan.get("rows") or [] if isinstance(row, Mapping)]
             source_audio: Path | None = None
+            source_audio_duration: float | None = None
             ordered_pair_mode = False
             if audio_rows:
                 materials = _read_json_object(paths["materials_ledger"], "source materials")
@@ -4085,6 +4227,19 @@ def run_review_document(
                     source_audio = Path(str(source_audio_row.get("path") or "")).resolve(
                         strict=True
                     )
+                    if not mock_media:
+                        source_audio_duration = float(
+                            probe_media(source_audio, ffprobe_bin=ffprobe_bin).duration_seconds
+                        )
+                        source_index = _read_json_object(paths["source_index"], "source ASR index")
+                        integrity = (source_index.get("alignment_timeline_adjustment") or {}).get(
+                            "source_integrity"
+                        )
+                        if integrity:
+                            source_audio_duration = min(
+                                source_audio_duration,
+                                float(integrity["source_effective_duration_seconds"]),
+                            )
             audio_item_ids = {str(row.get("item_id") or "").casefold() for row in audio_rows}
             cache_hits: list[bool] = []
             artifacts: list[Path] = []
@@ -4134,6 +4289,7 @@ def run_review_document(
                         cut_plan,
                         source_audio_path=source_audio,
                         candidate_audio_path=candidate,
+                        source_audio_duration_seconds=source_audio_duration,
                     )
                     audio_plan = (
                         {"mode": "legacy"} if ordered_pair_mode else deepcopy(mapping_audio_plan)
@@ -4374,6 +4530,7 @@ def run_review_document(
             # Recheck the exact files whose bytes were used by ASR, then carry
             # their hashes through localization so a copy-time change also fails.
             from dataclasses import replace
+
             material_evidence = _read_json_object(paths["materials_ledger"], "source materials")
             evidence_rows = list((material_evidence.get("materials") or {}).values())
             for pair in material_evidence.get("source_pairs") or []:
@@ -4385,12 +4542,17 @@ def run_review_document(
             request = load_revision_request(str(paths["processed_request"]))
             if not request.project.source_pairs:
                 rows = material_evidence["materials"]
-                request = replace(request, project=replace(
-                    request.project,
-                    source_video_sha256=rows["source_video_effective"]["sha256"],
-                    source_audio_sha256=rows["source_audio_effective"]["sha256"],
-                    replacement_audio_sha256=(rows.get("replacement_audio") or {}).get("sha256", ""),
-                ))
+                request = replace(
+                    request,
+                    project=replace(
+                        request.project,
+                        source_video_sha256=rows["source_video_effective"]["sha256"],
+                        source_audio_sha256=rows["source_audio_effective"]["sha256"],
+                        replacement_audio_sha256=(rows.get("replacement_audio") or {}).get(
+                            "sha256", ""
+                        ),
+                    ),
+                )
             doc_items = load_review_items_json(str(paths["processed_items"]))
             try:
                 execution = execute_revision_request(

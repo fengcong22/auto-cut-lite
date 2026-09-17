@@ -355,6 +355,7 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
                     asr_poll_interval_seconds=0.01,
                     asr_max_wait_seconds=1.0,
                     store=_WaitStore(),
+                    mock_media=True,
                 )
 
             self.assertEqual(
@@ -428,6 +429,7 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
                         asr_poll_interval_seconds=0.01,
                         asr_max_wait_seconds=1.0,
                         store=_WaitStore(),
+                        mock_media=True,
                     )
 
     def test_runner_recognizes_all_pairs_and_keeps_writer_audio_plan_legacy(self):
@@ -575,10 +577,7 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
             )
             self.assertEqual(processed_request["audio_delivery_plan"]["mode"], "legacy")
             self.assertEqual(
-                [
-                    row["source_audio_path"]
-                    for row in processed_request["project"]["source_pairs"]
-                ],
+                [row["source_audio_path"] for row in processed_request["project"]["source_pairs"]],
                 [str(first), str(second)],
             )
             self.assertEqual(

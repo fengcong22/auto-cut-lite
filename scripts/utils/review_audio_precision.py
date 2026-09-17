@@ -1095,7 +1095,11 @@ def _alignment_matches_for_window(
             match_end = float(raw_match["end"])
         except (KeyError, TypeError, ValueError, OverflowError):
             continue
-        if not math.isfinite(match_start) or not math.isfinite(match_end) or match_end <= match_start:
+        if (
+            not math.isfinite(match_start)
+            or not math.isfinite(match_end)
+            or match_end <= match_start
+        ):
             continue
         midpoint = (match_start + match_end) / 2.0
         if window_start - 1e-6 <= midpoint <= window_end + 1e-6:
@@ -1872,15 +1876,25 @@ def build_lite_split_gap_audio_plan(
     *,
     source_audio_path: str | os.PathLike[str],
     candidate_audio_path: str | os.PathLike[str],
+    source_audio_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     duration = float(cut_plan["source_duration_seconds"])
+    audio_duration = (
+        duration
+        if source_audio_duration_seconds is None
+        else min(duration, float(source_audio_duration_seconds))
+    )
+    if not math.isfinite(audio_duration) or audio_duration <= 0:
+        raise ValueError("Split-gap audio requires a positive source audio duration")
     cuts = list(cut_plan.get("executable_cuts") or [])
     if not cuts:
         return {"mode": "legacy"}
+    if any(float(row["end"]) > audio_duration + 1e-6 for row in cuts):
+        raise ValueError("ASR delete window exceeds the real source audio coverage")
     source = str(Path(source_audio_path).expanduser().resolve(strict=True))
     candidate = str(Path(candidate_audio_path).expanduser().resolve(strict=True))
     segments: list[dict[str, Any]] = []
-    for index, (start, end) in enumerate(_complement_windows(cuts, duration), start=1):
+    for index, (start, end) in enumerate(_complement_windows(cuts, audio_duration), start=1):
         segments.append(
             {
                 "id": f"a1-kept-{index:03d}",
@@ -1896,7 +1910,7 @@ def build_lite_split_gap_audio_plan(
                 "reason": "ASR-proved kept source interval",
             }
         )
-    for index, row in enumerate(_normalize_windows(cuts, duration), start=1):
+    for index, row in enumerate(_normalize_windows(cuts, audio_duration), start=1):
         segments.append(
             {
                 "id": f"a2-delete-{index:03d}",
@@ -2089,9 +2103,7 @@ def apply_audio_plan_to_compiled_payloads(
             edit_evidence = deepcopy(evidence)
             edit_window = [round(float(window[0]), 6), round(float(window[1]), 6)]
             edit_alignment = deepcopy(dict(edit_evidence["asr_alignment"]))
-            edit_alignment["matches"] = _alignment_matches_for_window(
-                edit_alignment, edit_window
-            )
+            edit_alignment["matches"] = _alignment_matches_for_window(edit_alignment, edit_window)
             edit_alignment.pop("words", None)
             edit_alignment["resolved_cut_window"] = edit_window
             edit_alignment["resolved_time"] = edit_window[0]
@@ -2449,8 +2461,7 @@ def _kept_recurrence_adjudication(
     hit_word_indexes = [
         index
         for index, word in enumerate(local_words)
-        if float(word["start"]) < hit_end - 1e-6
-        and hit_start < float(word["end"]) - 1e-6
+        if float(word["start"]) < hit_end - 1e-6 and hit_start < float(word["end"]) - 1e-6
     ]
     if not hit_word_indexes:
         return None
@@ -2493,7 +2504,9 @@ def _kept_recurrence_adjudication(
         if len(window) >= 2
     ):
         return None
-    ordered_windows = sorted(source_windows, key=lambda window: (float(window[0]), float(window[1])))
+    ordered_windows = sorted(
+        source_windows, key=lambda window: (float(window[0]), float(window[1]))
+    )
     cut_start = float(ordered_windows[0][0])
     cut_end = float(ordered_windows[-1][1])
     if hit_end <= cut_start:

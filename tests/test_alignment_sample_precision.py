@@ -88,9 +88,10 @@ def test_legacy_entry_uses_corrected_copy_and_keeps_working_media(tmp_path):
     helper = support.ReviewDocumentRunnerTests()
     snapshot, project = helper._audio_inputs(tmp_path)
     original = tmp_path / "source.wav"
+    # The one-point shortfall belongs to the original, not to extraction loss.
+    pcm(original, RATE * 3 - 1)
     before = original.read_bytes()
-    with helper._patched_runtime() as mocks:
-        mocks["extract"].side_effect = lambda source, output, **kw: pcm(Path(output), RATE * 3 - 1)
+    with helper._patched_runtime():
         result = helper._run(
             snapshot,
             project,
@@ -155,6 +156,7 @@ def test_many_pairs_keep_cumulative_boundaries_and_cached_sources(tmp_path, dura
             asr_poll_interval_seconds=0.01,
             asr_max_wait_seconds=1,
             store=_WaitStore(),
+            mock_media=True,
         )
     frames, data = read_pcm(tmp_path / "combined.wav")
     assert frames == round(20 * duration * RATE)
@@ -184,7 +186,14 @@ def test_sample_fix_invalidates_old_phase_receipts():
     assert runner.RUNNER_VERSION != "auto-cut-lite-review-document-run-v10-working-audio"
 
 
-def test_v10_source_asr_phase_is_revalidated_after_upgrade(tmp_path):
+@pytest.mark.parametrize(
+    "old_version",
+    [
+        "auto-cut-lite-review-document-run-v10-working-audio",
+        "auto-cut-lite-review-document-run-v11-sample-precision",
+    ],
+)
+def test_old_source_asr_phase_is_revalidated_after_upgrade(tmp_path, old_version):
     helper = support.ReviewDocumentRunnerTests()
     snapshot, project = helper._audio_inputs(tmp_path)
     args = dict(
@@ -197,7 +206,7 @@ def test_v10_source_asr_phase_is_revalidated_after_upgrade(tmp_path):
         helper._run(snapshot, project, **args)
         state_path = tmp_path / "job/job_state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        state["tool_version"] = "auto-cut-lite-review-document-run-v10-working-audio"
+        state["tool_version"] = old_version
         for phase in state["phases"].values():
             phase["tool_version"] = state["tool_version"]
         support._write_json(state_path, state)
@@ -205,7 +214,9 @@ def test_v10_source_asr_phase_is_revalidated_after_upgrade(tmp_path):
         assert resumed["phases"]["source_asr"]["status"] == "complete"
         assert mocks["execute"].call_count == 2
         index = json.loads((tmp_path / "job/workspace/evidence/source_asr_index.json").read_text())
-        assert index["alignment_timeline_adjustment"]["allowed_missing_frames"] == 1
+        assert index["alignment_timeline_adjustment"]["allowed_missing_frames"] == 800
+        assert index["alignment_timeline_adjustment"]["source_integrity"]["pcm_exact_match"]
+        assert mocks["integrity"].call_count == 2
 
 
 @pytest.mark.parametrize("duration", [0, -1, float("nan"), float("inf"), "invalid"])
