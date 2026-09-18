@@ -20,6 +20,7 @@ from scripts.release.build_lite_plugin import (
     PLUGIN_NAME,
     VERSION_RELATIONSHIP,
     WORKSPACE_NAME,
+    _package_interface_contract,
     _privacy_scan,
     _validate_portable_capabilities,
 )
@@ -161,6 +162,13 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
         raise ValueError("package embedded-runtime identity is invalid")
     if receipt.get("embedded_runtime") != manifest.get("embedded_runtime"):
         raise ValueError("receipt and package embedded-runtime identities do not match")
+    # Legacy packages do not declare an output directory; callers must retain
+    # their explicit manual configuration instead of guessing workspace/output.
+    interface = manifest.get("interface", {})
+    if not isinstance(interface, dict):
+        raise ValueError("package manifest interface must be an object")
+    if "zipOutput" in interface:
+        _package_interface_contract(interface, label="package manifest interface")
 
     rows = manifest.get("files")
     if not isinstance(rows, list) or not rows:
@@ -198,6 +206,7 @@ def validate(archive_path: Path, receipt_path: Path, extract_to: Path) -> dict[s
         "plugin_name": PLUGIN_NAME,
         "plugin_version": manifest["version"],
         "embedded_runtime": manifest["embedded_runtime"],
+        "interface": interface,
         "archive_sha256": archive_sha256,
         "archive_entry_count": len(names),
         "manifest_file_count": len(inventory),

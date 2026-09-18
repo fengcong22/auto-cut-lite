@@ -45,6 +45,19 @@
   claim optimized source-document acceptance without equivalent evidence.
 - Never generate or execute a temporary Python file for a review-document task.
 
+## Taskboard ZIP Handoff
+
+- The package manifest declares `interface.zipOutput.relativeDirectory`; Taskboard alone
+  resolves it below its configured workspace and creates the ZIP output directory.
+- For a Taskboard-controlled run, pass `CODEX_AUTOCUT_PACKAGE_ZIP_PATH` unchanged as
+  `--package-zip`. It names one exact ZIP, not a directory or a filename placeholder.
+- Require the successful `result.json`, adjacent ZIP receipt, and returned `package_zip`
+  to agree with that injected path before using the existing Taskboard-provided
+  `taskctl artifact report` entrypoint to report that same file and its SHA-256.
+- Never scan output directories, select the newest ZIP, derive another filename from a
+  document title, or upload to NAS from Lite. A path/name mismatch blocks the run.
+- See `TASKBOARD-ZIP-CONTRACT.md` for declaration validation and legacy compatibility.
+
 ## Lite Execution Precedence
 
 - Explicit whole-source/project requirements and maintained voice-preset, toolbar-hiding, and

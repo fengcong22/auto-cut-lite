@@ -114,6 +114,58 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
             self.assertEqual(receipt["binding"]["task_id"], "task-1")
             self.assertEqual(receipt["error"]["code"], "source_manifest_invalid")
 
+    def test_mismatched_injected_path_blocks_before_source_processing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            manifest = root / "source-manifest.json"
+            payload = self._manifest_payload()
+            manifest.write_text(json.dumps(payload), encoding="utf-8")
+            environment = self._manifest_environment(canonical_sha256(payload))
+            environment["CODEX_AUTOCUT_PACKAGE_ZIP_PATH"] = str(root / "Expected Draft.zip")
+            result_path = root / "result.json"
+            with (
+                patch.dict(os.environ, environment),
+                patch.object(runner, "materialize_manifest_sources") as materialize,
+                patch.object(runner, "package_lite_delivery") as package,
+            ):
+                with self.assertRaises(runner.ReviewDocumentRunError):
+                    runner.run_review_document(
+                        source_manifest_json=manifest,
+                        result_path=result_path,
+                        job_root=root / "job",
+                        drafts_root=root / "drafts",
+                        package_zip=root / "wrong" / "Expected Draft.zip",
+                        mock_media=True,
+                    )
+            materialize.assert_not_called()
+            package.assert_not_called()
+            self.assertFalse((root / "wrong").exists())
+            receipt = json.loads(result_path.read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "blocked")
+            self.assertEqual(receipt["error"]["code"], "package_path_mismatch")
+            self.assertNotIn("package_zip", receipt)
+
+    def test_taskboard_output_directory_must_already_exist(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            output = root / "output" / "Expected Draft.zip"
+            environment = self._manifest_environment("a" * 64)
+            environment["CODEX_AUTOCUT_PACKAGE_ZIP_PATH"] = str(output)
+            with patch.dict(os.environ, environment):
+                with self.assertRaises(runner.ReviewDocumentRunError):
+                    runner.run_review_document(
+                        source_manifest_json=root / "source-manifest.json",
+                        result_path=root / "result.json",
+                        job_root=root / "job",
+                        drafts_root=root / "drafts",
+                        package_zip=output,
+                        mock_media=True,
+                    )
+            self.assertFalse(output.parent.exists())
+            receipt = json.loads((root / "result.json").read_text(encoding="utf-8"))
+            self.assertEqual(receipt["status"], "blocked")
+            self.assertEqual(receipt["error"]["code"], "package_directory_missing")
+
     def test_manifest_blocked_receipt_error_message_does_not_expose_absolute_path(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -608,6 +660,8 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
     def test_manifest_success_terminal_receipt_contains_exact_delivery_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
+            output_directory = root / "output"
+            output_directory.mkdir()
             video = root / "source.mp4"
             video.write_bytes(b"manifest-video")
             manifest_payload = {
@@ -682,6 +736,7 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
                 "CODEX_AUTOCUT_STAGE_ID": "initial",
                 "CODEX_AUTOCUT_EVENT_ID": "evt-1",
                 "CODEX_AUTOCUT_SOURCE_MANIFEST_SHA256": manifest_digest,
+                "CODEX_AUTOCUT_PACKAGE_ZIP_PATH": str(output_directory / "Expected Draft.zip"),
             }
             support = runner_test_support.ReviewDocumentRunnerTests(
                 methodName="test_fixed_dag_caches_source_and_reverse_asr_and_resumes_every_phase"
@@ -705,7 +760,7 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
                     result_path=result_path,
                     job_root=root / "job",
                     drafts_root=root / "drafts",
-                    package_zip=root / "Expected Draft.zip",
+                    package_zip=output_directory / "Expected Draft.zip",
                     cache_root=root / "cache",
                     workflow_mode="lite",
                     mock_media=True,
@@ -713,7 +768,14 @@ class ReviewDocumentRunnerSourcePairTests(IsolatedReadinessTestCase):
 
             self.assertTrue(result["ok"])
             receipt = json.loads(result_path.read_text(encoding="utf-8"))
-            expected_package = (root / "Expected Draft.zip").resolve()
+            expected_package = (output_directory / "Expected Draft.zip").resolve()
+            self.assertEqual(result["package_zip"], environment["CODEX_AUTOCUT_PACKAGE_ZIP_PATH"])
+            self.assertEqual(result["output_artifacts"]["package_zip"], str(expected_package))
+            package_receipt = json.loads(
+                Path(str(expected_package) + ".receipt.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(package_receipt["package_zip"], str(expected_package))
+            self.assertEqual(package_receipt["archive_path"], str(expected_package))
             self.assertEqual(receipt["status"], "pass")
             self.assertEqual(receipt["binding"], manifest_payload["binding"])
             self.assertEqual(receipt["manifest_sha256"], manifest_digest)

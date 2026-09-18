@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import uuid
@@ -124,6 +125,32 @@ def _read_package_inventory(plugin_root: Path) -> dict[str, str]:
         or not isinstance(payload.get("files"), list)
     ):
         raise ValueError("package manifest identity is invalid")
+
+    interface = payload.get("interface", {})
+    if not isinstance(interface, dict):
+        raise ValueError("package manifest interface must be an object")
+    if "zipOutput" in interface:
+        output = interface["zipOutput"]
+        if not isinstance(output, dict) or set(output) != {"relativeDirectory"}:
+            raise ValueError("package manifest interface.zipOutput is invalid")
+        relative = output["relativeDirectory"]
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or relative != relative.strip()
+            or relative.startswith(("/", "\\"))
+            or re.match(r"^[A-Za-z]:", relative)
+            or any(
+                part in {"", ".", ".."}
+                or part.endswith((".", " "))
+                or re.search(r'[<>:"|?*\x00-\x1f]', part)
+                or re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?", part)
+                for part in relative.replace("\\", "/").split("/")
+            )
+        ):
+            raise ValueError(
+                "package manifest zipOutput.relativeDirectory must be a safe relative directory"
+            )
 
     inventory: dict[str, str] = {}
     seen_casefold: set[str] = set()

@@ -577,6 +577,31 @@ function Resolve-ManifestRelativePath {
     return $resolved
 }
 
+function Test-PackageZipOutputDeclaration {
+    param([Parameter(Mandatory)]$Manifest)
+    if ($null -eq $Manifest.PSObject.Properties['interface']) { return }
+    $interface = $Manifest.interface
+    if ($interface -isnot [pscustomobject]) { throw 'Package manifest interface must be an object.' }
+    if ($null -eq $interface.PSObject.Properties['zipOutput']) { return }
+    $output = $interface.zipOutput
+    if ($output -isnot [pscustomobject] -or
+        @($output.PSObject.Properties).Count -ne 1 -or
+        $output.PSObject.Properties.Name -notcontains 'relativeDirectory') {
+        throw 'Package manifest interface.zipOutput is invalid.'
+    }
+    $relative = $output.relativeDirectory
+    if ($relative -isnot [string] -or [string]::IsNullOrWhiteSpace($relative) -or
+        $relative -ne $relative.Trim() -or $relative -match '^[\\/]|^[A-Za-z]:') {
+        throw 'Package manifest zipOutput.relativeDirectory must be a safe relative directory.'
+    }
+    foreach ($part in ($relative -split '[\\/]')) {
+        if ($part -in @('', '.', '..') -or $part -match '[. ]$|[<>:"|?*\x00-\x1f]' -or
+            $part -match '^(CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(?:\..*)?$') {
+            throw 'Package manifest zipOutput.relativeDirectory must be a safe relative directory.'
+        }
+    }
+}
+
 function Read-AndValidatePackageManifest {
     $manifestPath = Join-Path $packageRoot 'PACKAGE-MANIFEST.json'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -593,6 +618,7 @@ function Read-AndValidatePackageManifest {
         [string]::IsNullOrWhiteSpace([string]$manifest.version)) {
         throw 'Package identity is invalid.'
     }
+    Test-PackageZipOutputDeclaration -Manifest $manifest
     $manifestRuntime = $manifest.embedded_runtime
     if ($manifestRuntime -isnot [pscustomobject] -or
         -not (Test-ExactJsonString -Value $manifestRuntime.name -Expected $embeddedRuntimeName) -or

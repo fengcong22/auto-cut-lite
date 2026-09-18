@@ -50,7 +50,7 @@ from utils.jianying_native_delivery import (
     mirror_draft_tree,
     resolve_configured_native_target_root,
 )
-from utils.lite_package import package_lite_delivery
+from utils.lite_package import package_lite_delivery, validate_taskboard_zip_path
 from utils.jianying_env import detect_jianying_environment, sync_draft_runtime_metadata
 from utils.jianying_smoke import (
     SMOKE_TEXT,
@@ -2392,6 +2392,9 @@ def cmd_revision_run(
     execution_input_json: str = None,
 ) -> Dict[str, Any]:
     try:
+        bound_package_path = (
+            validate_taskboard_zip_path(package_zip) if package_zip is not None else None
+        )
         request = load_revision_request(request_json)
         if workflow_mode is not None:
             normalized_workflow_mode = str(workflow_mode).strip().lower()
@@ -2479,7 +2482,8 @@ def cmd_revision_run(
                     "but it was not found."
                 )
             package_output = Path(package_zip).expanduser().resolve(strict=False)
-            package_output = package_output.with_name(f"{draft_path.name}.zip")
+            if bound_package_path is None:
+                package_output = package_output.with_name(f"{draft_path.name}.zip")
             if (
                 package_root_name is not None
                 and str(package_root_name).strip() != draft_path.name

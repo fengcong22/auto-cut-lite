@@ -22,9 +22,7 @@ ONE_CLICK_PATH = REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "one_cl
 UNINSTALL_PATH = (
     REPO_ROOT / "plugins" / "auto-cut-lite" / "installer" / "uninstall_auto_cut_lite.ps1"
 )
-ONE_CLICK_LAUNCHER = (
-    REPO_ROOT / "plugins" / "auto-cut-lite" / "一键安装或升级-Auto-Cut-Lite.cmd"
-)
+ONE_CLICK_LAUNCHER = REPO_ROOT / "plugins" / "auto-cut-lite" / "一键安装或升级-Auto-Cut-Lite.cmd"
 ONE_CLICK_UNINSTALLER = REPO_ROOT / "plugins" / "auto-cut-lite" / "一键卸载-Auto-Cut-Lite.cmd"
 
 
@@ -1448,6 +1446,87 @@ def test_uninstaller_uses_managed_python_utf8_and_removes_attempt_report(
     assert uninstall_report["workspace_root"] == f"中文工作区::{runtime_python}"
 
 
+def test_deployer_zip_output_declaration_is_read_only_and_rejects_unsafe_paths(
+    tmp_path: Path,
+) -> None:
+    source = DEPLOYER_PATH.read_text(encoding="utf-8-sig")
+    function = source[
+        source.index("function Test-PackageZipOutputDeclaration {") : source.index(
+            "function Read-AndValidatePackageManifest {"
+        )
+    ]
+    cases = [
+        {"manifest": {}, "accepted": True},
+        {"manifest": {"interface": {}}, "accepted": True},
+        *[
+            {
+                "manifest": {"interface": {"zipOutput": {"relativeDirectory": value}}},
+                "accepted": True,
+            }
+            for value in ("output", "output/课程 初稿", "delivery\\drafts")
+        ],
+        *[
+            {
+                "manifest": {"interface": {"zipOutput": {"relativeDirectory": value}}},
+                "accepted": False,
+            }
+            for value in (
+                "../output",
+                "output\\..\\other",
+                "C:/output",
+                "C:output",
+                "\\\\server\\share",
+                "/output",
+                "\\output",
+                "",
+                ".",
+                "output/.. ",
+                "output/NUL",
+                "output.",
+                None,
+                12,
+            )
+        ],
+        {"manifest": {"interface": {"zipOutput": {}}}, "accepted": False},
+        {"manifest": {"interface": {"zipOutput": None}}, "accepted": False},
+        {"manifest": {"interface": None}, "accepted": False},
+    ]
+    cases_path = tmp_path / "cases.json"
+    cases_path.write_text(json.dumps(cases, ensure_ascii=True), encoding="utf-8")
+    script = tmp_path / "test-declaration.ps1"
+    script.write_text(
+        'param([string]$CasesPath)\nSet-StrictMode -Version Latest\n$ErrorActionPreference = "Stop"\n'
+        + function
+        + "\n$cases = Get-Content -LiteralPath $CasesPath -Raw -Encoding UTF8 | ConvertFrom-Json\n"
+        + "$results = @(foreach ($case in $cases) {\n"
+        + "  try { Test-PackageZipOutputDeclaration -Manifest $case.manifest; $true } catch { $false }\n"
+        + "})\nConvertTo-Json -InputObject $results -Compress\n",
+        encoding="utf-8-sig",
+    )
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            str(cases_path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(result.stdout) == [row["accepted"] for row in cases]
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "cases.json",
+        "test-declaration.ps1",
+    ]
+
+
 def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     tmp_path: Path,
 ) -> None:
@@ -1471,7 +1550,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
                     "post_install_guide": "Auto-Cut-Lite部署成功后操作说明.md",
                     "one_click_launcher": "一键安装或升级-Auto-Cut-Lite.cmd",
                     "one_click_uninstaller": "一键卸载-Auto-Cut-Lite.cmd",
-                }
+                },
             }
         ).encode(),
         "Auto-Cut-Lite新手部署说明.md": b"# Beginner\n",
@@ -1521,6 +1600,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
                     "version": "1.7.0",
                     "version_relationship": "independent_embedded_core",
                 },
+                "interface": {"zipOutput": {"relativeDirectory": "output"}},
                 "files": manifest_rows,
             }
         ),
@@ -1558,6 +1638,8 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert not (package / "output").exists()
+    assert not custom_workspace.exists()
     assert "package_validation=pass" in result.stdout
     assert "environment_validation=pass" in result.stdout
     assert "plugin_version=1.3.0" in result.stdout
@@ -1574,7 +1656,10 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert "workspace_root_customizable=true" in result.stdout
     assert "workspace_mode=combined_package_workspace" in result.stdout
     assert f"workspace_package_root={custom_workspace}" in result.stdout
-    assert "workspace_upgrade_precedence=parameter_then_existing_receipt_then_package_root" in result.stdout
+    assert (
+        "workspace_upgrade_precedence=parameter_then_existing_receipt_then_package_root"
+        in result.stdout
+    )
     assert "workspace_label=Auto-cut-lite" in result.stdout
     assert "workspace_scope=repo" in result.stdout
     assert "workspace_skill_count=17" in result.stdout
@@ -1608,9 +1693,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     assert "folder name must be exactly" in (invalid_workspace.stdout + invalid_workspace.stderr)
 
     (command_bin / "codex.cmd").write_text("@exit /b 1\n", encoding="ascii")
-    (command_bin / "npx.cmd").write_text(
-        "@echo npm notice 1>&2\n@exit /b 0\n", encoding="ascii"
-    )
+    (command_bin / "npx.cmd").write_text("@echo npm notice 1>&2\n@exit /b 0\n", encoding="ascii")
     fallback = subprocess.run(
         [
             "powershell",
@@ -1639,9 +1722,7 @@ def test_deployer_validate_only_runs_package_preflight_on_windows_powershell_51(
     original_manifest = manifest_path.read_bytes()
 
     manifest = json.loads(original_manifest.decode())
-    manifest["files"] = [
-        row for row in manifest["files"] if row["path"] != "runtime/VERSION"
-    ]
+    manifest["files"] = [row for row in manifest["files"] if row["path"] != "runtime/VERSION"]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     missing_identity_inventory = subprocess.run(
         [
@@ -1756,13 +1837,9 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
         packaged_runtime_version = archive.read("Auto-cut-lite/runtime/VERSION").decode().strip()
         packaged_pyproject = archive.read("Auto-cut-lite/runtime/pyproject.toml").decode()
         packaged_schema = json.loads(
-            archive.read(
-                "Auto-cut-lite/runtime/schemas/capability-manifest.schema.json"
-            ).decode()
+            archive.read("Auto-cut-lite/runtime/schemas/capability-manifest.schema.json").decode()
         )
-        packaged_manifest = json.loads(
-            archive.read("Auto-cut-lite/PACKAGE-MANIFEST.json").decode()
-        )
+        packaged_manifest = json.loads(archive.read("Auto-cut-lite/PACKAGE-MANIFEST.json").decode())
     assert names
     assert {name.split("/", 1)[0] for name in names} == {"Auto-cut-lite"}
     assert "Auto-cut-lite/Auto-Cut-Lite新手部署说明.md" in names
@@ -1781,6 +1858,7 @@ def test_builder_uses_one_combined_workspace_archive_root(tmp_path: Path) -> Non
         == build_lite_plugin.EMBEDDED_RUNTIME_VERSION
     )
     assert packaged_manifest["embedded_runtime"] == receipt["embedded_runtime"]
+    assert packaged_manifest["interface"] == {"zipOutput": {"relativeDirectory": "output"}}
     assert not any(name.startswith("auto-cut-lite/") for name in names)
 
 

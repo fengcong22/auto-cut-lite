@@ -29,7 +29,11 @@ from utils.execution_input import (
     resolve_artifact_name,
 )
 from utils.jianying_native_delivery import capture_draft_tree_receipt
-from utils.lite_package import PACKAGE_SCHEMA_VERSION, package_lite_delivery
+from utils.lite_package import (
+    PACKAGE_SCHEMA_VERSION,
+    package_lite_delivery,
+    validate_taskboard_zip_path,
+)
 from utils.review_audio_precision import (
     CANDIDATE_RENDERER_VERSION,
     REVERSE_ASR_DIAGNOSTIC_PURPOSE,
@@ -105,7 +109,7 @@ from utils.working_audio import validate_working_audio_sync
 from audio_sound.segment_removal import probe_media
 from audio_sound.volc_asr import VOLC_ASR_ADAPTER_VERSION, load_volc_asr_config
 
-RUNNER_VERSION = "auto-cut-lite-review-document-run-v14-quoted-range-precedence"
+RUNNER_VERSION = "auto-cut-lite-review-document-run-v15-bound-zip-path"
 WORKING_AUDIO_WRITER_VERSION = "lite-working-audio-split-gap-v1"
 _SCHEMA_VERSION = 2
 _ASR_CACHE_SCHEMA_VERSION = 1
@@ -243,7 +247,7 @@ def _trusted_manifest_terminal_context() -> tuple[dict[str, Any], str] | None:
 
 
 def _validate_manifest_package_path(requested_package_path: Path, draft_name: str) -> None:
-    """Require the Taskboard-owned ZIP path to use the final draft name."""
+    """Keep the frozen artifact name consistent; never rename the bound ZIP."""
 
     expected = requested_package_path.with_name(f"{str(draft_name).strip()}.zip")
     if requested_package_path.resolve(strict=False) != expected.resolve(strict=False):
@@ -2120,6 +2124,7 @@ def run_review_document(
         else None
     )
     manifest_requested = bool(str(source_manifest_json or "").strip())
+    fixed_package_path = manifest_requested or "CODEX_AUTOCUT_PACKAGE_ZIP_PATH" in os.environ
     trusted_manifest_context = _trusted_manifest_terminal_context()
     terminal_result_attempted = False
 
@@ -2461,6 +2466,16 @@ def run_review_document(
                 result.setdefault("failure_details", {})["terminal_result"] = dict(detail)
 
     try:
+        validate_taskboard_zip_path(package_zip)
+        if fixed_package_path and not Path(package_zip).is_absolute():
+            raise SourceManifestError(
+                "package_path_mismatch", "Taskboard ZIP path must be absolute"
+            )
+        if fixed_package_path and not requested_package_path.parent.is_dir():
+            raise SourceManifestError(
+                "package_directory_missing",
+                "Taskboard must create the ZIP output directory before running Lite",
+            )
         has_doc_url = bool(str(doc_url or "").strip())
         has_manifest = bool(str(source_manifest_json or "").strip())
         has_snapshot = snapshot_json is not None and bool(str(snapshot_json).strip())
@@ -2517,7 +2532,8 @@ def run_review_document(
             paths[key].mkdir(parents=True, exist_ok=True)
         drafts_path = Path(drafts_root).expanduser().resolve(strict=False)
         drafts_path.mkdir(parents=True, exist_ok=True)
-        package_path.parent.mkdir(parents=True, exist_ok=True)
+        if not fixed_package_path:
+            package_path.parent.mkdir(parents=True, exist_ok=True)
         relink_path = (
             Path(relink_tool).expanduser().resolve(strict=True)
             if relink_tool is not None
@@ -2594,6 +2610,7 @@ def run_review_document(
             "context_before": float(context_before),
             "context_after": float(context_after),
             "package_directory": os.path.normcase(str(requested_package_path.parent)),
+            "bound_package_zip": str(requested_package_path) if fixed_package_path else None,
             "execution_input_digest": execution_input_digest,
             "drafts_root": os.path.normcase(str(drafts_path)),
             "relink_tool_sha256": sha256_file(relink_path),
@@ -2619,6 +2636,7 @@ def run_review_document(
 
         def validate_manifest_package_path(draft_name: str, phase: str) -> None:
             try:
+                validate_taskboard_zip_path(requested_package_path)
                 _validate_manifest_package_path(requested_package_path, draft_name)
             except SourceManifestError as exc:
                 failure_details[phase] = _json_safe(exc.public_data())
@@ -2998,11 +3016,12 @@ def run_review_document(
                 resolution.get("final_name") or raw_project.get("draft_name") or ""
             ).strip()
             if final_name:
-                desired_package_path = requested_package_path.with_name(f"{final_name}.zip")
-                if has_manifest:
+                if fixed_package_path:
                     validate_manifest_package_path(final_name, "input_compile")
-                package_path = desired_package_path
-                package_path.parent.mkdir(parents=True, exist_ok=True)
+                    package_path = requested_package_path
+                else:
+                    package_path = requested_package_path.with_name(f"{final_name}.zip")
+                    package_path.parent.mkdir(parents=True, exist_ok=True)
             explicit_mode = str(raw_project.get("workflow_mode") or "").strip().casefold()
             if explicit_mode and explicit_mode != "lite":
                 raise ValueError("Project explicitly requests a non-Lite workflow")
@@ -4655,9 +4674,11 @@ def run_review_document(
                     "Saved revision draft_name does not match its directory: "
                     f"result={execution_draft_name!r} directory={draft_path.name!r}"
                 )
-            if source_manifest is not None:
+            if fixed_package_path:
                 validate_manifest_package_path(draft_path.name, "package_publish")
-            package_path = requested_package_path.with_name(f"{draft_path.name}.zip")
+                package_path = requested_package_path
+            else:
+                package_path = requested_package_path.with_name(f"{draft_path.name}.zip")
             name_resolution = _name_resolution_for_actual_draft(
                 intake.get("name_resolution")
                 or _name_resolution_from_project(paths["project_lite"]),
@@ -4685,6 +4706,7 @@ def run_review_document(
                     package_root_name=draft_path.name,
                     name_resolution=name_resolution,
                     execution_input_digest=execution_input_digest,
+                    require_existing_output_directory=fixed_package_path,
                 )
                 # Compatible v2 receipt extension binds a package to the new
                 # working-audio writer; pre-upgrade ZIPs cannot be resumed.
@@ -4921,6 +4943,14 @@ def run_review_document(
             if manifest_requested:
                 write_terminal_result(status="blocked", result=result, error_code="package_invalid")
             raise ReviewDocumentRunError(error, public_result(ok=False, error=error))
+        if fixed_package_path:
+            for actual in (result.get("package_zip"), delivery.get("archive_path")):
+                if actual != str(requested_package_path):
+                    raise SourceManifestError(
+                        "package_path_mismatch",
+                        "Final ZIP report must equal the bound package path",
+                    )
+            validate_taskboard_zip_path(requested_package_path)
         if manifest_requested:
             write_terminal_result(status="pass", result=result)
         return result

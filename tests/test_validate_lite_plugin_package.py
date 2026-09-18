@@ -30,6 +30,7 @@ def _write_json(path: Path, payload: object) -> None:
 def _stage_package(
     tmp_path: Path,
     mutate: Callable[[Path], None] | None = None,
+    mutate_manifest: Callable[[dict], None] | None = None,
 ) -> tuple[Path, Path]:
     stage_parent = tmp_path / "stage"
     root = stage_parent / build_lite_plugin.WORKSPACE_NAME
@@ -53,13 +54,7 @@ def _stage_package(
     schema_path.parent.mkdir(parents=True, exist_ok=True)
     _write_json(
         schema_path,
-        {
-            "properties": {
-                "release_version": {
-                    "const": build_lite_plugin.EMBEDDED_RUNTIME_VERSION
-                }
-            }
-        },
+        {"properties": {"release_version": {"const": build_lite_plugin.EMBEDDED_RUNTIME_VERSION}}},
     )
 
     portable_path = root / "PORTABLE-CAPABILITIES.json"
@@ -81,19 +76,20 @@ def _stage_package(
     ):
         relative = path.relative_to(root).as_posix()
         inventory.append({"path": relative, "size": path.stat().st_size, "sha256": _sha256(path)})
-    _write_json(
-        root / "PACKAGE-MANIFEST.json",
-        {
-            "name": build_lite_plugin.PLUGIN_NAME,
-            "version": build_lite_plugin.PLUGIN_VERSION,
-            "embedded_runtime": {
-                "name": build_lite_plugin.EMBEDDED_RUNTIME_NAME,
-                "version": build_lite_plugin.EMBEDDED_RUNTIME_VERSION,
-                "version_relationship": build_lite_plugin.VERSION_RELATIONSHIP,
-            },
-            "files": inventory,
+    manifest = {
+        "name": build_lite_plugin.PLUGIN_NAME,
+        "version": build_lite_plugin.PLUGIN_VERSION,
+        "embedded_runtime": {
+            "name": build_lite_plugin.EMBEDDED_RUNTIME_NAME,
+            "version": build_lite_plugin.EMBEDDED_RUNTIME_VERSION,
+            "version_relationship": build_lite_plugin.VERSION_RELATIONSHIP,
         },
-    )
+        "interface": {"zipOutput": {"relativeDirectory": "output"}},
+        "files": inventory,
+    }
+    if mutate_manifest is not None:
+        mutate_manifest(manifest)
+    _write_json(root / "PACKAGE-MANIFEST.json", manifest)
 
     archive_path = tmp_path / build_lite_plugin.ARCHIVE_NAME
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -140,6 +136,7 @@ def test_offline_validator_proves_workspace_skill_and_review_runtime_contract(
         "version": "1.7.0",
         "version_relationship": "independent_embedded_core",
     }
+    assert result["interface"] == {"zipOutput": {"relativeDirectory": "output"}}
     assert result["portable_capability_closure"] == "pass"
     assert result["workspace_skill_count"] == 17
     assert result["workspace_skill_scope"] == "repo"
@@ -294,3 +291,91 @@ def test_offline_validator_rejects_package_receipt_embedded_runtime_mismatch(
 
     with pytest.raises(ValueError, match="embedded-runtime identities do not match"):
         validate(archive, receipt_path, tmp_path / "extract")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "../output",
+        "output/../other",
+        "output\\..\\other",
+        "C:/output",
+        "C:\\output",
+        "C:output",
+        "\\\\server\\share",
+        "//server/share",
+        "/output",
+        "\\output",
+        "\\\\?\\C:\\output",
+        "",
+        ".",
+        "output/./other",
+        "output//other",
+        "output/.. ",
+        "output:stream",
+        "output\0bad",
+        "output/NUL",
+        "output/CON.txt",
+        "output.",
+        None,
+        [],
+        12,
+    ],
+)
+def test_package_manifest_rejects_unsafe_zip_output_relative_directory(
+    tmp_path: Path, value: object
+) -> None:
+    with pytest.raises(ValueError, match="relative|unsafe"):
+        build_lite_plugin._package_interface_contract(
+            {"zipOutput": {"relativeDirectory": value}},
+            label="package manifest interface",
+        )
+    archive, receipt = _stage_package(
+        tmp_path,
+        mutate_manifest=lambda manifest: manifest["interface"]["zipOutput"].update(
+            relativeDirectory=value
+        ),
+    )
+    with pytest.raises(ValueError, match="relative|unsafe"):
+        validate(archive, receipt, tmp_path / "extract")
+
+
+@pytest.mark.parametrize("value", ["output", "output/课程 初稿", "delivery\\drafts"])
+def test_package_manifest_accepts_safe_zip_directories_without_creating_them(
+    tmp_path: Path, value: str
+) -> None:
+    assert build_lite_plugin._package_interface_contract(
+        {"zipOutput": {"relativeDirectory": value}},
+        label="package manifest interface",
+    ) == {"zipOutput": {"relativeDirectory": value.replace("\\", "/")}}
+    archive, receipt = _stage_package(
+        tmp_path,
+        mutate_manifest=lambda manifest: manifest["interface"]["zipOutput"].update(
+            relativeDirectory=value
+        ),
+    )
+    result = validate(archive, receipt, tmp_path / "extract")
+    assert result["interface"]["zipOutput"]["relativeDirectory"] == value
+    assert not (Path(result["extracted_root"]) / value.replace("\\", "/")).exists()
+
+
+@pytest.mark.parametrize(
+    "interface", [None, [], {"zipOutput": None}, {"zipOutput": {}}, {"zipOutput": "output"}]
+)
+def test_package_manifest_rejects_malformed_zip_declaration(
+    tmp_path: Path, interface: object
+) -> None:
+    archive, receipt = _stage_package(
+        tmp_path, mutate_manifest=lambda manifest: manifest.update(interface=interface)
+    )
+    with pytest.raises(ValueError, match="interface"):
+        validate(archive, receipt, tmp_path / "extract")
+
+
+def test_legacy_package_does_not_invent_zip_directory(tmp_path: Path) -> None:
+    archive, receipt = _stage_package(
+        tmp_path, mutate_manifest=lambda manifest: manifest.pop("interface")
+    )
+    result = validate(archive, receipt, tmp_path / "extract")
+    assert result["interface"] == {}
+    assert not (Path(result["extracted_root"]) / "output").exists()

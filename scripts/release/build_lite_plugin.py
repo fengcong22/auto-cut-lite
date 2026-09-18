@@ -10,18 +10,20 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import tempfile
 import zipfile
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 PLUGIN_NAME = "auto-cut-lite"
 WORKSPACE_NAME = "Auto-cut-lite"
-PLUGIN_VERSION = "1.6.14+codex.20260917153042"
+PLUGIN_VERSION = "1.6.15+codex.20260918072555"
 EMBEDDED_RUNTIME_NAME = "auto-cut"
 EMBEDDED_RUNTIME_VERSION = "1.7.0"
 VERSION_RELATIONSHIP = "independent_embedded_core"
+PACKAGE_INTERFACE = {"zipOutput": {"relativeDirectory": "output"}}
 ARCHIVE_NAME = f"{PLUGIN_NAME}-{PLUGIN_VERSION}-windows-x64.zip"
 EXPECTED_SKILLS = {
     "auto-cut",
@@ -198,6 +200,51 @@ def _safe_relative(path: str) -> str:
     return candidate.as_posix()
 
 
+def _safe_workspace_relative_directory(value: object, *, label: str) -> str:
+    """Normalize a cross-platform-safe directory relative to a workspace."""
+
+    if not isinstance(value, str) or not value or value.strip() != value or "\0" in value:
+        raise ValueError(f"{label} must be a non-empty relative directory")
+    if (
+        PurePosixPath(value).is_absolute()
+        or PureWindowsPath(value).root
+        or PureWindowsPath(value).drive
+        or re.match(r"^[A-Za-z]:", value)
+        or value.startswith(("//", "\\\\"))
+    ):
+        raise ValueError(f"{label} must be relative to the workspace")
+    normalized = value.replace("\\", "/")
+    parts = normalized.split("/")
+    if (
+        not parts
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(part.endswith((".", " ")) for part in parts)
+        or any(
+            re.fullmatch(r"(?i:CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\..*)?", part)
+            for part in parts
+        )
+        or any(any(char in '<>:"|?*' or ord(char) < 32 for char in part) for part in parts)
+    ):
+        raise ValueError(f"{label} is unsafe")
+    return "/".join(parts)
+
+
+def _package_interface_contract(interface: object, *, label: str) -> dict[str, object]:
+    if not isinstance(interface, dict):
+        raise ValueError(f"{label} must be an object")
+    zip_output = interface.get("zipOutput")
+    if not isinstance(zip_output, dict) or set(zip_output) != {"relativeDirectory"}:
+        raise ValueError(f"{label}.zipOutput is invalid")
+    return {
+        "zipOutput": {
+            "relativeDirectory": _safe_workspace_relative_directory(
+                zip_output.get("relativeDirectory"),
+                label=f"{label}.zipOutput.relativeDirectory",
+            )
+        }
+    }
+
+
 def _copy_file(source: Path, target: Path, *, sanitize_text: bool = True) -> None:
     if _is_reparse(source) or not source.is_file():
         raise ValueError(f"runtime source is not a regular file: {source}")
@@ -316,18 +363,23 @@ def _validate_package_identity(stage: Path, manifest: dict[str, object]) -> None
     plugin_manifest = json.loads(
         (stage / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8-sig")
     )
-    portable = json.loads(
-        (stage / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8-sig")
-    )
+    portable = json.loads((stage / "PORTABLE-CAPABILITIES.json").read_text(encoding="utf-8-sig"))
     if manifest.get("name") != PLUGIN_NAME or manifest.get("version") != PLUGIN_VERSION:
         raise ValueError("package manifest plugin identity is invalid")
-    if plugin_manifest.get("name") != PLUGIN_NAME or plugin_manifest.get("version") != PLUGIN_VERSION:
+    if (
+        plugin_manifest.get("name") != PLUGIN_NAME
+        or plugin_manifest.get("version") != PLUGIN_VERSION
+    ):
         raise ValueError("plugin manifest identity does not match the package")
-    if portable.get("plugin_name") != PLUGIN_NAME or portable.get("plugin_version") != PLUGIN_VERSION:
+    if (
+        portable.get("plugin_name") != PLUGIN_NAME
+        or portable.get("plugin_version") != PLUGIN_VERSION
+    ):
         raise ValueError("portable plugin identity does not match the package")
     expected_runtime = _embedded_runtime_contract()
     if manifest.get("embedded_runtime") != expected_runtime:
         raise ValueError("package embedded-runtime declaration is invalid")
+    _package_interface_contract(manifest.get("interface"), label="package manifest interface")
     if portable.get("embedded_runtime") != expected_runtime:
         raise ValueError("portable embedded-runtime declaration is invalid")
     _runtime_identity(stage)
@@ -568,6 +620,10 @@ def build(
             "name": PLUGIN_NAME,
             "version": PLUGIN_VERSION,
             "embedded_runtime": _embedded_runtime_contract(),
+            "interface": _package_interface_contract(
+                PACKAGE_INTERFACE,
+                label="package manifest interface",
+            ),
             "files": inventory,
         }
         _write_text(

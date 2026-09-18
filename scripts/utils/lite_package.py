@@ -18,7 +18,6 @@ from typing import Any, Mapping
 
 from utils.jianying_native_delivery import capture_draft_tree_receipt
 
-
 PACKAGE_SCHEMA_VERSION = 2
 RELINK_TOOL_FILENAME = "Auto-Cut剪映素材重链工具.exe"
 INSTRUCTIONS_FILENAME = "使用说明.txt"
@@ -27,13 +26,37 @@ _INVALID_COMPONENT_CHARS = set('<>:"/\\|?*')
 _NAME_RESOLUTION_REQUIRED_FIELDS = frozenset(
     {"requested_name", "final_name", "source", "sanitized"}
 )
-_NAME_RESOLUTION_OPTIONAL_FIELDS = frozenset(
-    {"pre_fallback_name", "draft_fallback_applied"}
-)
+_NAME_RESOLUTION_OPTIONAL_FIELDS = frozenset({"pre_fallback_name", "draft_fallback_applied"})
 
 
 class LitePackageError(ValueError):
     """A safe, user-actionable lite package failure."""
+
+
+class TaskboardZipPathError(LitePackageError):
+    code = "package_path_mismatch"
+
+
+def validate_taskboard_zip_path(output_zip: str | os.PathLike[str]) -> Path | None:
+    """Check the injected file, without deriving a directory or touching disk."""
+
+    injected = os.environ.get("CODEX_AUTOCUT_PACKAGE_ZIP_PATH")
+    if injected is None:
+        return None
+    expected = Path(injected)
+    requested = Path(output_zip)
+    if (
+        not injected
+        or "\0" in injected
+        or not expected.is_absolute()
+        or not requested.is_absolute()
+        or expected.suffix != ".zip"
+        or requested.resolve(strict=False) != expected.resolve(strict=False)
+    ):
+        raise TaskboardZipPathError(
+            "package_zip must equal the absolute CODEX_AUTOCUT_PACKAGE_ZIP_PATH"
+        )
+    return expected.resolve(strict=False)
 
 
 def _normalize_name_resolution(
@@ -422,11 +445,16 @@ def package_lite_delivery(
     receipt_json: str | os.PathLike[str] | None = None,
     name_resolution: Mapping[str, Any] | None = None,
     execution_input_digest: str = "",
+    require_existing_output_directory: bool = False,
 ) -> dict[str, Any]:
     """Create and validate the final lite ZIP without opening JianYing."""
 
+    bound_output = validate_taskboard_zip_path(output_zip)
     source = _require_directory(draft_dir, "草稿目录")
-    if not (source / "draft_content.json").is_file() or not (source / "draft_meta_info.json").is_file():
+    if (
+        not (source / "draft_content.json").is_file()
+        or not (source / "draft_meta_info.json").is_file()
+    ):
         raise LitePackageError("草稿目录缺少 draft_content.json 或 draft_meta_info.json")
     if source.name.casefold().endswith(".zip"):
         raise LitePackageError("草稿目录名不能带 .zip 后缀")
@@ -442,7 +470,11 @@ def package_lite_delivery(
         )
     if output.exists():
         raise LitePackageError(f"最终 ZIP 已存在，不覆盖：{output}")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    if require_existing_output_directory or bound_output is not None:
+        if not output.parent.is_dir():
+            raise LitePackageError(f"最终 ZIP 目录不可用：{output.parent}")
+    else:
+        output.parent.mkdir(parents=True, exist_ok=True)
     if _inside(output, source):
         raise LitePackageError("最终 ZIP 不能写入草稿目录内部")
 
@@ -451,6 +483,10 @@ def package_lite_delivery(
         if receipt_json is not None
         else output.with_name(f"{output.name}.receipt.json")
     )
+    if bound_output is not None and receipt != output.with_name(f"{output.name}.receipt.json"):
+        raise TaskboardZipPathError(
+            "Taskboard package receipt must be adjacent to the injected ZIP"
+        )
     if receipt.exists():
         raise LitePackageError(f"ZIP 收据已存在，不覆盖：{receipt}")
     if receipt == output:
@@ -467,8 +503,7 @@ def package_lite_delivery(
     root_name = _single_component(package_root_name or source.name, "ZIP 根目录名称")
     if root_name != source.name:
         raise LitePackageError(
-            "ZIP 根目录名必须与草稿目录名一致："
-            f"expected={source.name!r} actual={root_name!r}"
+            "ZIP 根目录名必须与草稿目录名一致：" f"expected={source.name!r} actual={root_name!r}"
         )
     if source.name in {RELINK_TOOL_FILENAME, INSTRUCTIONS_FILENAME}:
         raise LitePackageError("草稿名称与 ZIP 根目录文件名冲突")
@@ -500,18 +535,14 @@ def package_lite_delivery(
         if tool is not None:
             staged_tool = staging / RELINK_TOOL_FILENAME
             if staged_tool.exists():
-                raise LitePackageError(
-                    f"草稿内已有同名重链工具文件，无法安全封包：{staged_tool}"
-                )
+                raise LitePackageError(f"草稿内已有同名重链工具文件，无法安全封包：{staged_tool}")
             shutil.copy2(tool, staged_tool, follow_symlinks=False)
             if sha256_file(tool) != sha256_file(staged_tool):
                 raise LitePackageError("重链工具复制校验失败")
             tool_hash = sha256_file(tool)
         instructions_path = staging / INSTRUCTIONS_FILENAME
         if instructions_path.exists():
-            raise LitePackageError(
-                f"草稿内已有同名说明文件，无法安全封包：{instructions_path}"
-            )
+            raise LitePackageError(f"草稿内已有同名说明文件，无法安全封包：{instructions_path}")
         _write_text(
             instructions_path,
             _write_instructions(source.name, has_relink_tool=tool is not None),

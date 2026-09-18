@@ -26,6 +26,14 @@ ASR 按严格内容身份去重，中断后只恢复仍有效的阶段，缺失�
 透明度和图像尺寸等安全特征评分。同名素材也按同一规则自动复用；无可用候选时才降级为原文标签并继续，
 不会因常规多候选要求人工选择。
 
+## Taskboard ZIP 对接
+
+包清单现声明默认 ZIP 相对目录 `interface.zipOutput.relativeDirectory = "output"`。
+Taskboard 负责验证声明、解析工作区内绝对路径、保存或启用时创建目录，并注入每次运行的
+精确 `CODEX_AUTOCUT_PACKAGE_ZIP_PATH`。Lite 按该路径生成 ZIP 和相邻回执；路径或冻结名称
+不一致时拒绝，不扫描目录、不另取标题命名、不自行上传 NAS。
+旧包无此声明时继续手工配置目录。完整同步约定见 [Taskboard ZIP 协议](TASKBOARD-ZIP-CONTRACT.md)。
+
 ## 版本身份
 
 Lite 插件与其内嵌核心是两种不同制品，版本独立演进：

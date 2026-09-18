@@ -507,6 +507,26 @@ class ReviewDocumentRunnerTests(IsolatedReadinessTestCase):
             self.assertNotIn("package_zip", failure["output_artifacts"])
             self.assertNotIn("execution_input", failure["output_artifacts"])
 
+    def test_injected_zip_cannot_be_renamed_from_document_title(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            snapshot, project = self._audio_inputs(root)
+            bound = root / "Taskboard.zip"
+            with (
+                patch.dict(os.environ, {"CODEX_AUTOCUT_PACKAGE_ZIP_PATH": str(bound)}),
+                self._patched_runtime() as mocks,
+            ):
+                with self.assertRaises(runner.ReviewDocumentRunError):
+                    self._run(
+                        snapshot, project, job_root=root / "job",
+                        drafts_root=root / "drafts", package_zip=bound,
+                        cache_root=root / "cache",
+                    )
+            mocks["package"].assert_not_called()
+            mocks["execute"].assert_not_called()
+            self.assertFalse(bound.exists())
+            self.assertFalse((root / "RunnerDraft.zip").exists())
+
     def test_top_level_document_title_overrides_compat_project_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -83,6 +83,44 @@ def _plugin(
     return plugin
 
 
+@pytest.mark.parametrize("relative", ["output", "delivery/课程 初稿", "delivery\\drafts"])
+def test_inventory_validates_zip_declaration_without_creating_output(
+    tmp_path: Path, relative: str
+) -> None:
+    plugin = _plugin(tmp_path)
+    manifest_path = plugin / "PACKAGE-MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["interface"] = {"zipOutput": {"relativeDirectory": relative}}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert _load_helper()._read_package_inventory(plugin)
+    assert not (plugin / relative.replace("\\", "/")).exists()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "../output",
+        "C:output",
+        "C:/output",
+        "\\\\server\\share",
+        "/output",
+        "\\output",
+        "output/.. ",
+        "output/NUL",
+        "output:stream",
+        None,
+    ],
+)
+def test_inventory_rejects_unsafe_zip_declaration(tmp_path: Path, relative: object) -> None:
+    plugin = _plugin(tmp_path)
+    manifest_path = plugin / "PACKAGE-MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["interface"] = {"zipOutput": {"relativeDirectory": relative}}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="relative directory"):
+        _load_helper()._read_package_inventory(plugin)
+
+
 def test_install_and_rollback_workspace_are_scoped_and_recoverable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

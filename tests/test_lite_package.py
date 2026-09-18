@@ -17,7 +17,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from cli.jy_wrapper_parser import build_parser
-from utils.lite_package import LitePackageError, package_lite_delivery
+from utils.lite_package import LitePackageError, package_lite_delivery, validate_taskboard_zip_path
 import jy_wrapper
 
 
@@ -42,9 +42,7 @@ class LitePackageTests(unittest.TestCase):
         (draft / "draft_content.json").write_text(
             json.dumps(
                 {
-                    "materials": {
-                        "videos": [{"id": "video-1", "path": str(source_video)}]
-                    },
+                    "materials": {"videos": [{"id": "video-1", "path": str(source_video)}]},
                     "tracks": [],
                 },
                 ensure_ascii=False,
@@ -95,7 +93,9 @@ class LitePackageTests(unittest.TestCase):
             self.assertEqual(result["name_resolution"]["final_name"], draft.name)
             self.assertEqual(result["execution_input_digest"], "a" * 64)
             self.assertEqual(source_content, (draft / "draft_content.json").read_bytes())
-            self.assertEqual(result["archive_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+            self.assertEqual(
+                result["archive_sha256"], hashlib.sha256(output.read_bytes()).hexdigest()
+            )
 
             with zipfile.ZipFile(output) as archive:
                 self.assertIsNone(archive.testzip())
@@ -162,6 +162,62 @@ class LitePackageTests(unittest.TestCase):
                     execution_input_digest="not-a-sha256",
                 )
 
+    def test_package_writes_only_taskboard_bound_zip_and_adjacent_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            draft = self._draft(root)
+            output_directory = root / "output"
+            output_directory.mkdir()
+            output = output_directory / f"{draft.name}.zip"
+
+            with patch.dict(os.environ, {"CODEX_AUTOCUT_PACKAGE_ZIP_PATH": str(output)}):
+                result = package_lite_delivery(draft, output)
+                self.assertEqual(
+                    result["archive_path"], os.environ["CODEX_AUTOCUT_PACKAGE_ZIP_PATH"]
+                )
+
+            self.assertEqual(result["archive_path"], str(output.resolve()))
+            self.assertTrue(output.is_file())
+            receipt = json.loads(Path(result["receipt_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(receipt["archive_path"], str(output))
+
+    def test_package_rejects_unbound_destination_before_creating_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            draft = self._draft(root)
+            bound = root / "output" / f"{draft.name}.zip"
+            other = root / "other" / f"{draft.name}.zip"
+            with patch.dict(os.environ, {"CODEX_AUTOCUT_PACKAGE_ZIP_PATH": str(bound)}):
+                with self.assertRaisesRegex(LitePackageError, "CODEX_AUTOCUT_PACKAGE_ZIP_PATH"):
+                    package_lite_delivery(draft, other)
+                with self.assertRaisesRegex(LitePackageError, "目录不可用"):
+                    package_lite_delivery(draft, bound)
+                bound.parent.mkdir()
+                with self.assertRaisesRegex(LitePackageError, "adjacent"):
+                    package_lite_delivery(draft, bound, receipt_json=root / "other.json")
+            self.assertFalse(other.parent.exists())
+            self.assertFalse(bound.exists())
+
+    def test_revision_run_rejects_mismatched_injected_zip_before_editing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.dict(os.environ, {"CODEX_AUTOCUT_PACKAGE_ZIP_PATH": str(root / "bound.zip")}),
+                patch.object(jy_wrapper, "execute_revision_request") as execute,
+            ):
+                with self.assertRaisesRegex(Exception, "CODEX_AUTOCUT_PACKAGE_ZIP_PATH"):
+                    jy_wrapper.cmd_revision_run("request.json", package_zip=str(root / "other.zip"))
+            execute.assert_not_called()
+
+    def test_injected_zip_requires_absolute_file_and_never_falls_back_from_empty_value(
+        self,
+    ) -> None:
+        for injected in ("", "output/target.zip", "output"):
+            with self.subTest(injected=injected):
+                with patch.dict(os.environ, {"CODEX_AUTOCUT_PACKAGE_ZIP_PATH": injected}):
+                    with self.assertRaises(LitePackageError):
+                        validate_taskboard_zip_path(Path.cwd() / "target.zip")
+
     def test_package_rejects_external_material_reference(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -171,9 +227,7 @@ class LitePackageTests(unittest.TestCase):
             (draft / "draft_content.json").write_text(
                 json.dumps(
                     {
-                        "materials": {
-                            "videos": [{"id": "external", "path": str(external)}]
-                        },
+                        "materials": {"videos": [{"id": "external", "path": str(external)}]},
                         "tracks": [],
                     }
                 ),

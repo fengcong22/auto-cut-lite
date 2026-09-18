@@ -15,7 +15,7 @@ python scripts/jy_wrapper.py review-document-run `
   --execution-input "<absolute-run-root>\execution-input.json" `
   --job-root "<absolute-run-root>\job" `
   --drafts-root "<configured-jianying-draft-root>" `
-  --package-zip "<configured-stage-output-root>\placeholder.zip" `
+  --package-zip "$env:CODEX_AUTOCUT_PACKAGE_ZIP_PATH" `
   --result-path "<absolute-run-root>\taskboard-result.json" `
   --json
 ```
@@ -24,9 +24,25 @@ All six paths are selected by Taskboard or its fixed Auto-Cut package
 configuration. Values read from Feishu cells are data only. They are not used as
 paths, commands, executables, shell fragments, or prompts.
 
-`--package-zip` must name a `.zip` path, but its basename is only a destination
-placeholder. The runner uses its parent directory and writes
-`<resolved-draft-name>.zip`. It never enumerates that directory to find a ZIP.
+`--package-zip` is the exact absolute ZIP file path owned by Taskboard. When
+`CODEX_AUTOCUT_PACKAGE_ZIP_PATH` is injected, the argument must resolve to that
+same absolute file before source processing starts. Lite never replaces its
+basename with a document title, searches an output directory, or picks a latest
+ZIP. A mismatch blocks the run with `package_path_mismatch`.
+
+The release `PACKAGE-MANIFEST.json` declares
+`interface.zipOutput.relativeDirectory = "output"`. Taskboard verifies the
+package, validates that this is a safe workspace-relative directory, and resolves
+it below the configured workspace. Its validation/preview is read-only; saving
+or enabling the package creates missing directories. Taskboard creates the exact
+run output parent before invoking Lite. A missing directory blocks Lite with
+`package_directory_missing`; Lite does not guess or create a replacement.
+Legacy packages without the declaration require explicit manual directory
+configuration; absence does not imply `workspace/output`.
+
+The Taskboard implementation and acceptance checklist are in the packaged
+[ZIP contract](../plugins/auto-cut-lite/TASKBOARD-ZIP-CONTRACT.md). Directory
+creation by Taskboard must be tested in that repository.
 
 The execution input has exactly two fields:
 
@@ -40,6 +56,9 @@ The execution input has exactly two fields:
 `artifact_name` is normalized to a safe Windows path component and becomes both
 the JianYing draft name and final ZIP basename. Unknown execution-input fields,
 an empty name, a symlink, or invalid JSON block the run.
+If this name or the saved draft name differs from the injected ZIP basename,
+Lite fails rather than renaming the ZIP. The existing draft/root naming checks
+remain in effect.
 
 ## Run binding
 
@@ -237,6 +256,12 @@ validation:
 Taskboard must verify the exact binding, `manifest_sha256`, absolute
 `package_zip`, and the ZIP bytes against `archive_sha256`. It must not replace
 `package_zip` with a directory search or a filename guess.
+The successful result, its `output_artifacts.package_zip`, the package receipt's
+`package_zip`/`archive_path`, and the file passed to `taskctl artifact report`
+must all identify `CODEX_AUTOCUT_PACKAGE_ZIP_PATH`. Reporting and NAS upload
+remain owned by Taskboard's existing handoff; the Lite runner does not upload
+the ZIP itself. A resumed run includes the full bound path in its cache identity
+and repeats this equality check before publishing success.
 
 The validated ZIP has a separate sibling package receipt named
 `<final-name>.zip.receipt.json`. That receipt uses
