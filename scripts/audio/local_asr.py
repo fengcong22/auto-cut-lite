@@ -14,6 +14,14 @@ if str(PROJECT_ROOT) not in sys.path:
 from audio_sound.local_asr import transcribe_local  # noqa: E402
 
 
+def _configure_utf8_output() -> None:
+    """Keep JSON diagnostics printable on Windows locales such as GBK."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audio", required=True, help="absolute or relative mono PCM16 16 kHz WAV")
@@ -34,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_output()
     args = build_parser().parse_args(argv)
     parameters = {"device": args.device, "device_index": args.device_index,
                   "chunk_seconds": args.chunk_seconds}

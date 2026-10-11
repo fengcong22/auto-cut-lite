@@ -121,6 +121,17 @@ def test_offline_guard_records_and_rejects_network(event) -> None:
     guard.audit("socket.gethostname", ())
 
 
+def test_offline_guard_allows_only_ephemeral_loopback_bind() -> None:
+    guard = worker.OfflineGuard()
+    guard.audit("socket.bind", (object(), ("::1", 0)))
+    guard.audit("socket.bind", (object(), ("127.0.0.1", 0)))
+    assert len(guard.allowed_local_binds) == 2
+    with pytest.raises(PermissionError):
+        guard.audit("socket.bind", (object(), ("0.0.0.0", 0)))
+    with pytest.raises(PermissionError):
+        guard.audit("socket.bind", (object(), ("::1", 12345)))
+
+
 def test_ct2_only_blocks_torch_conversion_without_importing_it(monkeypatch) -> None:
     monkeypatch.delitem(sys.modules, "torch", raising=False)
     monkeypatch.delenv("KMP_DUPLICATE_LIB_OK", raising=False)

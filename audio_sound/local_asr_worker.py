@@ -99,8 +99,27 @@ class OfflineGuard:
 
     def __init__(self) -> None:
         self.attempts: list[dict[str, Any]] = []
+        self.allowed_local_binds: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _is_ephemeral_loopback_bind(arguments: tuple[Any, ...]) -> bool:
+        """Allow libraries to reserve a local-only ephemeral port.
+
+        Some CPU inference runtimes create a loopback listener for internal
+        coordination.  Binding ``::1``/``127.0.0.1`` to port zero does not
+        contact an external host, so it remains compatible with the worker's
+        offline contract.  Any other bind is still blocked and recorded.
+        """
+        if len(arguments) < 2 or not isinstance(arguments[1], tuple) or len(arguments[1]) < 2:
+            return False
+        host, port = arguments[1][0], arguments[1][1]
+        return host in {"::1", "127.0.0.1", "localhost"} and port == 0
 
     def audit(self, event: str, arguments: tuple[Any, ...]) -> None:
+        if event == "socket.bind" and self._is_ephemeral_loopback_bind(arguments):
+            self.allowed_local_binds.append({"event": event, "arguments": repr(arguments),
+                                             "blocked": False, "reason": "ephemeral_loopback"})
+            return
         if event in {"socket.connect", "socket.bind", "socket.sendto", "socket.sendmsg",
                      "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr",
                      "socket.getnameinfo"}:
@@ -367,7 +386,9 @@ def execute_request(request: Any, guard: OfflineGuard) -> dict[str, Any]:
         "input": json_safe(request.get("input")) if isinstance(request, dict) and isinstance(request.get("input"), dict) and set(request["input"]) == {"sha256", "pcm_sha256", "frame_count", "sample_rate"} else None,
         "model": json_safe(request.get("model")) if isinstance(request, dict) and isinstance(request.get("model"), dict) and set(request["model"]) == {"files"} else None,
         "text": "", "native_units": [], "native_segments": [], "timestamp_kind": "unavailable",
-        "runtime": runtime_identity(), "network": {"guard": "python_socket_audit_not_host_firewall", "blocked_attempts": guard.attempts},
+        "runtime": runtime_identity(), "network": {"guard": "python_socket_audit_not_host_firewall",
+                                                     "blocked_attempts": guard.attempts,
+                                                     "allowed_local_binds": guard.allowed_local_binds},
         "production_eligible": False, "acoustic_accepted": False, "neighbor_protection_verified": False,
         "source_media_modified": False, "production_integrated": False, "limitations": [],
         "identity_checks": {"before": False, "after": False},
