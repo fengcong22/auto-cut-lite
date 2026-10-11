@@ -6,7 +6,7 @@ from copy import deepcopy
 
 import pytest
 
-from audio_sound.local_asr_candidates import locate_candidates
+from audio_sound.local_asr_candidates import build_manual_boundary_proposal, locate_candidates
 
 
 def _transcript() -> dict:
@@ -33,6 +33,20 @@ def _transcript() -> dict:
 
 def _codes(candidate: dict) -> set[str]:
     return {issue["code"] for issue in candidate["issues"]}
+
+
+def _verified_transcript() -> dict:
+    transcript = _transcript()
+    for component in transcript["identity"].values():
+        component["verified"] = True
+    transcript.update(
+        production_eligible=False,
+        acoustic_accepted=False,
+        neighbor_protection_verified=False,
+        source_media_modified=False,
+        production_integrated=False,
+    )
+    return transcript
 
 
 def _no_execution(report: dict) -> None:
@@ -264,3 +278,78 @@ def test_wrong_text_control_remains_unsupported_despite_any_other_timings() -> N
 def test_empty_or_invalid_queries_are_rejected(query) -> None:
     with pytest.raises(ValueError):
         locate_candidates(_transcript(), query)
+
+
+def test_unique_candidate_can_be_bound_to_exact_context_for_manual_review() -> None:
+    transcript = _verified_transcript()
+    original = deepcopy(transcript)
+    proposal = build_manual_boundary_proposal(
+        transcript,
+        "Childhood",
+        item_id="E2",
+        context={
+            "url": "clips/E2.wav",
+            "file_sha256": "e" * 64,
+            "pcm16_sha256": "f" * 64,
+            "source_audio_sha256": "a" * 64,
+            "source_start_frame": 6000,
+            "source_end_frame": 24000,
+            "sample_rate": 16000,
+        },
+        manifest_sha256="b" * 64,
+        manifest_schema_version="manual-boundary-contexts-v1",
+    )
+    assert transcript == original
+    assert proposal["schema_version"] == "manual-boundary-proposals-v1"
+    assert proposal["manifest_sha256"] == "b" * 64
+    assert all(proposal[key] is False for key in (
+        "production_eligible", "acoustic_accepted", "neighbor_protection_verified",
+        "source_media_modified", "production_integrated",
+    ))
+    item = proposal["items"][0]
+    assert item["id"] == "E2"
+    assert item["status"] == "candidate_boundary_for_manual_review"
+    assert item["source_start_frame"] == 8000
+    assert item["source_end_frame"] == 17600
+    assert item["relative_start_frame"] == 2000
+    assert item["relative_end_frame"] == 11600
+    assert item["candidate_identity"]["native_indices"] == [1, 2]
+    assert item["candidate_identity"]["acoustic_accepted"] is False
+    assert item["candidate_report"]["executable_cuts"] == []
+    assert all(item[key] is False for key in (
+        "production_eligible", "acoustic_accepted", "neighbor_protection_verified",
+        "source_media_modified", "production_integrated",
+    ))
+
+
+def test_manual_boundary_proposal_rejects_ambiguous_candidate() -> None:
+    transcript = _verified_transcript()
+    transcript.update(text="Childhood Childhood", native_units=[], timestamp_kind="unavailable")
+    with pytest.raises(ValueError, match="one unique text candidate"):
+        build_manual_boundary_proposal(
+            transcript,
+            "Childhood",
+            item_id="E2",
+            context={
+                "source_audio_sha256": "a" * 64,
+                "source_start_frame": 0,
+                "source_end_frame": 32000,
+                "sample_rate": 16000,
+            },
+        )
+
+
+def test_manual_boundary_proposal_rejects_source_or_identity_mismatch() -> None:
+    transcript = _verified_transcript()
+    context = {
+        "source_audio_sha256": "c" * 64,
+        "source_start_frame": 0,
+        "source_end_frame": 32000,
+        "sample_rate": 16000,
+    }
+    with pytest.raises(ValueError, match="does not match transcript input"):
+        build_manual_boundary_proposal(transcript, "Childhood", item_id="E2", context=context)
+    transcript["identity"]["adapter"]["verified"] = False
+    context["source_audio_sha256"] = "a" * 64
+    with pytest.raises(ValueError, match="adapter is not verified"):
+        build_manual_boundary_proposal(transcript, "Childhood", item_id="E2", context=context)
