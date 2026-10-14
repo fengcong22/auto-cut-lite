@@ -2,12 +2,14 @@
 
 import array
 import hashlib
+import io
 import math
 import shutil
 import subprocess
 import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,3 +191,61 @@ def test_native_probe_receipt_is_json_safe(tmp_path, media_tools):
         == hashlib.sha256(source.read_bytes()).hexdigest()
     )
     assert report["end_seconds"] == 3
+
+
+def _mock_decoded_frame_timestamps(monkeypatch, *, frame_count, adjustment):
+    class ProbeProcess:
+        def __init__(self, lines):
+            self.stdout = io.StringIO(lines)
+
+        def wait(self):
+            return 0
+
+        def poll(self):
+            return 0
+
+    rows = "".join(
+        f"frame|pts={index * 1024 + adjustment(index)}|nb_samples=1024|sample_rate=44100\n"
+        for index in range(frame_count)
+    )
+    monkeypatch.setattr(coverage.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=0, stderr="", stdout='{"streams":[{"sample_rate":"44100","time_base":"1/44100"}]}'
+    ))
+    monkeypatch.setattr(coverage.subprocess, "Popen", lambda *args, **kwargs: ProbeProcess(rows))
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+def test_small_smooth_aac_clock_drift_preserves_full_audio_coverage(tmp_path, monkeypatch, direction):
+    _mock_decoded_frame_timestamps(
+        monkeypatch, frame_count=19703, adjustment=lambda index: direction * ((index + 250) // 500)
+    )
+    report = coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
+    assert report["timestamps_contiguous"] is True
+    assert report["source_native_frames"] == 19703 * 1024
+    assert report["max_timestamp_error_native_samples"] == 39
+    assert coverage.POLICY_VERSION == "authoritative_audio_pcm_coverage_v2"
+
+
+@pytest.mark.parametrize("jump", [2, -2, 10, -10])
+def test_abrupt_audio_timestamp_gap_or_overlap_is_rejected(tmp_path, monkeypatch, jump):
+    _mock_decoded_frame_timestamps(
+        monkeypatch, frame_count=100, adjustment=lambda index: jump if index >= 10 else 0
+    )
+    with pytest.raises(coverage.AudioCoverageError, match="gap, overlap, or drift"):
+        coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
+
+
+def test_smooth_clock_drift_over_one_millisecond_is_rejected(tmp_path, monkeypatch):
+    _mock_decoded_frame_timestamps(
+        monkeypatch, frame_count=30000, adjustment=lambda index: index // 500
+    )
+    with pytest.raises(coverage.AudioCoverageError, match="gap, overlap, or drift"):
+        coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
+
+
+def test_clock_drift_faster_than_two_point_five_ppm_is_rejected(tmp_path, monkeypatch):
+    _mock_decoded_frame_timestamps(
+        monkeypatch, frame_count=10000, adjustment=lambda index: index // 300
+    )
+    with pytest.raises(coverage.AudioCoverageError, match="gap, overlap, or drift"):
+        coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
