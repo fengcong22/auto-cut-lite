@@ -16,9 +16,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, BinaryIO
 
-POLICY_VERSION = "authoritative_audio_pcm_coverage_v2"
+POLICY_VERSION = "authoritative_audio_pcm_coverage_v3"
 ALIGNMENT_SAMPLE_RATE = 16000
 NATIVE_TAIL_TOLERANCE_SECONDS = 0.05
+# Keep capture-clock error within the maintained working-audio sync budget.
+_TIMESTAMP_DRIFT_CAP = Fraction(1, 25)
 _CHUNK_BYTES = 1024 * 1024
 
 
@@ -145,9 +147,10 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
                 error = abs(pts - (first_pts + Fraction(count, sample_rate)))
                 max_error = max(max_error, error)
                 # One-sample frame-to-frame steps can accumulate in recorded AAC
-                # clocks. Bound both each step and the total drift (2.5 ppm, 1 ms).
+                # clocks. Bound each step and the rate (2.5 ppm), with a 40 ms
+                # sync ceiling rather than a fixed 1 ms cutoff on long captures.
                 drift_limit = min(
-                    Fraction(1, 1000),
+                    _TIMESTAMP_DRIFT_CAP,
                     native_sample + Fraction(count, sample_rate) * Fraction(25, 10_000_000),
                 )
                 if (previous_end is not None and abs(pts - previous_end) > native_sample) or error > drift_limit:
@@ -183,7 +186,7 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
         "timestamps_contiguous": True,
         "timestamp_tolerance_native_samples": 1,
         "timestamp_drift_limit_ppm": 2.5,
-        "timestamp_drift_cap_seconds": 0.001,
+        "timestamp_drift_cap_seconds": float(_TIMESTAMP_DRIFT_CAP),
         "max_timestamp_error_native_samples": float(max_error * sample_rate),
         "native_expected_16k_frames": round(duration * ALIGNMENT_SAMPLE_RATE),
     }

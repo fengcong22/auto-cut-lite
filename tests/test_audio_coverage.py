@@ -193,7 +193,9 @@ def test_native_probe_receipt_is_json_safe(tmp_path, media_tools):
     assert report["end_seconds"] == 3
 
 
-def _mock_decoded_frame_timestamps(monkeypatch, *, frame_count, adjustment):
+def _mock_decoded_frame_timestamps(
+    monkeypatch, *, frame_count, adjustment, frame_samples=1024
+):
     class ProbeProcess:
         def __init__(self, lines):
             self.stdout = io.StringIO(lines)
@@ -205,7 +207,7 @@ def _mock_decoded_frame_timestamps(monkeypatch, *, frame_count, adjustment):
             return 0
 
     rows = "".join(
-        f"frame|pts={index * 1024 + adjustment(index)}|nb_samples=1024|sample_rate=44100\n"
+        f"frame|pts={index * frame_samples + adjustment(index)}|nb_samples={frame_samples}|sample_rate=44100\n"
         for index in range(frame_count)
     )
     monkeypatch.setattr(coverage.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
@@ -223,7 +225,24 @@ def test_small_smooth_aac_clock_drift_preserves_full_audio_coverage(tmp_path, mo
     assert report["timestamps_contiguous"] is True
     assert report["source_native_frames"] == 19703 * 1024
     assert report["max_timestamp_error_native_samples"] == 39
-    assert coverage.POLICY_VERSION == "authoritative_audio_pcm_coverage_v2"
+
+
+@pytest.mark.parametrize("direction", [1, -1])
+def test_572_second_capture_with_49_sample_clock_drift_has_complete_coverage(
+    tmp_path, monkeypatch, direction
+):
+    # Production capture: 24,646 AAC frames, one native-sample tick every 500 frames.
+    # PCM is complete; 49 ticks at 44.1 kHz exceed the old fixed 1 ms cap.
+    _mock_decoded_frame_timestamps(
+        monkeypatch,
+        frame_count=24646,
+        adjustment=lambda index: direction * ((index + 250) // 500),
+    )
+    report = coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
+    assert report["timestamps_contiguous"] is True
+    assert report["source_native_frames"] == 25237504
+    assert report["native_expected_16k_frames"] == 9156464
+    assert report["max_timestamp_error_native_samples"] == 49
 
 
 @pytest.mark.parametrize("jump", [2, -2, 10, -10])
@@ -235,9 +254,13 @@ def test_abrupt_audio_timestamp_gap_or_overlap_is_rejected(tmp_path, monkeypatch
         coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
 
 
-def test_smooth_clock_drift_over_one_millisecond_is_rejected(tmp_path, monkeypatch):
+@pytest.mark.parametrize("direction", [1, -1])
+def test_smooth_clock_drift_over_sync_budget_is_rejected(tmp_path, monkeypatch, direction):
     _mock_decoded_frame_timestamps(
-        monkeypatch, frame_count=30000, adjustment=lambda index: index // 500
+        monkeypatch,
+        frame_count=20000,
+        frame_samples=44100,
+        adjustment=lambda index: direction * (index // 10),
     )
     with pytest.raises(coverage.AudioCoverageError, match="gap, overlap, or drift"):
         coverage._source_frames(tmp_path / "source.mp4", "ffprobe")
