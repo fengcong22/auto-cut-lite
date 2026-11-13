@@ -16,9 +16,11 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, BinaryIO
 
-POLICY_VERSION = "authoritative_audio_pcm_coverage_v1"
+POLICY_VERSION = "authoritative_audio_pcm_coverage_v3"
 ALIGNMENT_SAMPLE_RATE = 16000
 NATIVE_TAIL_TOLERANCE_SECONDS = 0.05
+# Keep capture-clock error within the maintained working-audio sync budget.
+_TIMESTAMP_DRIFT_CAP = Fraction(1, 25)
 _CHUNK_BYTES = 1024 * 1024
 
 
@@ -65,8 +67,8 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
     """Inspect decoded frames, after codec priming/skip metadata is applied.
 
     Compare each integer PTS to the cumulative native sample position with exact
-    rational arithmetic. At most one native sample is allowed for timestamp
-    quantization; this allowance never applies to lost decoded PCM samples.
+    rational arithmetic. Allow only bounded, gradual capture-clock drift; the
+    decoded PCM still has to match the authoritative source exactly.
     """
     try:
         result = subprocess.run(
@@ -115,8 +117,9 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
     ]
     count = frame_count = 0
     first_pts: Fraction | None = None
+    previous_end: Fraction | None = None
     max_error = Fraction(0)
-    tolerance = Fraction(1, sample_rate)
+    native_sample = Fraction(1, sample_rate)
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=errors, text=True)
         try:
@@ -137,16 +140,24 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
                     raise AudioCoverageError("Decoded audio has invalid or changing sample rate")
                 if first_pts is None:
                     first_pts = pts
-                    if abs(first_pts) > tolerance:
+                    if abs(first_pts) > native_sample:
                         raise AudioCoverageError(
                             "Authoritative audio has nonzero start; preserve its timestamp offset"
                         )
                 error = abs(pts - (first_pts + Fraction(count, sample_rate)))
                 max_error = max(max_error, error)
-                if error > tolerance:
+                # One-sample frame-to-frame steps can accumulate in recorded AAC
+                # clocks. Bound each step and the rate (2.5 ppm), with a 40 ms
+                # sync ceiling rather than a fixed 1 ms cutoff on long captures.
+                drift_limit = min(
+                    _TIMESTAMP_DRIFT_CAP,
+                    native_sample + Fraction(count, sample_rate) * Fraction(25, 10_000_000),
+                )
+                if (previous_end is not None and abs(pts - previous_end) > native_sample) or error > drift_limit:
                     raise AudioCoverageError(
                         "Authoritative audio timestamps contain a gap, overlap, or drift"
                     )
+                previous_end = pts + Fraction(samples, sample_rate)
                 count += samples
                 frame_count += 1
             returncode = process.wait()
@@ -174,6 +185,8 @@ def _source_frames(path: Path, ffprobe_bin: str) -> dict[str, Any]:
         "source_end_rational": str(first_pts + duration),
         "timestamps_contiguous": True,
         "timestamp_tolerance_native_samples": 1,
+        "timestamp_drift_limit_ppm": 2.5,
+        "timestamp_drift_cap_seconds": float(_TIMESTAMP_DRIFT_CAP),
         "max_timestamp_error_native_samples": float(max_error * sample_rate),
         "native_expected_16k_frames": round(duration * ALIGNMENT_SAMPLE_RATE),
     }
