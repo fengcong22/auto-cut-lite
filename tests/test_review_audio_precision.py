@@ -79,6 +79,107 @@ def _character_words(text, start=0.0, step=0.1):
 
 
 class ReviewAudioPrecisionTests(unittest.TestCase):
+    def test_diagnostic_and_manual_evidence_cannot_authorize_source_cuts(self):
+        item = {
+            "id": "candidate-only",
+            "kind": "spoken_delete",
+            "source_text": "00:01 删除“测试”",
+            "start": 1.0,
+            "end": 1.4,
+            "execution_required": True,
+            "evidence": {"delete": "测试"},
+        }
+        words = [{"text": "测试", "start": 1.0, "end": 1.4}]
+        declarations = [
+            {"schema_version": "local-asr-transcript-v1"},
+            {"schema_version": "local-asr-candidates-v1"},
+            {"schema_version": "manual-boundary-proposals-v1"},
+            {"schema_version": "local-asr-refined-boundary-feedback-receipt-v1"},
+            {"schema_version": "local-asr-human-review-receipt-v1"},
+            {"schema_version": "diagnostic-asr-v1"},
+            {"evidence_kind": "manual_boundary_proposal"},
+            {"evidence_kind": "human_candidate_boundary_feedback"},
+            {"evidence_kind": "human_boundary_reference_only"},
+            {"backend": "faster-whisper"},
+            {"provider": "funasr"},
+        ]
+        for declaration in declarations:
+            with self.subTest(declaration=declaration):
+                # Added word rows and asserted acceptance cannot upgrade a
+                # candidate or manual receipt into authoritative ASR evidence.
+                payload = {
+                    **_source_asr(words),
+                    **declaration,
+                    "production_eligible": True,
+                    "authoritative_timing": True,
+                    "authoritative_cut_boundary": True,
+                    "acoustic_accepted": True,
+                    "neighbor_protection_verified": True,
+                }
+                with self.assertRaisesRegex(ValueError, "cannot authorize source ASR cuts"):
+                    resolve_lite_audio_items([item], payload, source_duration_seconds=3.0)
+
+        with self.assertRaisesRegex(ValueError, "cannot authorize source ASR cuts"):
+            resolve_lite_audio_items(
+                [item],
+                {"schema_version": "local-asr-transcript-v1", "native_units": words},
+                source_duration_seconds=3.0,
+            )
+
+    def test_explicit_source_authority_restrictions_cannot_produce_cuts(self):
+        item = {
+            "id": "restricted",
+            "kind": "spoken_delete",
+            "source_text": "00:01 删除“测试”",
+            "start": 1.0,
+            "end": 1.4,
+            "execution_required": True,
+            "evidence": {"delete": "测试"},
+        }
+        source_asr = _source_asr([{"text": "测试", "start": 1.0, "end": 1.4}])
+        for field in (
+            "production_eligible",
+            "authoritative_timing",
+            "authoritative_cut_boundary",
+            "acoustic_accepted",
+            "neighbor_protection_verified",
+        ):
+            for value in (False, None, 0, "false"):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(ValueError, f"withholds cut authority: {field}"):
+                        resolve_lite_audio_items(
+                            [item], {**source_asr, field: value}, source_duration_seconds=3.0
+                        )
+
+    def test_legacy_source_asr_and_explicit_positive_flags_remain_compatible(self):
+        item = {
+            "id": "verified-source",
+            "kind": "spoken_delete",
+            "source_text": "00:01 删除“测试”",
+            "start": 1.0,
+            "end": 1.4,
+            "execution_required": True,
+            "evidence": {"delete": "测试"},
+        }
+        source_asr = _source_asr([{"text": "测试", "start": 1.0, "end": 1.4}])
+        legacy = resolve_lite_audio_items([item], source_asr, source_duration_seconds=3.0)
+        explicit = resolve_lite_audio_items(
+            [item],
+            {
+                **source_asr,
+                "production_eligible": True,
+                "authoritative_timing": True,
+                "authoritative_cut_boundary": True,
+                "acoustic_accepted": True,
+                "neighbor_protection_verified": True,
+                "source_media_modified": False,
+                "production_integrated": False,
+            },
+            source_duration_seconds=3.0,
+        )
+        self.assertEqual(legacy, explicit)
+        self.assertEqual(len(legacy["executable_cuts"]), 1)
+
     def test_source_asr_exact_phrase_resolves_authoritative_cut(self):
         source_text = "00:01 删除“口头赘词”，保留上下文。"
         result = resolve_lite_audio_items(

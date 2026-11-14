@@ -8,3 +8,22 @@ torch==2.3.1
 torchaudio==2.3.1
 deepfilternet==0.5.6
 pytest==8.4.2
+
+# Local ASR evaluation (isolated .venv-audio only; models supplied locally).
+# CTranslate2 4.4 uses CUDA 12/cuDNN 8, matching the Torch 2.3 runtime.
+faster-whisper==1.1.1
+ctranslate2==4.4.0
+funasr==1.2.6
+# Keep FunASR's UMAP dependency compatible with the audio NumPy/SciPy pins.
+umap-learn==0.5.7
+scikit-learn==1.5.2
+# Pin the model-loading APIs and binary dependencies used by this evaluation.
+huggingface-hub==0.36.0
+tokenizers==0.21.4
+onnxruntime==1.20.1
+av==17.1.0
+modelscope==1.25.0
+numba==0.60.0
+jieba==0.42.1
+llvmlite==0.43.0
+pynndescent==0.5.13

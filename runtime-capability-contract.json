@@ -257,7 +257,10 @@
         {"module": "librosa", "distribution": "librosa", "environment": "audio", "disposition": "direct"},
         {"module": "soundfile", "distribution": "soundfile", "environment": "audio", "disposition": "direct"},
         {"module": "scipy", "distribution": "scipy", "environment": "audio", "disposition": "direct"},
-        {"module": "intervaltree", "distribution": "intervaltree", "environment": "audio", "disposition": "direct"}
+        {"module": "intervaltree", "distribution": "intervaltree", "environment": "audio", "disposition": "direct"},
+        {"module": "faster_whisper", "distribution": "faster-whisper", "environment": "audio", "disposition": "direct"},
+        {"module": "ctranslate2", "distribution": "ctranslate2", "environment": "audio", "disposition": "direct"},
+        {"module": "funasr", "distribution": "funasr", "environment": "audio", "disposition": "direct"}
       ],
       "external_service_hosts": [],
       "dynamic_service_policy": "none",

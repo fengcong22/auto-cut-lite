@@ -1270,6 +1270,37 @@ def _asr_identity(source_asr: Mapping[str, Any]) -> dict[str, str]:
     }
 
 
+def _reject_diagnostic_source_asr(source_asr: Mapping[str, Any]) -> None:
+    """Keep candidate evidence out of the authoritative cut-planning path.
+
+    Legacy provider payloads do not declare authority flags, so absence remains
+    compatible. An explicit restriction must never be erased merely by copying
+    native units into ``words``. Passing this guard does not verify a provider
+    or replace the runner's source and adapter identity checks.
+    """
+    schema = str(source_asr.get("schema_version") or "").strip().casefold()
+    evidence_kind = str(source_asr.get("evidence_kind") or "").strip().casefold()
+    provider = str(source_asr.get("provider") or "").strip().casefold()
+    backend = str(source_asr.get("backend") or "").strip().casefold()
+    if (
+        schema.startswith(("local-asr-", "manual-boundary-", "diagnostic-"))
+        or "candidate" in evidence_kind
+        or evidence_kind.startswith(("manual_boundary", "human_refined_boundary", "human_boundary", "diagnostic"))
+        or provider in {"local_asr", "local-asr", "faster-whisper", "funasr"}
+        or backend in {"faster-whisper", "funasr"}
+    ):
+        raise ValueError("Diagnostic or manual-boundary evidence cannot authorize source ASR cuts")
+    for field in (
+        "production_eligible",
+        "authoritative_timing",
+        "authoritative_cut_boundary",
+        "acoustic_accepted",
+        "neighbor_protection_verified",
+    ):
+        if field in source_asr and source_asr[field] is not True:
+            raise ValueError(f"Source ASR explicitly withholds cut authority: {field}")
+
+
 def _alignment_receipt(
     source_asr: Mapping[str, Any],
     *,
@@ -1320,6 +1351,7 @@ def resolve_lite_audio_items(
 ) -> dict[str, Any]:
     """Resolve executable speech cuts and fail closed to ASR-positioned labels."""
 
+    _reject_diagnostic_source_asr(source_asr)
     raw_words = source_asr.get("words")
     if not isinstance(raw_words, list) or not raw_words:
         raise ValueError("Source ASR must contain word-level timing rows")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import re
 import subprocess
 import sys
 from contextlib import redirect_stdout
@@ -127,7 +128,7 @@ def test_audio_build_helpers_are_pinned_and_match_the_runtime_lock() -> None:
 
 def test_heavy_audio_runtime_is_locked_and_ignored() -> None:
     lock_lines = _active_lock_requirements(PROJECT_ROOT / "requirements-audio.lock")
-    assert lock_lines == {
+    assert {
         "numpy==1.23.5",
         "librosa==0.10.0",
         "soundfile==0.12.1",
@@ -137,11 +138,23 @@ def test_heavy_audio_runtime_is_locked_and_ignored() -> None:
         "torchaudio==2.3.1",
         "deepfilternet==0.5.6",
         "pytest==8.4.2",
-    }
+    }.issubset(lock_lines)
+    assert all(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*==[0-9][A-Za-z0-9.!+_-]*", line)
+        for line in lock_lines
+    ), "Audio runtime requirements must use fixed versions without ranges or wildcards"
 
-    main_requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
-    for package in ("torch", "torchaudio", "deepfilternet", "librosa", "intervaltree"):
-        assert package not in main_requirements.lower()
+    main_package_names = {
+        re.split(r"[<=>!~;\[]", line, maxsplit=1)[0].lower().replace("_", "-")
+        for line in _active_lock_requirements(PROJECT_ROOT / "requirements.txt")
+    }
+    audio_package_names = {
+        line.split("==", 1)[0].lower().replace("_", "-") for line in lock_lines
+    }
+    # NumPy and AV already serve the main video runtime; all other audio/ASR
+    # dependencies belong only to the isolated audio environment.
+    assert (audio_package_names - {"numpy", "av"}).isdisjoint(main_package_names)
+    assert "numpy==1.23.5" not in _active_lock_requirements(PROJECT_ROOT / "requirements.txt")
 
     ignore_lines = set((PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines())
     assert {
