@@ -40,9 +40,9 @@ run output parent before invoking Lite. A missing directory blocks Lite with
 Legacy packages without the declaration require explicit manual directory
 configuration; absence does not imply `workspace/output`.
 
-The Taskboard implementation and acceptance checklist are in the packaged
-[ZIP contract](../plugins/auto-cut-lite/TASKBOARD-ZIP-CONTRACT.md). Directory
-creation by Taskboard must be tested in that repository.
+The Taskboard implementation and acceptance checklist are in the ZIP contract
+`TASKBOARD-ZIP-CONTRACT.md` shipped at the root of the Auto-Cut Lite plugin
+package. Directory creation by Taskboard must be tested in that repository.
 
 The execution input has exactly two fields:
 

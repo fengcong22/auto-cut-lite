@@ -11,6 +11,16 @@ from pathlib import Path
 import pytest
 
 
+_FFMPEG_ASSET_ROOT = Path(__file__).resolve().parents[1] / "scripts" / "release" / "ffmpeg_assets"
+_requires_committed_ffmpeg_assets = pytest.mark.skipif(
+    not _FFMPEG_ASSET_ROOT.is_dir(),
+    reason=(
+        "Committed FFmpeg release assets are absent from this checkout; the offline "
+        "builder still fails closed when it cannot read their pinned bytes"
+    ),
+)
+
+
 def _offline_bundle_module():
     try:
         return importlib.import_module("scripts.release.offline_bundle")
@@ -1004,6 +1014,7 @@ def test_ffmpeg_source_uses_immutable_committed_asset_identity() -> None:
     assert source["external_codec_libraries"] is False
 
 
+@_requires_committed_ffmpeg_assets
 def test_ffmpeg_build_receipt_has_complete_toolchain_hashes() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     receipt = json.loads(
@@ -1026,6 +1037,7 @@ def test_ffmpeg_build_receipt_has_complete_toolchain_hashes() -> None:
     )
 
 
+@_requires_committed_ffmpeg_assets
 def test_ffmpeg_asset_manifest_self_hash_and_file_rows_are_complete() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     path = repo_root / "scripts" / "release" / "ffmpeg_assets" / "manifest.json"
