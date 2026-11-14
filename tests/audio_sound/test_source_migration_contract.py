@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -109,6 +110,21 @@ def _tree_fingerprint(items: list[dict[str, object]]) -> str:
 
 def _repository_mode(package_root: Path) -> str:
     return "git" if (package_root / ".git").exists() else "archive"
+
+
+def _is_standalone_lite_checkout(package_root: Path) -> bool:
+    helper_path = package_root / "scripts" / "assert_lite_workspace.py"
+    if not helper_path.is_file():
+        return False
+    spec = importlib.util.spec_from_file_location(
+        "_assert_lite_workspace_for_migration_tests",
+        helper_path,
+    )
+    if spec is None or spec.loader is None:
+        return False
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return bool(module._has_lite_repository_identity(package_root))
 
 
 def _reachable_git_objects() -> set[str]:
@@ -322,6 +338,13 @@ def test_normalized_content_destinations_match_recorded_hash() -> None:
 @pytest.mark.skipif(
     _repository_mode(REPO_ROOT) == "archive",
     reason="Git history provenance requires package-local .git metadata",
+)
+@pytest.mark.skipif(
+    _is_standalone_lite_checkout(REPO_ROOT),
+    reason=(
+        "Standalone auto-cut-lite history begins at the imported v1.7.0 baseline; "
+        "upstream-only migration source blobs remain provable in the Auto-Cut repository"
+    ),
 )
 def test_every_normalized_source_blob_is_reachable_in_git_history() -> None:
     reachable = _reachable_git_objects()
