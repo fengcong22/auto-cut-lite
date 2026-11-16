@@ -51,6 +51,7 @@ from utils.review_audio_precision import (
     extract_alignment_wav,
     ffmpeg_identity,
     render_source_aligned_candidate,
+    WavEnergyProbe,
     resolve_lite_audio_items,
     reverse_asr_cache_identity,
     run_resumable_volc_asr,
@@ -195,6 +196,15 @@ def _ai_review_identity() -> dict[str, Any]:
     from audio_sound.volc_asr import default_volc_env_path
 
     return identity_from_environment(load_env_file(default_volc_env_path()))
+
+
+def _alignment_energy_probe(path: Path) -> WavEnergyProbe | None:
+    """Energy probe over the alignment WAV, or None when it cannot be read."""
+
+    try:
+        return WavEnergyProbe(path)
+    except (OSError, EOFError, ValueError, wave.Error):
+        return None
 
 
 def _ai_review_resolver(cache_path: Path):
@@ -4210,6 +4220,9 @@ def run_review_document(
                     source_duration_seconds=float(materials["source_duration_seconds"]),
                     ai_resolver=(
                         None if mock_media else _ai_review_resolver(paths["ai_review_cache"])
+                    ),
+                    acoustic_probe=(
+                        None if mock_media else _alignment_energy_probe(paths["alignment_wav"])
                     ),
                 )
             elif source_index.get("asr_required"):
