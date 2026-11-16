@@ -525,3 +525,29 @@ class RelayCompatibilityTests(unittest.TestCase):
         )
         self.assertEqual(identity["endpoint_host"], "relay.example.com")
         self.assertNotIn("token", json.dumps(identity))
+
+
+class IgnoredSchemaTests(unittest.TestCase):
+    def test_relay_ignoring_schema_falls_through_and_remembers_variant(self):
+        good = {
+            "action": "delete_speech",
+            "word_start_index": 6,
+            "word_end_index": 7,
+            "confidence": "high",
+            "rationale": "x",
+        }
+        wrong = _response({"action": "delete", "start_index": 6, "end_index": 7})
+        beta = FakeMessages([wrong])
+        plain = FakeMessages([wrong, _response(good), _response(good)])
+        client = SimpleNamespace(beta=SimpleNamespace(messages=beta), messages=plain)
+        resolver = ai.make_resolver(client)
+        words = _chars("我们今天学习对吧这个内容", 10.0)
+        first = resolver({"id": "a", "source_text": "00:11 删除“对吧”"}, words, (0, 30))
+        second = resolver({"id": "b", "source_text": "00:12 删除“这个”"}, words, (0, 30))
+        self.assertEqual(first["request_variant"], "plain_json")
+        self.assertEqual(first["word_start_index"], 6)
+        self.assertEqual(second["request_variant"], "plain_json")
+        # first: beta(wrong) + structured(wrong) + plain(good); second: plain only
+        self.assertEqual(len(beta.requests), 1)
+        self.assertEqual(len(plain.requests), 3)
+        self.assertNotIn("output_config", plain.requests[2])

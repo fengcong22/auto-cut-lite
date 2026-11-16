@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-AI_INTERPRETER_VERSION = "lite-ai-review-interpreter-v2-relay-compatible"
+AI_INTERPRETER_VERSION = "lite-ai-review-interpreter-v3-schema-checked"
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "medium"
 CONTEXT_BEFORE_SECONDS = 20.0
@@ -64,7 +64,9 @@ def _truthy(value: str | None) -> bool:
     return str(value or "").strip().casefold() in {"1", "true", "yes", "on", "claude"}
 
 
-def context_window(rough_start: float | None, rough_end: float | None) -> tuple[float, float] | None:
+def context_window(
+    rough_start: float | None, rough_end: float | None
+) -> tuple[float, float] | None:
     if rough_start is None:
         return None
     end = rough_end if rough_end is not None else rough_start
@@ -122,7 +124,9 @@ class ProposalCache:
             if isinstance(loaded, dict) and loaded.get("version") == AI_INTERPRETER_VERSION:
                 entries = loaded.get("entries")
                 if isinstance(entries, dict):
-                    self.entries = {str(k): dict(v) for k, v in entries.items() if isinstance(v, dict)}
+                    self.entries = {
+                        str(k): dict(v) for k, v in entries.items() if isinstance(v, dict)
+                    }
 
     def get(self, key: str) -> dict[str, Any] | None:
         value = self.entries.get(key)
@@ -160,14 +164,18 @@ def _request_variants(model: str, prompt: str) -> list[tuple[str, dict[str, Any]
     drops one of them so a relay that speaks the basic Messages API still works.
     """
 
+    # The field list is always in the prompt: some relays accept but ignore
+    # ``output_config.format``, and every reply is schema-checked anyway.
     base = {
         "model": model,
         "max_tokens": 16000,
         "system": SYSTEM_PROMPT,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": prompt + _JSON_INSTRUCTION}],
     }
-    structured = {"effort": DEFAULT_EFFORT, "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}
-    plain_messages = [{"role": "user", "content": prompt + _JSON_INSTRUCTION}]
+    structured = {
+        "effort": DEFAULT_EFFORT,
+        "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
+    }
     return [
         (
             "beta_fallback_structured",
@@ -179,7 +187,7 @@ def _request_variants(model: str, prompt: str) -> list[tuple[str, dict[str, Any]
             },
         ),
         ("structured", {**base, "output_config": structured}),
-        ("plain_json", {**base, "messages": plain_messages}),
+        ("plain_json", base),
     ]
 
 
@@ -202,9 +210,35 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def _call_claude(client: Any, model: str, prompt: str) -> dict[str, Any]:
+def _schema_valid(data: Mapping[str, Any]) -> bool:
+    if set(data) - set(OUTPUT_SCHEMA["properties"]) or not set(OUTPUT_SCHEMA["required"]) <= set(
+        data
+    ):
+        return False
+    if data.get("action") not in {"delete_speech", "not_applicable"}:
+        return False
+    if data.get("confidence") not in {"high", "medium", "low"}:
+        return False
+    for key in ("word_start_index", "word_end_index"):
+        if not isinstance(data.get(key), int) or isinstance(data.get(key), bool):
+            return False
+    return isinstance(data.get("rationale"), str)
+
+
+def _call_claude(
+    client: Any, model: str, prompt: str, *, first_variant: int = 0
+) -> tuple[dict[str, Any], int]:
+    """Ask once per variant until a schema-valid answer arrives.
+
+    Returns the proposal and the index of the variant that produced it, so the
+    caller can start there next time instead of re-paying for ignored options.
+    """
+
+    variants = _request_variants(model, prompt)
     last_error: Exception | None = None
-    for variant, request in _request_variants(model, prompt):
+    last_status = "invalid_json"
+    for index in range(first_variant, len(variants)):
+        variant, request = variants[index]
         try:
             if "betas" in request:
                 response = client.beta.messages.create(**request)
@@ -215,26 +249,35 @@ def _call_claude(client: Any, model: str, prompt: str) -> dict[str, Any]:
                 last_error = exc
                 continue
             raise
-        break
-    else:
-        raise last_error if last_error is not None else RuntimeError("no request variant")
-    if response.stop_reason == "refusal":
-        return {"action": "not_applicable", "status": "refused", "request_variant": variant}
-    if response.stop_reason == "max_tokens":
-        return {"action": "not_applicable", "status": "truncated", "request_variant": variant}
-    text = "".join(
-        str(getattr(block, "text", "") or "")
-        for block in response.content
-        if getattr(block, "type", "") == "text"
-    )
-    data = _extract_json_object(text)
-    if data is None:
-        return {"action": "not_applicable", "status": "invalid_json", "request_variant": variant}
-    data["status"] = "answered"
-    data["request_variant"] = variant
-    data["model"] = str(getattr(response, "model", model) or model)
-    data["request_id"] = str(getattr(response, "_request_id", "") or "")
-    return data
+        if response.stop_reason == "refusal":
+            return {
+                "action": "not_applicable",
+                "status": "refused",
+                "request_variant": variant,
+            }, index
+        if response.stop_reason == "max_tokens":
+            return {
+                "action": "not_applicable",
+                "status": "truncated",
+                "request_variant": variant,
+            }, index
+        text = "".join(
+            str(getattr(block, "text", "") or "")
+            for block in response.content
+            if getattr(block, "type", "") == "text"
+        )
+        data = _extract_json_object(text)
+        if data is None or not _schema_valid(data):
+            last_status = "invalid_json" if data is None else "schema_mismatch"
+            continue
+        data["status"] = "answered"
+        data["request_variant"] = variant
+        data["model"] = str(getattr(response, "model", model) or model)
+        data["request_id"] = str(getattr(response, "_request_id", "") or "")
+        return data, index
+    if last_error is not None and last_status == "invalid_json":
+        raise last_error
+    return {"action": "not_applicable", "status": last_status}, first_variant
 
 
 def make_resolver(
@@ -246,6 +289,7 @@ def make_resolver(
     """Return a resolver that asks Claude once per unique request."""
 
     cache = cache or ProposalCache(None)
+    state = {"first_variant": 0}
 
     def resolve(
         item: Mapping[str, Any],
@@ -259,7 +303,11 @@ def make_resolver(
             cached["cache_hit"] = True
             return cached
         try:
-            proposal = _call_claude(client, model, prompt)
+            proposal, used_variant = _call_claude(
+                client, model, prompt, first_variant=state["first_variant"]
+            )
+            if proposal.get("status") == "answered":
+                state["first_variant"] = used_variant
         except Exception as exc:  # noqa: BLE001 - any API failure keeps the item label-only
             return {
                 "action": "not_applicable",
