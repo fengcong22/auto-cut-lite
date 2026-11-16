@@ -89,6 +89,7 @@
         {"module": "psutil", "distribution": "psutil", "environment": "main", "disposition": "direct"},
         {"module": "requests", "distribution": "requests", "environment": "main", "disposition": "direct"},
         {"module": "websockets", "distribution": "websockets", "environment": "main", "disposition": "direct"},
+        {"module": "anthropic", "distribution": "anthropic", "environment": "main", "disposition": "direct"},
         {"module": "comtypes", "distribution": "uiautomation", "environment": "main", "disposition": "transitive_optional"}
       ],
       "external_service_hosts": [],

@@ -364,6 +364,7 @@ MAIN_DEPENDENCY_IMPORTS = {
     "psutil": "psutil",
     "requests": "requests",
     "websockets": "websockets",
+    "anthropic": "anthropic",
 }
 _SECRET_KEY_PARTS = (
     "access_token",

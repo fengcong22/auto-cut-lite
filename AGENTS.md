@@ -161,6 +161,15 @@ When returning a revision result, report:
   insertions; one internal 1:1 character substitution is allowed for phrases of at least 8
   normalized characters when it is the only difference; an ellipsis tail outside the rough
   window may be searched 30 seconds further when exactly one tail follows the head.
+- Optional Claude-assisted locating (`scripts/utils/ai_review_interpreter.py`) is off unless
+  `AUTO_CUT_AI_REVIEW=1` is set and the `anthropic` package and credentials exist, because
+  review and ASR text are sent to the provider. It runs only for an already-executable spoken
+  deletion that deterministic matching left unresolved, never for pauses, visuals, or new
+  categories. The model returns ASR word indexes only, never times; `_verify_ai_proposal`
+  re-checks continuity, review-time proximity, and text agreement (ellipsis anchors, or the
+  review range for time-range-only comments) before a cut is written, trims unnamed edge
+  fillers, and records the proposal in `asr_match.ai_proposal`. Rejected proposals stay
+  label-only. Proposals are cached by request digest in the job's `evidence/` directory.
 - Executable cut windows extend only into adjacent silence (at most 45% of the gap to the
   neighbouring ASR word, capped at 0.20 s before and 0.25 s after) and keep the raw ASR edges as
   auditable `anchor_gap` boundary-refinement evidence.

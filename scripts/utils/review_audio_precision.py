@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from utils.revision_models import (
     lite_pause_change_is_label_only,
@@ -1466,13 +1466,158 @@ def _alignment_receipt(
     return receipt
 
 
+_AI_MIN_SINGLE_PHRASE_SIMILARITY = 0.75
+_AI_MIN_ANCHOR_SIMILARITY = 0.7
+_AI_TAIL_EXTENSION_SECONDS = 30.0
+_AI_RANGE_TOLERANCE_SECONDS = 1.0
+_AI_CONTEXT_BEFORE_SECONDS = 20.0
+_AI_CONTEXT_AFTER_SECONDS = 40.0
+
+
+def _ai_context_window(
+    rough_start: float | None, rough_end: float | None
+) -> tuple[float, float] | None:
+    if rough_start is None:
+        return None
+    end = rough_end if rough_end is not None else rough_start
+    return (
+        max(0.0, float(rough_start) - _AI_CONTEXT_BEFORE_SECONDS),
+        float(end) + _AI_CONTEXT_AFTER_SECONDS,
+    )
+
+
+_INSTRUCTION_ONLY_PHRASES = frozenset({"删除", "删掉", "去掉", "剪掉", "删", "去除"})
+
+
+def _effective_review_phrase(delete_phrase: str) -> str:
+    """Normalized spoken target; an instruction word alone names no speech."""
+
+    normalized = _normalized_text(delete_phrase)
+    return "" if normalized in _INSTRUCTION_ONLY_PHRASES else normalized
+
+
+def _is_filler_word(word: Mapping[str, Any]) -> bool:
+    text = _normalized_text(word.get("text"))
+    return bool(text) and all(char in _OPTIONAL_SPEECH_FILLERS for char in text)
+
+
+def _verify_ai_proposal(
+    words: Sequence[Mapping[str, Any]],
+    proposal: Mapping[str, Any],
+    *,
+    item: Mapping[str, Any],
+    delete_phrase: str,
+    rough_start: float | None,
+    rough_end: float | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Deterministically accept or reject a model-proposed ASR word span."""
+
+    if str(proposal.get("action") or "") != "delete_speech":
+        return None, "proposal_not_applicable"
+    if str(proposal.get("confidence") or "") not in {"high", "medium"}:
+        return None, "proposal_low_confidence"
+    try:
+        start_index = int(proposal["word_start_index"])
+        end_index = int(proposal["word_end_index"])
+    except (KeyError, TypeError, ValueError):
+        return None, "proposal_invalid_indexes"
+    if not 0 <= start_index <= end_index < len(words):
+        return None, "proposal_invalid_indexes"
+    review_phrase = _effective_review_phrase(delete_phrase)
+    # A filler at either edge is kept only when the review text names it.
+    while (
+        start_index < end_index
+        and _is_filler_word(words[start_index])
+        and not review_phrase.startswith(_normalized_text(words[start_index].get("text")))
+    ):
+        start_index += 1
+    while (
+        end_index > start_index
+        and _is_filler_word(words[end_index])
+        and not review_phrase.endswith(_normalized_text(words[end_index].get("text")))
+    ):
+        end_index -= 1
+    if start_index == end_index and _is_filler_word(words[start_index]) and not review_phrase:
+        return None, "proposal_filler_only"
+    if not _is_contiguous_word_span(words, start_index, end_index):
+        return None, "proposal_not_contiguous"
+    if rough_start is None:
+        return None, "proposal_without_review_time"
+    span_start = float(words[start_index]["start"])
+    span_end = float(words[end_index]["end"])
+    anchor_end = float(rough_end if rough_end is not None else rough_start)
+    span_text = "".join(
+        _normalized_text(word.get("text")) for word in words[start_index : end_index + 1]
+    )
+    evidence: dict[str, Any] = {}
+    if review_phrase:
+        if span_start < float(rough_start) - _ASR_SEARCH_PADDING_SECONDS - 1e-6:
+            return None, "proposal_outside_review_window"
+        if span_end > anchor_end + _AI_TAIL_EXTENSION_SECONDS + 1e-6:
+            return None, "proposal_outside_review_window"
+        parts = [
+            _normalized_text(part) for part in _ELLIPSIS.split(delete_phrase) if part.strip()
+        ]
+        parts = [part for part in parts if part]
+        if len(parts) >= 2:
+            head, tail = parts[0], parts[-1]
+            if len(span_text) < len(head) + len(tail):
+                return None, "proposal_text_mismatch"
+            head_similarity = SequenceMatcher(
+                a=head, b=span_text[: len(head)], autojunk=False
+            ).ratio()
+            tail_similarity = SequenceMatcher(
+                a=tail, b=span_text[-len(tail) :], autojunk=False
+            ).ratio()
+            similarity = min(head_similarity, tail_similarity)
+            if similarity < _AI_MIN_ANCHOR_SIMILARITY:
+                return None, "proposal_text_mismatch"
+        else:
+            similarity = SequenceMatcher(a=review_phrase, b=span_text, autojunk=False).ratio()
+            length_ratio = len(span_text) / max(1, len(review_phrase))
+            if similarity < _AI_MIN_SINGLE_PHRASE_SIMILARITY or not 0.6 <= length_ratio <= 1.6:
+                return None, "proposal_text_mismatch"
+        evidence["text_similarity"] = round(similarity, 6)
+        evidence["keyword_coverage"] = round(similarity, 6)
+    else:
+        range_start, range_end = _review_text_window(item.get("source_text"))
+        if range_start is None or range_end is None:
+            return None, "proposal_without_review_text_or_range"
+        if (
+            span_start < range_start - _AI_RANGE_TOLERANCE_SECONDS - 1e-6
+            or span_end > range_end + _AI_RANGE_TOLERANCE_SECONDS + 1e-6
+        ):
+            return None, "proposal_outside_review_range"
+        evidence["text_similarity"] = 1.0
+        evidence["keyword_coverage"] = 1.0
+        evidence["review_range"] = [range_start, range_end]
+    evidence["ai_verified_span_text"] = span_text
+    payload = _match_payload(
+        words,
+        delete_phrase if review_phrase else span_text,
+        start_index,
+        end_index,
+        anchor_start=rough_start,
+        anchor_end=rough_end,
+        match_method="ai_proposed_asr_verified",
+        match_evidence=evidence,
+    )
+    return payload, "ai_proposed_asr_verified"
+
+
 def resolve_lite_audio_items(
     review_items: Sequence[Mapping[str, Any]],
     source_asr: Mapping[str, Any],
     *,
     source_duration_seconds: float,
+    ai_resolver: Callable[..., Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Resolve executable speech cuts and fail closed to ASR-positioned labels."""
+    """Resolve executable speech cuts and fail closed to ASR-positioned labels.
+
+    ``ai_resolver`` optionally proposes ASR word indexes for spoken deletions
+    that deterministic matching left unresolved.  Every proposal is re-verified
+    by ``_verify_ai_proposal``; the model never supplies a time.
+    """
 
     _reject_diagnostic_source_asr(source_asr)
     raw_words = source_asr.get("words")
@@ -1688,6 +1833,52 @@ def resolve_lite_audio_items(
                     )
                     selected, match_method = _unique_nearest_match(matches, anchor)
 
+        ai_receipt: dict[str, Any] | None = None
+        if (
+            ai_resolver is not None
+            and selected is None
+            and not selected_matches
+            and executable_kind
+            and requested_execute
+            and not unresolved_timebase
+            and not colored_span_mode
+            and not pause_label_only
+        ):
+            window = _ai_context_window(rough_start, rough_end)
+            if window is not None:
+                proposal = dict(ai_resolver(item, words, window) or {})
+                ai_selected, ai_reason = _verify_ai_proposal(
+                    words,
+                    proposal,
+                    item=item,
+                    delete_phrase=delete_phrase,
+                    rough_start=rough_start,
+                    rough_end=rough_end,
+                )
+                ai_receipt = {
+                    "status": "accepted" if ai_selected is not None else "rejected",
+                    "reason": ai_reason,
+                    "model": str(proposal.get("model") or ""),
+                    "confidence": str(proposal.get("confidence") or ""),
+                    "rationale": str(proposal.get("rationale") or ""),
+                    "proposal_status": str(proposal.get("status") or ""),
+                    "cache_hit": bool(proposal.get("cache_hit")),
+                    "proposed_word_indexes": [
+                        proposal.get("word_start_index"),
+                        proposal.get("word_end_index"),
+                    ],
+                }
+                if ai_selected is not None:
+                    selected = ai_selected
+                    match_method = "ai_proposed_asr_verified"
+                    if not _effective_review_phrase(delete_phrase):
+                        # Time-range-only comments name no words; the verified
+                        # ASR span is the internal delete target.
+                        delete_phrase = str(ai_selected.get("text") or "")
+                        delete_phrases = [delete_phrase]
+                else:
+                    match_method = match_method or f"ai_{ai_reason}"
+
         explicit_evidence = (
             dict(item.get("evidence") or {}) if isinstance(item.get("evidence"), Mapping) else {}
         )
@@ -1807,6 +1998,8 @@ def resolve_lite_audio_items(
                         6,
                     ),
                 }
+                if ai_receipt is not None:
+                    match_evidence["ai_proposal"] = ai_receipt
                 if colored_span_mode:
                     match_evidence.update(
                         {
@@ -1909,6 +2102,7 @@ def resolve_lite_audio_items(
                 "matches": label_matches,
                 "timing_source": timing_source,
                 "asr_alignment": alignment,
+                **({"ai_proposal": ai_receipt} if ai_receipt is not None else {}),
             }
         )
 
