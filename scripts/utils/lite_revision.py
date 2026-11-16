@@ -724,6 +724,49 @@ def _positive_timing_windows(value: Any) -> Optional[List[Tuple[float, float]]]:
     return windows
 
 
+# Mirrors review_audio_precision's silence-only cut padding caps.
+_ASR_WINDOW_TOLERANCE_SECONDS = 0.05
+_MAX_ANCHOR_GAP_START_PADDING_SECONDS = 0.20
+_MAX_ANCHOR_GAP_END_PADDING_SECONDS = 0.25
+
+
+def _authoritative_window_matches_asr(
+    resolved_start: float,
+    resolved_end: float,
+    asr_start: float,
+    asr_end: float,
+    refinement: Any,
+) -> bool:
+    """Accept the ASR window, or its recorded outward silence-gap padding."""
+
+    tolerance = _ASR_WINDOW_TOLERANCE_SECONDS
+    if (
+        abs(resolved_start - asr_start) <= tolerance
+        and abs(resolved_end - asr_end) <= tolerance
+    ):
+        return True
+    if not isinstance(refinement, dict):
+        return False
+    if str(refinement.get("status") or "").strip().casefold() != "anchor_gap":
+        return False
+    padding = refinement.get("padding_seconds")
+    if not isinstance(padding, (list, tuple)) or len(padding) != 2:
+        return False
+    try:
+        start_padding, end_padding = float(padding[0]), float(padding[1])
+    except (TypeError, ValueError):
+        return False
+    if not (
+        0.0 <= start_padding <= _MAX_ANCHOR_GAP_START_PADDING_SECONDS + 1e-6
+        and 0.0 <= end_padding <= _MAX_ANCHOR_GAP_END_PADDING_SECONDS + 1e-6
+    ):
+        return False
+    return (
+        abs(resolved_start + start_padding - asr_start) <= tolerance
+        and abs(resolved_end - end_padding - asr_end) <= tolerance
+    )
+
+
 def _timing_windows_match(
     left: Iterable[Tuple[float, float]],
     right: Iterable[Tuple[float, float]],
@@ -910,9 +953,12 @@ def _spoken_cut_alignment_problems(
                 problems.append("resolved_cut_window is invalid")
             elif abs(resolved_start - edit.start) > 0.01 or abs(resolved_end - edit.end) > 0.01:
                 problems.append("edit start/end do not match the ASR-resolved cut window")
-            elif comparison_starts and (
-                abs(resolved_start - min(comparison_starts)) > 0.05
-                or abs(resolved_end - max(comparison_ends)) > 0.05
+            elif comparison_starts and not _authoritative_window_matches_asr(
+                resolved_start,
+                resolved_end,
+                min(comparison_starts),
+                max(comparison_ends),
+                evidence.get("boundary_refinement"),
             ):
                 problems.append(
                     "resolved_cut_window does not match the first/last authoritative ASR match"

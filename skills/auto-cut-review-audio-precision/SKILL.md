@@ -83,6 +83,18 @@ If the review document explicitly says to delete blue or red text, inspect the d
   `对吧` may also be absent when it belongs to another utterance. Cut only the ASR-recognized
   remainder, record omitted review characters, and never skip intervening ASR words. An inter-word
   gap over 1.5 seconds breaks continuity; a provider utterance boundary alone does not.
+- Lite recall extensions (planner v10), each still requiring one unique winner:
+  - Interjection words made only of `啊呀哎诶唉呃嗯哈呢嘛` may be skipped while locating a phrase
+    (`filler_tolerant_phrase`); they can lie only strictly inside the cut, never at its edge.
+  - The connectors `这个`, `然后`, `那个` may appear strictly inside an ASR candidate.
+  - One internal 1:1 character substitution (ASR mis-recognition such as `鬲`→`鬳`) is allowed
+    for phrases of at least 8 normalized characters, only as the sole difference and never at
+    either edge (`time_anchored_character_substitution`, recorded in `asr_substitutions`).
+  - For an ellipsis range whose tail anchor is outside the rough review window, the tail is
+    searched up to 30 seconds further and must be the only candidate after the head.
+- Executable cut windows are widened into adjacent silence only: by at most 45% of the gap to the
+  neighbouring ASR word, capped at 0.20 s before and 0.25 s after. The raw ASR edges are kept in
+  `asr_word_cut_windows` and `boundary_refinement.asr_word_window` (status `anchor_gap`).
 
 ## Resumable ASR Evidence
 
