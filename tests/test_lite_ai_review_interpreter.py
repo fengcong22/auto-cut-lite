@@ -446,3 +446,82 @@ class DraftValidationTests(unittest.TestCase):
             [item["source_text"] for item in ledger["review_items"]],
             [item["source_text"] for item in items],
         )
+
+
+class _StatusError(Exception):
+    def __init__(self, status_code):
+        super().__init__(f"status {status_code}")
+        self.status_code = status_code
+
+
+class RelayCompatibilityTests(unittest.TestCase):
+    def _client(self, beta_responses, plain_responses):
+        beta = FakeMessages(beta_responses)
+        plain = FakeMessages(plain_responses)
+        return SimpleNamespace(beta=SimpleNamespace(messages=beta), messages=plain), beta, plain
+
+    def test_relay_400s_downgrade_to_plain_json(self):
+        payload = {
+            "action": "delete_speech",
+            "word_start_index": 3,
+            "word_end_index": 4,
+            "confidence": "high",
+            "rationale": "x",
+        }
+        wrapped = SimpleNamespace(
+            stop_reason="end_turn",
+            model="claude-opus-5-5",
+            content=[
+                SimpleNamespace(
+                    type="text",
+                    text="结果如下：\n" + json.dumps(payload, ensure_ascii=False) + "\n完毕",
+                )
+            ],
+        )
+        client, beta, plain = self._client([_StatusError(400)], [_StatusError(400), wrapped])
+        result = ai.make_resolver(client)({"id": "a", "source_text": "x"}, _chars("前对吧后", 1.0), (0, 9))
+        self.assertEqual(result["word_start_index"], 3)
+        self.assertEqual(result["request_variant"], "plain_json")
+        self.assertEqual(len(beta.requests), 1)
+        self.assertEqual(len(plain.requests), 2)
+        self.assertIn("output_config", plain.requests[0])
+        self.assertNotIn("output_config", plain.requests[1])
+        self.assertNotIn("betas", plain.requests[1])
+        self.assertIn("只输出一个 JSON 对象", plain.requests[1]["messages"][0]["content"])
+
+    def test_auth_and_server_errors_are_not_downgraded(self):
+        client, beta, plain = self._client([_StatusError(401)], [])
+        result = ai.make_resolver(client)({"id": "a", "source_text": "x"}, _chars("前对吧后", 1.0), (0, 9))
+        self.assertEqual(result["status"], "api_error")
+        self.assertEqual(plain.requests, [])
+
+    def test_base_url_and_bearer_token_reach_the_client(self):
+        import anthropic
+
+        captured = {}
+        original = anthropic.Anthropic
+
+        def fake_client(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(beta=None, messages=None)
+
+        anthropic.Anthropic = fake_client
+        try:
+            resolver = ai.resolver_from_environment(
+                {
+                    "AUTO_CUT_AI_REVIEW": "1",
+                    "ANTHROPIC_BASE_URL": " https://relay.example.com ",
+                    "ANTHROPIC_AUTH_TOKEN": "token-value",
+                    "AUTO_CUT_AI_REVIEW_MODEL": "claude-opus-4-8",
+                }
+            )
+        finally:
+            anthropic.Anthropic = original
+        self.assertIsNotNone(resolver)
+        self.assertEqual(captured["base_url"], "https://relay.example.com")
+        self.assertEqual(captured["auth_token"], "token-value")
+        identity = ai.identity_from_environment(
+            {"AUTO_CUT_AI_REVIEW": "1", "ANTHROPIC_BASE_URL": "https://relay.example.com/v1"}
+        )
+        self.assertEqual(identity["endpoint_host"], "relay.example.com")
+        self.assertNotIn("token", json.dumps(identity))

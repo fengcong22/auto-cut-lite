@@ -18,7 +18,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-AI_INTERPRETER_VERSION = "lite-ai-review-interpreter-v1"
+AI_INTERPRETER_VERSION = "lite-ai-review-interpreter-v2-relay-compatible"
 DEFAULT_MODEL = "claude-opus-5-5"
 DEFAULT_EFFORT = "medium"
 CONTEXT_BEFORE_SECONDS = 20.0
@@ -146,31 +146,92 @@ class ProposalCache:
         os.replace(temporary, self.path)
 
 
-def _call_claude(client: Any, model: str, prompt: str) -> dict[str, Any]:
-    response = client.beta.messages.create(
-        model=model,
-        max_tokens=16000,
-        betas=["server-side-fallback-2026-07-01"],
-        fallbacks="default",
-        system=SYSTEM_PROMPT,
-        output_config={
-            "effort": DEFAULT_EFFORT,
-            "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA},
-        },
-        messages=[{"role": "user", "content": prompt}],
-    )
-    if response.stop_reason == "refusal":
-        return {"action": "not_applicable", "status": "refused"}
-    if response.stop_reason == "max_tokens":
-        return {"action": "not_applicable", "status": "truncated"}
-    text = next((block.text for block in response.content if block.type == "text"), "")
+_JSON_INSTRUCTION = (
+    "\n\n只输出一个 JSON 对象，不要输出其他文字。字段：action（delete_speech 或 "
+    "not_applicable）、word_start_index（整数）、word_end_index（整数）、confidence（high、"
+    "medium 或 low）、rationale（字符串）。"
+)
+
+
+def _request_variants(model: str, prompt: str) -> list[tuple[str, dict[str, Any]]]:
+    """Requests from richest to most compatible.
+
+    API relays often reject newer parameters with a 400; each later variant
+    drops one of them so a relay that speaks the basic Messages API still works.
+    """
+
+    base = {
+        "model": model,
+        "max_tokens": 16000,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    structured = {"effort": DEFAULT_EFFORT, "format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}
+    plain_messages = [{"role": "user", "content": prompt + _JSON_INSTRUCTION}]
+    return [
+        (
+            "beta_fallback_structured",
+            {
+                **base,
+                "betas": ["server-side-fallback-2026-07-01"],
+                "fallbacks": "default",
+                "output_config": structured,
+            },
+        ),
+        ("structured", {**base, "output_config": structured}),
+        ("plain_json", {**base, "messages": plain_messages}),
+    ]
+
+
+def _is_unsupported_request(exc: Exception) -> bool:
+    return getattr(exc, "status_code", None) in {400, 404, 422}
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
     try:
-        data = json.loads(text)
+        value = json.loads(text)
     except ValueError:
-        return {"action": "not_applicable", "status": "invalid_json"}
-    if not isinstance(data, dict):
-        return {"action": "not_applicable", "status": "invalid_json"}
+        value = None
+        start = text.find("{")
+        end = text.rfind("}")
+        if 0 <= start < end:
+            try:
+                value = json.loads(text[start : end + 1])
+            except ValueError:
+                value = None
+    return value if isinstance(value, dict) else None
+
+
+def _call_claude(client: Any, model: str, prompt: str) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for variant, request in _request_variants(model, prompt):
+        try:
+            if "betas" in request:
+                response = client.beta.messages.create(**request)
+            else:
+                response = client.messages.create(**request)
+        except Exception as exc:  # noqa: BLE001 - downgrade only on request-shape errors
+            if _is_unsupported_request(exc):
+                last_error = exc
+                continue
+            raise
+        break
+    else:
+        raise last_error if last_error is not None else RuntimeError("no request variant")
+    if response.stop_reason == "refusal":
+        return {"action": "not_applicable", "status": "refused", "request_variant": variant}
+    if response.stop_reason == "max_tokens":
+        return {"action": "not_applicable", "status": "truncated", "request_variant": variant}
+    text = "".join(
+        str(getattr(block, "text", "") or "")
+        for block in response.content
+        if getattr(block, "type", "") == "text"
+    )
+    data = _extract_json_object(text)
+    if data is None:
+        return {"action": "not_applicable", "status": "invalid_json", "request_variant": variant}
     data["status"] = "answered"
+    data["request_variant"] = variant
     data["model"] = str(getattr(response, "model", model) or model)
     data["request_id"] = str(getattr(response, "_request_id", "") or "")
     return data
@@ -227,16 +288,28 @@ def resolver_from_environment(
     """
 
     values = dict(env_values or {})
-    merged = {**values, **{k: v for k, v in os.environ.items() if k.startswith(("AUTO_CUT_", "ANTHROPIC_"))}}
+    # The Auto-Cut config file wins over the process environment, so a job
+    # never silently picks up another tool's provider settings.
+    merged = {
+        **{k: v for k, v in os.environ.items() if k.startswith(("AUTO_CUT_", "ANTHROPIC_"))},
+        **values,
+    }
     if not any(_truthy(merged.get(key)) for key in _ENABLE_KEYS):
         return None
     try:
         import anthropic  # noqa: PLC0415 - optional dependency
     except ImportError:
         return None
-    api_key = merged.get("ANTHROPIC_API_KEY") or None
+    options: dict[str, Any] = {}
+    if merged.get("ANTHROPIC_API_KEY"):
+        options["api_key"] = merged["ANTHROPIC_API_KEY"]
+    if merged.get("ANTHROPIC_AUTH_TOKEN"):
+        # Some relays expect ``Authorization: Bearer`` instead of ``x-api-key``.
+        options["auth_token"] = merged["ANTHROPIC_AUTH_TOKEN"]
+    if merged.get("ANTHROPIC_BASE_URL"):
+        options["base_url"] = merged["ANTHROPIC_BASE_URL"].strip()
     try:
-        client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
+        client = anthropic.Anthropic(**options)
     except Exception:  # noqa: BLE001 - missing credentials disable the feature
         return None
     model = str(merged.get(_MODEL_KEY) or DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -247,11 +320,18 @@ def identity_from_environment(env_values: Mapping[str, str] | None = None) -> di
     """Secret-free identity of the AI configuration, for phase cache keys."""
 
     values = dict(env_values or {})
-    merged = {**values, **{k: v for k, v in os.environ.items() if k.startswith("AUTO_CUT_")}}
+    merged = {**{k: v for k, v in os.environ.items() if k.startswith("AUTO_CUT_")}, **values}
     enabled = any(_truthy(merged.get(key)) for key in _ENABLE_KEYS)
     model = str(merged.get(_MODEL_KEY) or DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    from urllib.parse import urlparse  # noqa: PLC0415
+
+    base_url = str(
+        values.get("ANTHROPIC_BASE_URL") or os.environ.get("ANTHROPIC_BASE_URL") or ""
+    ).strip()
+    endpoint = urlparse(base_url).netloc if base_url else "api.anthropic.com"
     return {
         "enabled": enabled,
         "model": model if enabled else "",
+        "endpoint_host": endpoint if enabled else "",
         "interpreter_version": AI_INTERPRETER_VERSION if enabled else "",
     }
