@@ -78,6 +78,16 @@ def _character_words(text, start=0.0, step=0.1):
     ]
 
 
+
+def _asr_start(row):
+    """Authoritative ASR word start, before silence-gap cut padding."""
+    return row["asr_word_cut_windows"][0][0]
+
+
+def _asr_end(row):
+    """Authoritative ASR word end, before silence-gap cut padding."""
+    return row["asr_word_cut_windows"][-1][1]
+
 class ReviewAudioPrecisionTests(unittest.TestCase):
     def test_diagnostic_and_manual_evidence_cannot_authorize_source_cuts(self):
         item = {
@@ -207,7 +217,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
 
         row = result["rows"][0]
         self.assertTrue(row["execution_required"])
-        self.assertEqual((row["start"], row["end"]), (1.0, 1.5))
+        self.assertEqual((_asr_start(row), _asr_end(row)), (1.0, 1.5))
         self.assertEqual(row["source_text"], source_text)
         self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
         self.assertEqual(
@@ -550,7 +560,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 "delete": "第二场战争应该说第一场战争只是牛刀小试",
                 "transcript": "第二场战争啊应该说第一场战争只是牛刀小试",
                 "start": 10.5,
-                "method": "conservative_fuzzy_phrase",
+                "method": "filler_tolerant_phrase",
             },
             {
                 "name": "asr_omits_internal_filler",
@@ -568,7 +578,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 "delete": "我们看到的这个近代的这个意大利统一的过程的完成就是在这个时候",
                 "transcript": "我们看到的啊这个近代的这个意大利统一的过程的完成就是在这个时候",
                 "start": 30.4,
-                "method": "conservative_fuzzy_phrase",
+                "method": "filler_tolerant_phrase",
             },
             {
                 "name": "pronoun_equivalence_in_ellipsis_anchor",
@@ -630,8 +640,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
                 row = result["rows"][0]
                 self.assertTrue(row["execution_required"])
                 self.assertEqual(row["match_method"], case["method"])
-                self.assertEqual(row["start"], words[0]["start"])
-                self.assertEqual(row["end"], words[-1]["end"])
+                self.assertEqual(_asr_start(row), words[0]["start"])
+                self.assertEqual(_asr_end(row), words[-1]["end"])
                 self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
                 if case.get("omitted_review_text"):
                     self.assertEqual(
@@ -666,8 +676,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(row["resolved_delete"], "解决不了")
         self.assertEqual(row["asr_match"]["omitted_review_text"], "它")
         self.assertEqual(row["asr_match"]["keyword_coverage"], 0.8)
-        self.assertEqual(row["start"], words[0]["start"])
-        self.assertEqual(row["end"], words[-1]["end"])
+        self.assertEqual(_asr_start(row), words[0]["start"])
+        self.assertEqual(_asr_end(row), words[-1]["end"])
         self.assertTrue(row["asr_alignment"]["authoritative_cut_boundary"])
 
     def test_source_asr_allows_whitelisted_internal_insertion_near_review_time(self):
@@ -690,7 +700,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertTrue(row["execution_required"])
         self.assertEqual(row["match_method"], "time_anchored_internal_insertion")
         self.assertEqual(row["asr_match"]["extra_asr_text"], "这个")
-        self.assertEqual((row["start"], row["end"]), (words[0]["start"], words[-1]["end"]))
+        self.assertEqual((_asr_start(row), _asr_end(row)), (words[0]["start"], words[-1]["end"]))
 
     def test_ellipsis_terminal_omission_competes_with_earlier_exact_anchor(self):
         words = [
@@ -715,7 +725,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         row = result["rows"][0]
         self.assertTrue(row["execution_required"])
         self.assertEqual(row["match_method"], "ellipsis_anchor_range")
-        self.assertEqual(row["end"], words[-1]["end"])
+        self.assertEqual(_asr_end(row), words[-1]["end"])
         self.assertEqual(row["asr_match"]["omitted_review_text"], "吴")
 
     def test_source_asr_uses_nearest_word_span_without_joining_repeat(self):
@@ -753,12 +763,12 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         self.assertEqual(row["match_method"], "time_anchored_fuzzy_phrase_nearest_anchor")
         self.assertEqual(row["resolved_delete"], "哎就有这么个地方叫德意志")
         self.assertEqual(row["asr_match"]["omitted_review_text"], "是一对吧")
-        self.assertEqual(row["start"], first[0]["start"])
-        self.assertEqual(row["end"], first[-1]["end"])
+        self.assertEqual(_asr_start(row), first[0]["start"])
+        self.assertEqual(_asr_end(row), first[-1]["end"])
         tail_row = rows["separate-tail"]
         self.assertTrue(tail_row["execution_required"])
-        self.assertEqual(tail_row["start"], tail[0]["start"])
-        self.assertEqual(tail_row["end"], tail[-1]["end"])
+        self.assertEqual(_asr_start(tail_row), tail[0]["start"])
+        self.assertEqual(_asr_end(tail_row), tail[-1]["end"])
 
     def test_source_asr_rejects_short_multi_omission_and_content_replacement(self):
         cases = [
@@ -808,8 +818,8 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
 
         row = result["rows"][0]
         self.assertTrue(row["execution_required"])
-        self.assertEqual(row["start"], 688.55)
-        self.assertEqual(row["end"], 690.15)
+        self.assertEqual(_asr_start(row), 688.55)
+        self.assertEqual(_asr_end(row), 690.15)
 
     def test_source_asr_does_not_join_words_across_separate_utterances(self):
         words = _character_words("甲乙", 10.0) + _character_words("丙丁戊", 12.0)
@@ -922,7 +932,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             source_duration_seconds=3.0,
         )
         self.assertEqual(
-            cut_plan["rows"][0]["source_cut_windows"],
+            cut_plan["rows"][0]["asr_word_cut_windows"],
             [[1.0, 1.2], [1.3, 1.4]],
         )
 
@@ -966,13 +976,23 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
             _validate_lite_audio_timing_sources(loaded_request, loaded_ledger)
 
         edits = updated_request["edits"]
+        # Each window is widened only into adjacent silence (never into the
+        # protected inter-span word); the raw ASR edges stay auditable.
+        self.assertEqual(
+            [edit["evidence"]["boundary_refinement"]["asr_word_window"] for edit in edits],
+            [[1.0, 1.2], [1.3, 1.4]],
+        )
+        self.assertEqual(
+            [edit["evidence"]["boundary_refinement"]["status"] for edit in edits],
+            ["anchor_gap", "anchor_gap"],
+        )
         self.assertEqual(
             [(edit["start"], edit["end"]) for edit in edits],
-            [(1.0, 1.2), (1.3, 1.4)],
+            [(0.91, 1.2), (1.3, 1.445)],
         )
         self.assertEqual(
             [edit["evidence"]["resolved_cut_window"] for edit in edits],
-            [[1.0, 1.2], [1.3, 1.4]],
+            [[0.91, 1.2], [1.3, 1.445]],
         )
         self.assertEqual(
             [
@@ -984,7 +1004,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         for edit in edits:
             self.assertEqual(
                 edit["evidence"]["resolved_cut_windows"],
-                [[1.0, 1.2], [1.3, 1.4]],
+                [[0.91, 1.2], [1.3, 1.445]],
             )
             self.assertEqual(
                 edit["evidence"]["boundary_refinement"]["resolved_cut_window"],
@@ -1015,7 +1035,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
 
         row = result["rows"][0]
         self.assertTrue(row["execution_required"])
-        self.assertEqual(row["source_cut_windows"], [[339.6, 343.39]])
+        self.assertEqual(row["asr_word_cut_windows"], [[339.6, 343.39]])
         self.assertEqual(row["match_method"], "ellipsis_anchor_range")
 
     def test_colored_span_0833_protects_uncolored_inter_span_word(self):
@@ -1057,10 +1077,10 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         row = cut_plan["rows"][0]
         self.assertEqual(
             cut_plan["planner_version"],
-            "lite-asr-cut-planner-v9-quoted-range-precedence",
+            "lite-asr-cut-planner-v10-gap-padded-recall",
         )
         self.assertEqual(
-            row["source_cut_windows"],
+            row["asr_word_cut_windows"],
             [[513.44, 513.64], [513.76, 514.0]],
         )
         self.assertEqual(row["must_keep"], ["北朝", "就", "进入"])

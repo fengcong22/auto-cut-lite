@@ -38,7 +38,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v9-quoted-range-precedence"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v10-gap-padded-recall"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
@@ -123,7 +123,24 @@ _ASR_EQUIVALENT_CHARACTERS = {
     "九": "9",
 }
 _OPTIONAL_SPEECH_FILLERS = frozenset("啊呀哎诶唉呃嗯哈呢嘛")
-_SAFE_TIME_ANCHORED_INTERNAL_INSERTIONS = frozenset({"这个"})
+# Spoken discourse connectors that review authors routinely omit when they
+# transcribe a long sentence.  They are accepted only strictly inside a fuzzy
+# candidate, so they can never move the outer cut boundary.
+_SAFE_TIME_ANCHORED_INTERNAL_INSERTIONS = frozenset({"这个", "然后", "那个"})
+# One internal 1:1 character substitution (an ASR mis-recognition such as a
+# rare character) is tolerated only for phrases at least this long.
+_MIN_SUBSTITUTION_TARGET_CHARACTERS = 8
+# A point review timestamp yields a narrow +/-3 s window.  An ellipsis tail
+# anchor may lie beyond it; the tail is then searched up to this far past the
+# rough window and must be unique there.
+_ELLIPSIS_TAIL_EXTENSION_SECONDS = 30.0
+# Character-level ASR starts are late and ends are early relative to audible
+# onset and release.  Executable cut windows are widened into the adjacent
+# silence by at most this fraction of the gap and these caps, so they never
+# reach a neighbouring ASR word.
+_CUT_BOUNDARY_GAP_FRACTION = 0.45
+_CUT_START_PADDING_SECONDS = 0.20
+_CUT_END_PADDING_SECONDS = 0.25
 _AUTOMATIC_MUST_KEEP_ORIGIN = "automatic_adjacent_asr_context"
 _EXPLICIT_MUST_KEEP_ORIGIN = "explicit"
 _OPTIONAL_REVIEW_TAILS = frozenset({"对吧"})
@@ -591,6 +608,7 @@ def _normalized_exact_phrase_matches(
     *,
     anchor_start: float | None,
     anchor_end: float | None,
+    skip_filler_words: bool = False,
 ) -> list[dict[str, Any]]:
     target = _normalized_text(phrase)
     if not target:
@@ -601,6 +619,11 @@ def _normalized_exact_phrase_matches(
     for index, word in enumerate(words):
         text = _normalized_text(word.get("text"))
         if not text:
+            continue
+        if skip_filler_words and all(char in _OPTIONAL_SPEECH_FILLERS for char in text):
+            # Interjections such as 啊 are usually absent from review text.
+            # They are skipped for locating only; a match can never start or
+            # end on one, so it only ever lies strictly inside the cut.
             continue
         word_start = len(haystack_parts)
         haystack_parts.extend(text)
@@ -633,7 +656,29 @@ def _normalized_exact_phrase_matches(
             )
             match_method = "exact_phrase"
             match_evidence: dict[str, Any] = {}
-            if _normalized_text(selected_text) == target and selected_text != phrase:
+            if skip_filler_words:
+                match_method = "filler_tolerant_phrase"
+                skipped = "".join(
+                    str(word.get("text") or "")
+                    for word in words[start_word_index : end_word_index + 1]
+                    if (normalized := _normalized_text(word.get("text")))
+                    and all(char in _OPTIONAL_SPEECH_FILLERS for char in normalized)
+                )
+                match_evidence = {
+                    "text_similarity": round(
+                        SequenceMatcher(
+                            a=target, b=_normalized_text(selected_text), autojunk=False
+                        ).ratio(),
+                        6,
+                    ),
+                    "keyword_coverage": 1.0,
+                    "matched_keyword_characters": len(target),
+                    "omitted_review_text": "",
+                    "extra_asr_text": skipped,
+                    "review_text": phrase,
+                    "asr_text": selected_text,
+                }
+            elif _normalized_text(selected_text) == target and selected_text != phrase:
                 # Keep the source text verbatim while making the controlled
                 # ASR spelling equivalence auditable in the alignment receipt.
                 match_method = "normalized_equivalent_phrase"
@@ -735,12 +780,28 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     optional_difference_characters = 0
     extra_asr_parts: list[str] = []
     safe_internal_insertions: list[str] = []
+    substitutions: list[str] = []
     for tag, target_start, target_end, candidate_start, candidate_end in matcher.get_opcodes():
         if tag == "equal":
             equal_characters += target_end - target_start
             continue
         if tag == "replace":
-            return None
+            if (
+                len(target) < _MIN_SUBSTITUTION_TARGET_CHARACTERS
+                or substitutions
+                or target_end - target_start != 1
+                or candidate_end - candidate_start != 1
+                or target_start == 0
+                or target_end == len(target)
+                or candidate_start == 0
+                or candidate_end == len(candidate)
+            ):
+                return None
+            substitutions.append(
+                f"{target[target_start:target_end]}->{candidate[candidate_start:candidate_end]}"
+            )
+            distance += 1
+            continue
         if tag == "delete":
             removed = target[target_start:target_end]
             omitted_review_parts.append(removed)
@@ -782,6 +843,9 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
             return None
     if distance == 0 or distance > maximum:
         return None
+    if substitutions and distance != 1:
+        # A substitution is accepted only as the sole difference.
+        return None
     if generic_target_omissions > maximum_generic_omissions:
         return None
     if edge_target_omissions > 1:
@@ -791,11 +855,13 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
     similarity = matcher.ratio()
     keyword_denominator = max(1, len(target) - optional_difference_characters)
     keyword_coverage = equal_characters / keyword_denominator
-    minimum_similarity = 0.85 if generic_target_omissions else 0.8
+    minimum_similarity = 0.85 if generic_target_omissions or substitutions else 0.8
     if similarity < minimum_similarity or keyword_coverage < 0.8:
         return None
     method = "conservative_fuzzy_phrase"
-    if edge_target_omissions:
+    if substitutions:
+        method = "time_anchored_character_substitution"
+    elif edge_target_omissions:
         method = "time_anchored_partial_phrase"
     elif safe_internal_insertions:
         method = "time_anchored_internal_insertion"
@@ -810,6 +876,7 @@ def _fuzzy_match_evidence(target: str, candidate: str) -> dict[str, Any] | None:
         "omitted_review_ranges": omitted_review_ranges,
         "extra_asr_text": "".join(extra_asr_parts),
         "match_method": method,
+        **({"asr_substitutions": substitutions} if substitutions else {}),
     }
 
 
@@ -953,6 +1020,15 @@ def _find_phrase_matches(
             return result
     if exact:
         return exact
+    filler_tolerant = _normalized_exact_phrase_matches(
+        words,
+        phrase,
+        anchor_start=anchor_start,
+        anchor_end=anchor_end,
+        skip_filler_words=True,
+    )
+    if filler_tolerant:
+        return filler_tolerant
     return _conservative_fuzzy_phrase_matches(
         words,
         phrase,
@@ -1161,6 +1237,53 @@ def _nearest_word(
     return min(
         candidates,
         key=lambda word: abs((float(word["start"]) + float(word["end"])) / 2.0 - anchor),
+    )
+
+
+def _padded_cut_window(
+    words: Sequence[Mapping[str, Any]],
+    start_index: int,
+    end_index: int,
+    start_value: float,
+    end_value: float,
+    source_duration_seconds: float,
+) -> tuple[float, float, float, float]:
+    """Widen an ASR word window into the adjacent silence only.
+
+    Returns ``(start, end, start_padding, end_padding)``.  The padding is a
+    bounded fraction of the gap to the neighbouring ASR word, so the window
+    never reaches a word outside the matched span.
+    """
+
+    start_padding = 0.0
+    end_padding = 0.0
+    previous_end: float | None = None
+    for word in reversed(words[:start_index]):
+        try:
+            previous_end = float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        break
+    gap = start_value - (previous_end if previous_end is not None else 0.0)
+    if gap > 0:
+        start_padding = min(_CUT_START_PADDING_SECONDS, gap * _CUT_BOUNDARY_GAP_FRACTION)
+    next_start: float | None = None
+    for word in words[end_index + 1 :]:
+        try:
+            next_start = float(word["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        break
+    gap = (next_start if next_start is not None else source_duration_seconds) - end_value
+    if gap > 0:
+        end_padding = min(_CUT_END_PADDING_SECONDS, gap * _CUT_BOUNDARY_GAP_FRACTION)
+    padded_start = max(0.0, start_value - start_padding)
+    padded_end = min(source_duration_seconds, end_value + end_padding)
+    return (
+        round(padded_start, 6),
+        round(padded_end, 6),
+        round(start_value - padded_start, 6),
+        round(padded_end - end_value, 6),
     )
 
 
@@ -1482,6 +1605,32 @@ def resolve_lite_audio_items(
                         anchor_end=rough_end,
                         allow_terminal_character_omission=True,
                     )
+                    if (
+                        first_matches
+                        and not last_matches
+                        and rough_start is not None
+                        and rough_end is not None
+                    ):
+                        # The tail of a long ellipsis range can lie beyond a
+                        # point review timestamp's narrow window.  Search
+                        # further ahead, but accept only one unambiguous tail
+                        # that follows the earliest head candidate.
+                        earliest_head = min(float(match["start"]) for match in first_matches)
+                        extended_tails = [
+                            match
+                            for match in _find_phrase_matches(
+                                words,
+                                anchor_parts[-1],
+                                anchor_start=rough_start,
+                                anchor_end=rough_end + _ELLIPSIS_TAIL_EXTENSION_SECONDS,
+                                allow_terminal_character_omission=True,
+                            )
+                            if float(match["start"]) >= earliest_head
+                        ]
+                        if len(extended_tails) == 1:
+                            last_matches = [
+                                {**extended_tails[0], "ellipsis_tail_extended_search": True}
+                            ]
                     ranges: list[dict[str, Any]] = []
                     for first in first_matches:
                         for last in last_matches:
@@ -1554,6 +1703,8 @@ def resolve_lite_audio_items(
             physical_matches = selected_matches or ([selected] if selected is not None else [])
             physical_matches = [dict(value) for value in physical_matches if value is not None]
             physical_windows: list[list[float]] = []
+            asr_word_windows: list[list[float]] = []
+            window_paddings: list[list[float]] = []
             matched_words: list[dict[str, Any]] = []
             generated_must_keep: list[str] = []
             generated_must_keep_windows: list[dict[str, Any]] = []
@@ -1568,16 +1719,32 @@ def resolve_lite_audio_items(
                 )
                 if end_value <= start_value:
                     continue
-                physical_windows.append([round(start_value, 6), round(end_value, 6)])
                 start_index = int(physical.get("word_start_index", 0))
                 end_index = int(physical.get("word_end_index", start_index))
+                asr_word_windows.append([round(start_value, 6), round(end_value, 6)])
+                padded_start, padded_end, start_padding, end_padding = _padded_cut_window(
+                    words,
+                    start_index,
+                    end_index,
+                    start_value,
+                    end_value,
+                    source_duration_seconds,
+                )
+                physical_windows.append([padded_start, padded_end])
+                window_paddings.append([start_padding, end_padding])
                 matched_words.extend(words[start_index : end_index + 1])
                 if not must_keep:
                     local_keep, local_keep_windows = _context_phrases(words, start_index, end_index)
                     generated_must_keep.extend(local_keep)
                     generated_must_keep_windows.extend(local_keep_windows)
             if physical_windows:
-                physical_windows.sort(key=lambda value: (value[0], value[1]))
+                ordered_windows = sorted(
+                    zip(physical_windows, asr_word_windows, window_paddings),
+                    key=lambda value: (value[0][0], value[0][1]),
+                )
+                physical_windows = [value[0] for value in ordered_windows]
+                asr_word_windows = [value[1] for value in ordered_windows]
+                window_paddings = [value[2] for value in ordered_windows]
                 matched_words = _dedupe_word_rows(matched_words)
                 if not must_keep:
                     if colored_span_mode:
@@ -1671,6 +1838,8 @@ def resolve_lite_audio_items(
                         "end": last_window[1],
                         "source_cut_windows": physical_windows,
                         "resolved_cut_windows": physical_windows,
+                        "asr_word_cut_windows": asr_word_windows,
+                        "cut_boundary_padding": window_paddings,
                         "resolved_time": first_window[0],
                         "review_label_time": (
                             round(review_label_time, 6) if review_label_time is not None else None
@@ -2142,8 +2311,22 @@ def apply_audio_plan_to_compiled_payloads(
                 "crossed_must_keep": False,
             },
         }
+        row_paddings = row.get("cut_boundary_padding") or []
+        row_word_windows = row.get("asr_word_cut_windows") or []
         for window_index, window in enumerate(row_windows, start=1):
             edit_evidence = deepcopy(evidence)
+            if window_index <= len(row_paddings) and window_index <= len(row_word_windows):
+                padding = [float(value) for value in row_paddings[window_index - 1]]
+                if any(value > 0 for value in padding):
+                    edit_evidence["boundary_refinement"].update(
+                        {
+                            "status": "anchor_gap",
+                            "asr_word_window": [
+                                float(value) for value in row_word_windows[window_index - 1]
+                            ],
+                            "padding_seconds": padding,
+                        }
+                    )
             edit_window = [round(float(window[0]), 6), round(float(window[1]), 6)]
             edit_alignment = deepcopy(dict(edit_evidence["asr_alignment"]))
             edit_alignment["matches"] = _alignment_matches_for_window(edit_alignment, edit_window)

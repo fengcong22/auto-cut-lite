@@ -412,4 +412,4 @@ def test_untimed_speech_requires_real_asr_and_reverse_failure_retains_label(
         assert processed["review_items"][0]["evidence"]["asr_alignment"][
             "authoritative_cut_boundary"
         ]
-        assert [i["start"] for i in processed["review_items"]] == [1, 2.99]
+        assert [i["start"] for i in processed["review_items"]] == [0.82, 2.82]  # ASR start 1.0 widened into silence; next label chains +2 s

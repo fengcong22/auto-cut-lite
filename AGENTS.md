@@ -156,6 +156,14 @@ When returning a revision result, report:
   inter-word silence longer than 1.5 seconds breaks continuity. If the review wording contains a
   character absent from ASR, cut only the remaining recognized ASR span and record the omitted
   review character. The review time remains a search hint and never becomes the cut boundary.
+- Lite recall extensions, still requiring a unique winner: pure interjection ASR words may be
+  skipped strictly inside a match; the connectors `这个`/`然后`/`那个` may be internal ASR
+  insertions; one internal 1:1 character substitution is allowed for phrases of at least 8
+  normalized characters when it is the only difference; an ellipsis tail outside the rough
+  window may be searched 30 seconds further when exactly one tail follows the head.
+- Executable cut windows extend only into adjacent silence (at most 45% of the gap to the
+  neighbouring ASR word, capped at 0.20 s before and 0.25 s after) and keep the raw ASR edges as
+  auditable `anchor_gap` boundary-refinement evidence.
 - Validate the output by confirming the ASR boundary, source-preserving split ranges, and
   `must_keep` context. Lite does not require the requested phrase to be absent because no source
   media is physically removed.
