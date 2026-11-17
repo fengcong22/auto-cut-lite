@@ -51,6 +51,7 @@ from utils.review_audio_precision import (
     extract_alignment_wav,
     ffmpeg_identity,
     render_source_aligned_candidate,
+    WavEnergyProbe,
     resolve_lite_audio_items,
     reverse_asr_cache_identity,
     run_resumable_volc_asr,
@@ -186,6 +187,37 @@ class LiteVisualAssetError(ValueError):
             }
         return payload
 
+
+
+def _ai_review_identity() -> dict[str, Any]:
+    from utils.ai_review_interpreter import identity_from_environment
+
+    from audio_sound.config import load_env_file
+    from audio_sound.volc_asr import default_volc_env_path
+
+    return identity_from_environment(load_env_file(default_volc_env_path()))
+
+
+def _alignment_energy_probe(path: Path) -> WavEnergyProbe | None:
+    """Energy probe over the alignment WAV, or None when it cannot be read."""
+
+    try:
+        return WavEnergyProbe(path)
+    except (OSError, EOFError, ValueError, wave.Error):
+        return None
+
+
+def _ai_review_resolver(cache_path: Path):
+    """Optional Claude-assisted locating; ``None`` unless explicitly enabled."""
+
+    from utils.ai_review_interpreter import resolver_from_environment
+
+    from audio_sound.config import load_env_file
+    from audio_sound.volc_asr import default_volc_env_path
+
+    return resolver_from_environment(
+        load_env_file(default_volc_env_path()), cache_path=cache_path
+    )
 
 def _sanitize_manifest_failure_details(value: Any) -> Any:
     """Keep manifest terminal errors bounded and free of local/provider data."""
@@ -1038,6 +1070,7 @@ def _phase_paths(job_root: Path) -> dict[str, Path]:
         "initial_candidate_wav": workspace / "materials" / "candidate_source_aligned_initial.wav",
         "classified_dir": workspace / "classified",
         "cut_plan": workspace / "classified" / "audio_cut_plan.json",
+        "ai_review_cache": workspace / "evidence" / "ai_review_proposals.json",
         "acceptance_plan": workspace / "classified" / "acceptance_plan.json",
         "processed_dir": workspace / "processed",
         "processed_request": workspace / "processed" / "revision_request.json",
@@ -4185,6 +4218,12 @@ def run_review_document(
                     ledger.get("review_items") or [],
                     _read_json_object(paths["source_asr"], "source ASR"),
                     source_duration_seconds=float(materials["source_duration_seconds"]),
+                    ai_resolver=(
+                        None if mock_media else _ai_review_resolver(paths["ai_review_cache"])
+                    ),
+                    acoustic_probe=(
+                        None if mock_media else _alignment_energy_probe(paths["alignment_wav"])
+                    ),
                 )
             elif source_index.get("asr_required"):
                 cut_plan = _source_asr_unavailable_cut_plan(
@@ -4805,6 +4844,11 @@ def run_review_document(
                     "context_before": float(context_before),
                     "context_after": float(context_after),
                     "options": input_options,
+                    **(
+                        {"ai_review": _ai_review_identity()}
+                        if name == "classification" and not mock_media
+                        else {}
+                    ),
                 }
             )
 

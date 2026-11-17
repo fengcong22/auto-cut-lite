@@ -92,6 +92,11 @@ If the review document explicitly says to delete blue or red text, inspect the d
     either edge (`time_anchored_character_substitution`, recorded in `asr_substitutions`).
   - For an ellipsis range whose tail anchor is outside the rough review window, the tail is
     searched up to 30 seconds further and must be the only candidate after the head.
+- Optional Claude-assisted locating (off unless `AUTO_CUT_AI_REVIEW=1` plus `anthropic` and
+  credentials): for an executable spoken deletion the rules left unresolved, Claude proposes
+  ASR word indexes; `_verify_ai_proposal` accepts them only when the span is contiguous, near
+  the review time, and agrees with the review text (or lies inside the review range for a
+  time-range-only comment). Accepted rows use `match_method=ai_proposed_asr_verified`.
 - Executable cut windows are widened into adjacent silence only: by at most 45% of the gap to the
   neighbouring ASR word, capped at 0.20 s before and 0.25 s after. The raw ASR edges are kept in
   `asr_word_cut_windows` and `boundary_refinement.asr_word_window` (status `anchor_gap`).

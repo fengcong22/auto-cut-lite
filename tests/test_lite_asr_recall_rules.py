@@ -4,8 +4,12 @@ Each positive case mirrors a real spoken deletion that the v9 planner left
 label-only; each negative case pins the guard that keeps the rule safe.
 """
 
+import math
 import sys
+import tempfile
 import unittest
+import wave
+from array import array
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +18,11 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from utils.lite_revision import _authoritative_window_matches_asr  # noqa: E402
-from utils.review_audio_precision import resolve_lite_audio_items  # noqa: E402
+from utils.review_audio_precision import (  # noqa: E402
+    WavEnergyProbe,
+    _acoustic_edge_extension,
+    resolve_lite_audio_items,
+)
 
 
 def _source_asr(words):
@@ -227,6 +235,106 @@ class GapPaddingTests(unittest.TestCase):
                 10.4,
                 {"status": "asr_character_edge", "padding_seconds": [0.2, 0.09]},
             )
+        )
+
+
+
+def _tone_wav(path, bursts, sample_rate=16000, seconds=4.0):
+    """Mono PCM16 WAV: ``bursts`` of (start, end) hold a tone, the rest silence."""
+
+    count = int(seconds * sample_rate)
+    samples = array("h", [0]) * count
+    for start, end in bursts:
+        first = int(start * sample_rate)
+        last = min(count, int(end * sample_rate))
+        for index in range(first, last):
+            samples[index] = int(12000 * math.sin(2 * math.pi * 220 * index / sample_rate))
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(samples.tobytes())
+
+
+class AcousticEdgeExtensionTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.wav_path = Path(self.temporary.name) / "alignment.wav"
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def test_trailing_filler_the_asr_missed_extends_the_cut(self):
+        # "俄" ends at 1.0; an unrecognized "啊" sounds until 1.5, then silence.
+        _tone_wav(self.wav_path, [(0.4, 1.0), (1.06, 1.5)])
+        words = [
+            {"text": "全", "start": 0.4, "end": 0.7},
+            {"text": "俄", "start": 0.7, "end": 1.0},
+            {"text": "在", "start": 2.6, "end": 2.9},
+        ]
+        start, end, start_ext, end_ext = _acoustic_edge_extension(
+            WavEnergyProbe(self.wav_path), words, 0, 1, 0.4, 1.0, "全俄啊"
+        )
+        self.assertEqual(start, 0.4)
+        self.assertEqual(start_ext, 0.0)
+        self.assertGreater(end, 1.4)
+        self.assertLess(end, 1.6)
+        self.assertAlmostEqual(end_ext, end - 1.0, places=3)
+
+    def test_extension_stops_before_the_next_word(self):
+        _tone_wav(self.wav_path, [(0.4, 2.4)])
+        words = [
+            {"text": "全", "start": 0.4, "end": 0.7},
+            {"text": "俄", "start": 0.7, "end": 1.0},
+            {"text": "在", "start": 1.2, "end": 1.5},
+        ]
+        _, end, _, _ = _acoustic_edge_extension(
+            WavEnergyProbe(self.wav_path), words, 0, 1, 0.4, 1.0, "全俄啊"
+        )
+        self.assertLessEqual(end, 1.2 - 0.08 + 1e-6)
+
+    def test_no_extension_without_a_named_edge_filler(self):
+        _tone_wav(self.wav_path, [(0.4, 1.5)])
+        words = [
+            {"text": "全", "start": 0.4, "end": 0.7},
+            {"text": "俄", "start": 0.7, "end": 1.0},
+            {"text": "在", "start": 2.6, "end": 2.9},
+        ]
+        self.assertEqual(
+            _acoustic_edge_extension(
+                WavEnergyProbe(self.wav_path), words, 0, 1, 0.4, 1.0, "全俄"
+            ),
+            (0.4, 1.0, 0.0, 0.0),
+        )
+
+    def test_no_extension_without_a_probe(self):
+        words = [{"text": "全", "start": 0.4, "end": 1.0}]
+        self.assertEqual(
+            _acoustic_edge_extension(None, words, 0, 0, 0.4, 1.0, "全啊"),
+            (0.4, 1.0, 0.0, 0.0),
+        )
+
+    def test_validator_accepts_recorded_acoustic_extension(self):
+        refinement = {
+            "status": "acoustic_gap_refined",
+            "acoustic_extension_seconds": [0.0, 0.6],
+            "padding_seconds": [0.0, 0.09],
+        }
+        self.assertTrue(
+            _authoritative_window_matches_asr(10.0, 10.69, 10.0, 10.0, refinement)
+        )
+        over_cap = {
+            "status": "acoustic_gap_refined",
+            "acoustic_extension_seconds": [0.0, 2.0],
+            "padding_seconds": [0.0, 0.0],
+        }
+        self.assertFalse(_authoritative_window_matches_asr(10.0, 12.0, 10.0, 10.0, over_cap))
+        missing_record = {
+            "status": "acoustic_gap_refined",
+            "padding_seconds": [0.0, 0.0],
+        }
+        self.assertFalse(
+            _authoritative_window_matches_asr(10.0, 10.6, 10.0, 10.0, missing_record)
         )
 
 

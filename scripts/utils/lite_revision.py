@@ -728,6 +728,32 @@ def _positive_timing_windows(value: Any) -> Optional[List[Tuple[float, float]]]:
 _ASR_WINDOW_TOLERANCE_SECONDS = 0.05
 _MAX_ANCHOR_GAP_START_PADDING_SECONDS = 0.20
 _MAX_ANCHOR_GAP_END_PADDING_SECONDS = 0.25
+# Mirrors review_audio_precision's acoustic filler-edge extension cap.
+_MAX_ACOUSTIC_EDGE_EXTENSION_SECONDS = 1.5
+
+
+
+def _acoustically_extended_asr_window(
+    asr_start: float,
+    asr_end: float,
+    extension: Any,
+) -> Tuple[Optional[float], Optional[float]]:
+    """ASR word window widened by a recorded, capped filler-edge extension."""
+
+    if not isinstance(extension, (list, tuple)) or len(extension) != 2:
+        return None, None
+    try:
+        start_extension, end_extension = float(extension[0]), float(extension[1])
+    except (TypeError, ValueError):
+        return None, None
+    cap = _MAX_ACOUSTIC_EDGE_EXTENSION_SECONDS + 1e-6
+    if not (
+        0.0 <= start_extension <= cap
+        and 0.0 <= end_extension <= cap
+        and start_extension + end_extension > 0.0
+    ):
+        return None, None
+    return asr_start - start_extension, asr_end + end_extension
 
 
 def _authoritative_window_matches_asr(
@@ -747,7 +773,14 @@ def _authoritative_window_matches_asr(
         return True
     if not isinstance(refinement, dict):
         return False
-    if str(refinement.get("status") or "").strip().casefold() != "anchor_gap":
+    refinement_status = str(refinement.get("status") or "").strip().casefold()
+    if refinement_status == "acoustic_gap_refined":
+        asr_start, asr_end = _acoustically_extended_asr_window(
+            asr_start, asr_end, refinement.get("acoustic_extension_seconds")
+        )
+        if asr_start is None or asr_end is None:
+            return False
+    elif refinement_status != "anchor_gap":
         return False
     padding = refinement.get("padding_seconds")
     if not isinstance(padding, (list, tuple)) or len(padding) != 2:

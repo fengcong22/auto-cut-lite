@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+from array import array
 import shutil
 import subprocess
 import time
@@ -17,7 +18,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from utils.revision_models import (
     lite_pause_change_is_label_only,
@@ -38,7 +39,7 @@ from audio_sound.volc_asr import (
 )
 
 ALIGNMENT_RECIPE_VERSION = "lite-alignment-pcm16-v1"
-CUT_PLANNER_VERSION = "lite-asr-cut-planner-v10-gap-padded-recall"
+CUT_PLANNER_VERSION = "lite-asr-cut-planner-v11-acoustic-filler-edges"
 # This WAV is a source-time-preserving probe for reverse ASR only.  It is never
 # an editable replacement or a delivery asset, even though the reverse-ASR
 # report needs a path and hash for reproducibility.
@@ -1466,13 +1467,348 @@ def _alignment_receipt(
     return receipt
 
 
+_ACOUSTIC_FRAME_SECONDS = 0.02
+_ACOUSTIC_MAX_EXTENSION_SECONDS = 1.5
+_ACOUSTIC_NEIGHBOUR_MARGIN_SECONDS = 0.08
+_ACOUSTIC_ONSET_SEARCH_SECONDS = 0.3
+_ACOUSTIC_MIN_VOICED_DBFS = -42.0
+_ACOUSTIC_FLOOR_RATIO = 4.0
+_ACOUSTIC_HANGOVER_FRAMES = 3
+_ACOUSTIC_BRIDGE_SILENCE_SECONDS = 0.4
+
+
+class WavEnergyProbe:
+    """Frame RMS of a mono PCM16 alignment WAV, read lazily per query window."""
+
+    def __init__(self, path: str | os.PathLike[str]) -> None:
+        self.path = Path(path)
+        with wave.open(str(self.path), "rb") as handle:
+            if handle.getsampwidth() != 2:
+                raise ValueError("alignment WAV must be 16-bit PCM")
+            self.channels = handle.getnchannels()
+            self.sample_rate = handle.getframerate()
+            self.frame_count = handle.getnframes()
+
+    def _rms_frames(self, start: float, end: float) -> list[tuple[float, float]]:
+        start = max(0.0, start)
+        end = min(self.frame_count / self.sample_rate, end)
+        if end <= start:
+            return []
+        hop = max(1, int(round(_ACOUSTIC_FRAME_SECONDS * self.sample_rate)))
+        first = int(start * self.sample_rate)
+        count = int(end * self.sample_rate) - first
+        with wave.open(str(self.path), "rb") as handle:
+            handle.setpos(first)
+            raw = handle.readframes(count)
+        samples = array("h")
+        samples.frombytes(raw[: len(raw) - len(raw) % 2])
+        if self.channels > 1:
+            samples = array("h", samples[:: self.channels])
+        frames: list[tuple[float, float]] = []
+        for offset in range(0, len(samples) - hop + 1, hop):
+            chunk = samples[offset : offset + hop]
+            energy = math.sqrt(sum(value * value for value in chunk) / len(chunk)) / 32768.0
+            frames.append(((first + offset) / self.sample_rate, energy))
+        return frames
+
+    @staticmethod
+    def _threshold(frames: Sequence[tuple[float, float]]) -> float:
+        energies = sorted(energy for _, energy in frames)
+        floor = energies[max(0, len(energies) // 5 - 1)] if energies else 0.0
+        return max(10 ** (_ACOUSTIC_MIN_VOICED_DBFS / 20.0), floor * _ACOUSTIC_FLOOR_RATIO)
+
+    def voiced_end_after(self, word_end: float, limit: float) -> float | None:
+        """End of a voiced run starting right after ``word_end``, before ``limit``."""
+
+        if limit - word_end < _ACOUSTIC_FRAME_SECONDS * 2:
+            return None
+        frames = self._rms_frames(word_end - 1.0, limit + 0.5)
+        if not frames:
+            return None
+        threshold = self._threshold(frames)
+        window = [(time, energy) for time, energy in frames if word_end <= time < limit]
+        onset = next(
+            (
+                index
+                for index, (time, energy) in enumerate(window)
+                if energy >= threshold and time <= word_end + _ACOUSTIC_ONSET_SEARCH_SECONDS
+            ),
+            None,
+        )
+        if onset is None:
+            return None
+        quiet = 0
+        last_voiced = window[onset][0]
+        quiet_since: float | None = None
+        for time, energy in window[onset:]:
+            if energy >= threshold:
+                last_voiced = time
+                quiet = 0
+                quiet_since = None
+            else:
+                quiet += 1
+                quiet_since = time if quiet_since is None else quiet_since
+                if (
+                    quiet >= _ACOUSTIC_HANGOVER_FRAMES
+                    and time - quiet_since >= _ACOUSTIC_BRIDGE_SILENCE_SECONDS
+                ):
+                    break
+        return min(limit, last_voiced + _ACOUSTIC_FRAME_SECONDS)
+
+    def voiced_start_before(self, word_start: float, limit: float) -> float | None:
+        """Start of a voiced run ending right before ``word_start``, after ``limit``."""
+
+        if word_start - limit < _ACOUSTIC_FRAME_SECONDS * 2:
+            return None
+        frames = self._rms_frames(limit - 0.5, word_start + 1.0)
+        if not frames:
+            return None
+        threshold = self._threshold(frames)
+        window = [(time, energy) for time, energy in frames if limit <= time < word_start]
+        window.reverse()
+        onset = next(
+            (
+                index
+                for index, (time, energy) in enumerate(window)
+                if energy >= threshold
+                and time >= word_start - _ACOUSTIC_ONSET_SEARCH_SECONDS - _ACOUSTIC_FRAME_SECONDS
+            ),
+            None,
+        )
+        if onset is None:
+            return None
+        quiet = 0
+        first_voiced = window[onset][0]
+        quiet_since: float | None = None
+        for time, energy in window[onset:]:
+            if energy >= threshold:
+                first_voiced = time
+                quiet = 0
+                quiet_since = None
+            else:
+                quiet += 1
+                quiet_since = time if quiet_since is None else quiet_since
+                if (
+                    quiet >= _ACOUSTIC_HANGOVER_FRAMES
+                    and time - quiet_since >= _ACOUSTIC_BRIDGE_SILENCE_SECONDS
+                ):
+                    break
+        return max(limit, first_voiced)
+
+
+def _unrecognized_edge_fillers(review_phrase: str, span_text: str) -> tuple[bool, bool]:
+    """Whether the review names a leading/trailing filler the ASR span lacks."""
+
+    if not review_phrase or not span_text:
+        return False, False
+    lead = review_phrase[0] in _OPTIONAL_SPEECH_FILLERS and not span_text.startswith(
+        review_phrase[0]
+    )
+    trail = review_phrase[-1] in _OPTIONAL_SPEECH_FILLERS and not span_text.endswith(
+        review_phrase[-1]
+    )
+    return lead, trail
+
+
+def _acoustic_edge_extension(
+    probe: Any,
+    words: Sequence[Mapping[str, Any]],
+    start_index: int,
+    end_index: int,
+    start_value: float,
+    end_value: float,
+    review_phrase: str,
+) -> tuple[float, float, float, float]:
+    """Extend an edge over an audible filler that the review names but ASR missed."""
+
+    if probe is None:
+        return start_value, end_value, 0.0, 0.0
+    span_text = "".join(
+        _normalized_text(word.get("text")) for word in words[start_index : end_index + 1]
+    )
+    lead, trail = _unrecognized_edge_fillers(review_phrase, span_text)
+    new_start, new_end = start_value, end_value
+    if trail:
+        next_start = next(
+            (float(word["start"]) for word in words[end_index + 1 :] if "start" in word), None
+        )
+        limit = end_value + _ACOUSTIC_MAX_EXTENSION_SECONDS
+        if next_start is not None:
+            limit = min(limit, next_start - _ACOUSTIC_NEIGHBOUR_MARGIN_SECONDS)
+        voiced_end = probe.voiced_end_after(end_value, limit)
+        if voiced_end is not None and voiced_end > end_value + 0.05:
+            new_end = voiced_end
+    if lead:
+        previous_end = next(
+            (float(word["end"]) for word in reversed(words[:start_index]) if "end" in word), None
+        )
+        limit = start_value - _ACOUSTIC_MAX_EXTENSION_SECONDS
+        if previous_end is not None:
+            limit = max(limit, previous_end + _ACOUSTIC_NEIGHBOUR_MARGIN_SECONDS)
+        voiced_start = probe.voiced_start_before(start_value, limit)
+        if voiced_start is not None and voiced_start < start_value - 0.05:
+            new_start = voiced_start
+    return (
+        round(new_start, 6),
+        round(new_end, 6),
+        round(start_value - new_start, 6),
+        round(new_end - end_value, 6),
+    )
+
+
+_AI_MIN_SINGLE_PHRASE_SIMILARITY = 0.75
+_AI_MIN_ANCHOR_SIMILARITY = 0.7
+_AI_TAIL_EXTENSION_SECONDS = 30.0
+_AI_RANGE_TOLERANCE_SECONDS = 1.0
+_AI_CONTEXT_BEFORE_SECONDS = 20.0
+_AI_CONTEXT_AFTER_SECONDS = 40.0
+
+
+def _ai_context_window(
+    rough_start: float | None, rough_end: float | None
+) -> tuple[float, float] | None:
+    if rough_start is None:
+        return None
+    end = rough_end if rough_end is not None else rough_start
+    return (
+        max(0.0, float(rough_start) - _AI_CONTEXT_BEFORE_SECONDS),
+        float(end) + _AI_CONTEXT_AFTER_SECONDS,
+    )
+
+
+_INSTRUCTION_ONLY_PHRASES = frozenset({"删除", "删掉", "去掉", "剪掉", "删", "去除"})
+
+
+def _effective_review_phrase(delete_phrase: str) -> str:
+    """Normalized spoken target; an instruction word alone names no speech."""
+
+    normalized = _normalized_text(delete_phrase)
+    return "" if normalized in _INSTRUCTION_ONLY_PHRASES else normalized
+
+
+def _is_filler_word(word: Mapping[str, Any]) -> bool:
+    text = _normalized_text(word.get("text"))
+    return bool(text) and all(char in _OPTIONAL_SPEECH_FILLERS for char in text)
+
+
+def _verify_ai_proposal(
+    words: Sequence[Mapping[str, Any]],
+    proposal: Mapping[str, Any],
+    *,
+    item: Mapping[str, Any],
+    delete_phrase: str,
+    rough_start: float | None,
+    rough_end: float | None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Deterministically accept or reject a model-proposed ASR word span."""
+
+    if str(proposal.get("action") or "") != "delete_speech":
+        return None, "proposal_not_applicable"
+    if str(proposal.get("confidence") or "") not in {"high", "medium"}:
+        return None, "proposal_low_confidence"
+    try:
+        start_index = int(proposal["word_start_index"])
+        end_index = int(proposal["word_end_index"])
+    except (KeyError, TypeError, ValueError):
+        return None, "proposal_invalid_indexes"
+    if not 0 <= start_index <= end_index < len(words):
+        return None, "proposal_invalid_indexes"
+    review_phrase = _effective_review_phrase(delete_phrase)
+    # A filler at either edge is kept only when the review text names it.
+    while (
+        start_index < end_index
+        and _is_filler_word(words[start_index])
+        and not review_phrase.startswith(_normalized_text(words[start_index].get("text")))
+    ):
+        start_index += 1
+    while (
+        end_index > start_index
+        and _is_filler_word(words[end_index])
+        and not review_phrase.endswith(_normalized_text(words[end_index].get("text")))
+    ):
+        end_index -= 1
+    if start_index == end_index and _is_filler_word(words[start_index]) and not review_phrase:
+        return None, "proposal_filler_only"
+    if not _is_contiguous_word_span(words, start_index, end_index):
+        return None, "proposal_not_contiguous"
+    if rough_start is None:
+        return None, "proposal_without_review_time"
+    span_start = float(words[start_index]["start"])
+    span_end = float(words[end_index]["end"])
+    anchor_end = float(rough_end if rough_end is not None else rough_start)
+    span_text = "".join(
+        _normalized_text(word.get("text")) for word in words[start_index : end_index + 1]
+    )
+    evidence: dict[str, Any] = {}
+    if review_phrase:
+        if span_start < float(rough_start) - _ASR_SEARCH_PADDING_SECONDS - 1e-6:
+            return None, "proposal_outside_review_window"
+        if span_end > anchor_end + _AI_TAIL_EXTENSION_SECONDS + 1e-6:
+            return None, "proposal_outside_review_window"
+        parts = [
+            _normalized_text(part) for part in _ELLIPSIS.split(delete_phrase) if part.strip()
+        ]
+        parts = [part for part in parts if part]
+        if len(parts) >= 2:
+            head, tail = parts[0], parts[-1]
+            if len(span_text) < len(head) + len(tail):
+                return None, "proposal_text_mismatch"
+            head_similarity = SequenceMatcher(
+                a=head, b=span_text[: len(head)], autojunk=False
+            ).ratio()
+            tail_similarity = SequenceMatcher(
+                a=tail, b=span_text[-len(tail) :], autojunk=False
+            ).ratio()
+            similarity = min(head_similarity, tail_similarity)
+            if similarity < _AI_MIN_ANCHOR_SIMILARITY:
+                return None, "proposal_text_mismatch"
+        else:
+            similarity = SequenceMatcher(a=review_phrase, b=span_text, autojunk=False).ratio()
+            length_ratio = len(span_text) / max(1, len(review_phrase))
+            if similarity < _AI_MIN_SINGLE_PHRASE_SIMILARITY or not 0.6 <= length_ratio <= 1.6:
+                return None, "proposal_text_mismatch"
+        evidence["text_similarity"] = round(similarity, 6)
+        evidence["keyword_coverage"] = round(similarity, 6)
+    else:
+        range_start, range_end = _review_text_window(item.get("source_text"))
+        if range_start is None or range_end is None:
+            return None, "proposal_without_review_text_or_range"
+        if (
+            span_start < range_start - _AI_RANGE_TOLERANCE_SECONDS - 1e-6
+            or span_end > range_end + _AI_RANGE_TOLERANCE_SECONDS + 1e-6
+        ):
+            return None, "proposal_outside_review_range"
+        evidence["text_similarity"] = 1.0
+        evidence["keyword_coverage"] = 1.0
+        evidence["review_range"] = [range_start, range_end]
+    evidence["ai_verified_span_text"] = span_text
+    payload = _match_payload(
+        words,
+        delete_phrase if review_phrase else span_text,
+        start_index,
+        end_index,
+        anchor_start=rough_start,
+        anchor_end=rough_end,
+        match_method="ai_proposed_asr_verified",
+        match_evidence=evidence,
+    )
+    return payload, "ai_proposed_asr_verified"
+
+
 def resolve_lite_audio_items(
     review_items: Sequence[Mapping[str, Any]],
     source_asr: Mapping[str, Any],
     *,
     source_duration_seconds: float,
+    ai_resolver: Callable[..., Mapping[str, Any]] | None = None,
+    acoustic_probe: Any = None,
 ) -> dict[str, Any]:
-    """Resolve executable speech cuts and fail closed to ASR-positioned labels."""
+    """Resolve executable speech cuts and fail closed to ASR-positioned labels.
+
+    ``ai_resolver`` optionally proposes ASR word indexes for spoken deletions
+    that deterministic matching left unresolved.  Every proposal is re-verified
+    by ``_verify_ai_proposal``; the model never supplies a time.
+    """
 
     _reject_diagnostic_source_asr(source_asr)
     raw_words = source_asr.get("words")
@@ -1688,6 +2024,52 @@ def resolve_lite_audio_items(
                     )
                     selected, match_method = _unique_nearest_match(matches, anchor)
 
+        ai_receipt: dict[str, Any] | None = None
+        if (
+            ai_resolver is not None
+            and selected is None
+            and not selected_matches
+            and executable_kind
+            and requested_execute
+            and not unresolved_timebase
+            and not colored_span_mode
+            and not pause_label_only
+        ):
+            window = _ai_context_window(rough_start, rough_end)
+            if window is not None:
+                proposal = dict(ai_resolver(item, words, window) or {})
+                ai_selected, ai_reason = _verify_ai_proposal(
+                    words,
+                    proposal,
+                    item=item,
+                    delete_phrase=delete_phrase,
+                    rough_start=rough_start,
+                    rough_end=rough_end,
+                )
+                ai_receipt = {
+                    "status": "accepted" if ai_selected is not None else "rejected",
+                    "reason": ai_reason,
+                    "model": str(proposal.get("model") or ""),
+                    "confidence": str(proposal.get("confidence") or ""),
+                    "rationale": str(proposal.get("rationale") or ""),
+                    "proposal_status": str(proposal.get("status") or ""),
+                    "cache_hit": bool(proposal.get("cache_hit")),
+                    "proposed_word_indexes": [
+                        proposal.get("word_start_index"),
+                        proposal.get("word_end_index"),
+                    ],
+                }
+                if ai_selected is not None:
+                    selected = ai_selected
+                    match_method = "ai_proposed_asr_verified"
+                    if not _effective_review_phrase(delete_phrase):
+                        # Time-range-only comments name no words; the verified
+                        # ASR span is the internal delete target.
+                        delete_phrase = str(ai_selected.get("text") or "")
+                        delete_phrases = [delete_phrase]
+                else:
+                    match_method = match_method or f"ai_{ai_reason}"
+
         explicit_evidence = (
             dict(item.get("evidence") or {}) if isinstance(item.get("evidence"), Mapping) else {}
         )
@@ -1705,6 +2087,7 @@ def resolve_lite_audio_items(
             physical_windows: list[list[float]] = []
             asr_word_windows: list[list[float]] = []
             window_paddings: list[list[float]] = []
+            window_extensions: list[list[float]] = []
             matched_words: list[dict[str, Any]] = []
             generated_must_keep: list[str] = []
             generated_must_keep_windows: list[dict[str, Any]] = []
@@ -1722,6 +2105,23 @@ def resolve_lite_audio_items(
                 start_index = int(physical.get("word_start_index", 0))
                 end_index = int(physical.get("word_end_index", start_index))
                 asr_word_windows.append([round(start_value, 6), round(end_value, 6)])
+                (
+                    start_value,
+                    end_value,
+                    start_extension,
+                    end_extension,
+                ) = _acoustic_edge_extension(
+                    acoustic_probe,
+                    words,
+                    start_index,
+                    end_index,
+                    start_value,
+                    end_value,
+                    _effective_review_phrase(
+                        str(physical.get("span_phrase") or physical.get("phrase") or delete_phrase)
+                    ),
+                )
+                window_extensions.append([start_extension, end_extension])
                 padded_start, padded_end, start_padding, end_padding = _padded_cut_window(
                     words,
                     start_index,
@@ -1739,12 +2139,13 @@ def resolve_lite_audio_items(
                     generated_must_keep_windows.extend(local_keep_windows)
             if physical_windows:
                 ordered_windows = sorted(
-                    zip(physical_windows, asr_word_windows, window_paddings),
+                    zip(physical_windows, asr_word_windows, window_paddings, window_extensions),
                     key=lambda value: (value[0][0], value[0][1]),
                 )
                 physical_windows = [value[0] for value in ordered_windows]
                 asr_word_windows = [value[1] for value in ordered_windows]
                 window_paddings = [value[2] for value in ordered_windows]
+                window_extensions = [value[3] for value in ordered_windows]
                 matched_words = _dedupe_word_rows(matched_words)
                 if not must_keep:
                     if colored_span_mode:
@@ -1807,6 +2208,8 @@ def resolve_lite_audio_items(
                         6,
                     ),
                 }
+                if ai_receipt is not None:
+                    match_evidence["ai_proposal"] = ai_receipt
                 if colored_span_mode:
                     match_evidence.update(
                         {
@@ -1840,6 +2243,7 @@ def resolve_lite_audio_items(
                         "resolved_cut_windows": physical_windows,
                         "asr_word_cut_windows": asr_word_windows,
                         "cut_boundary_padding": window_paddings,
+                        "acoustic_edge_extension": window_extensions,
                         "resolved_time": first_window[0],
                         "review_label_time": (
                             round(review_label_time, 6) if review_label_time is not None else None
@@ -1909,6 +2313,7 @@ def resolve_lite_audio_items(
                 "matches": label_matches,
                 "timing_source": timing_source,
                 "asr_alignment": alignment,
+                **({"ai_proposal": ai_receipt} if ai_receipt is not None else {}),
             }
         )
 
@@ -2313,11 +2718,28 @@ def apply_audio_plan_to_compiled_payloads(
         }
         row_paddings = row.get("cut_boundary_padding") or []
         row_word_windows = row.get("asr_word_cut_windows") or []
+        row_extensions = row.get("acoustic_edge_extension") or []
         for window_index, window in enumerate(row_windows, start=1):
             edit_evidence = deepcopy(evidence)
             if window_index <= len(row_paddings) and window_index <= len(row_word_windows):
                 padding = [float(value) for value in row_paddings[window_index - 1]]
-                if any(value > 0 for value in padding):
+                extension = (
+                    [float(value) for value in row_extensions[window_index - 1]]
+                    if window_index <= len(row_extensions)
+                    else [0.0, 0.0]
+                )
+                if any(value > 0 for value in extension):
+                    edit_evidence["boundary_refinement"].update(
+                        {
+                            "status": "acoustic_gap_refined",
+                            "asr_word_window": [
+                                float(value) for value in row_word_windows[window_index - 1]
+                            ],
+                            "acoustic_extension_seconds": extension,
+                            "padding_seconds": padding,
+                        }
+                    )
+                elif any(value > 0 for value in padding):
                     edit_evidence["boundary_refinement"].update(
                         {
                             "status": "anchor_gap",

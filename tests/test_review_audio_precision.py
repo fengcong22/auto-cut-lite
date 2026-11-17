@@ -1077,7 +1077,7 @@ class ReviewAudioPrecisionTests(unittest.TestCase):
         row = cut_plan["rows"][0]
         self.assertEqual(
             cut_plan["planner_version"],
-            "lite-asr-cut-planner-v10-gap-padded-recall",
+            "lite-asr-cut-planner-v11-acoustic-filler-edges",
         )
         self.assertEqual(
             row["asr_word_cut_windows"],
